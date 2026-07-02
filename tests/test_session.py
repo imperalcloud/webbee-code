@@ -1,6 +1,6 @@
 import os
 import pytest
-from webbee.session import handle_tool_request, build_coding_context
+from webbee.session import handle_tool_request, handle_confirm_request, build_coding_context
 from webbee.tools import LocalToolExecutor
 from webbee.consent import ConsentGate
 
@@ -56,3 +56,31 @@ def test_build_coding_context_keys(tmp_path):
     assert ctx["cwd"] == os.path.realpath(str(tmp_path))
     assert "f.py" in ctx["tree"]
     assert "git" in ctx  # "" for a non-git dir is fine
+
+
+def test_confirm_autopilot_auto_approves():
+    out = handle_confirm_request(
+        {"type": "confirm_request", "req_id": "c1", "app_id": "notes",
+         "tool": "delete_note", "args": {}}, prompt=lambda *a: False, mode="autopilot")
+    assert out == {"req_id": "c1", "result": {"approved": True}}
+
+
+def test_confirm_default_prompts_and_declines():
+    out = handle_confirm_request(
+        {"req_id": "c2", "app_id": "notes", "tool": "delete_note", "args": {}},
+        prompt=lambda *a: False, mode="default")
+    assert out["result"]["approved"] is False
+
+
+def test_confirm_default_prompts_and_approves():
+    out = handle_confirm_request(
+        {"req_id": "c3", "app_id": "notes", "tool": "create_note", "args": {"t": "x"}},
+        prompt=lambda *a: True, mode="default")
+    assert out["result"]["approved"] is True
+
+
+def test_confirm_plan_disables_writes():
+    out = handle_confirm_request(
+        {"req_id": "c4", "app_id": "notes", "tool": "create_note", "args": {}},
+        prompt=lambda *a: True, mode="plan")
+    assert out["result"]["approved"] is False

@@ -21,6 +21,23 @@ def handle_tool_request(frame: dict, executor, gate, prompt) -> dict:
     return {"req_id": req_id, "result": result}
 
 
+def handle_confirm_request(frame: dict, prompt, mode: str) -> dict:
+    """Offline-testable core of the extension-consent path. Returns the reply
+    body for POST /result: {"req_id", "result": {"approved": bool}}. Reuses the
+    same y/N `prompt` callable as local tools; mode-aware (autopilot auto-approves,
+    plan disables writes) — the SAME safe-by-default philosophy as ConsentGate."""
+    req_id = frame["req_id"]
+    app_id = frame.get("app_id", "")
+    tool = frame.get("tool", "")
+    if mode == "autopilot":
+        approved = True
+    elif mode == "plan":
+        approved = False
+    else:
+        approved = bool(prompt(f"{app_id}.{tool}", frame.get("args", {})))
+    return {"req_id": req_id, "result": {"approved": approved}}
+
+
 def build_coding_context(workspace_root: str) -> dict:
     """Snapshot of the workspace to hand the cloud brain: cwd (realpath),
     `git status -sb` output (empty string for non-git dirs / any error),
@@ -119,6 +136,23 @@ class AgentSession:
                             json=out,
                             headers=headers,
                         )
+                    elif frame.get("type") == "confirm_request":
+                        rid = frame.get("req_id")
+                        if rid in seen:
+                            out = seen[rid]  # duplicate — do NOT re-prompt
+                        else:
+                            out = handle_confirm_request(frame, self._prompt, self.mode)
+                            seen[rid] = out
+                        headers = await self._headers()
+                        await client.post(
+                            f"/v1/agent/sessions/{session_id}/result",
+                            json=out,
+                            headers=headers,
+                        )
+                    elif frame.get("type") == "panel_release_required":
+                        print(f"\n💳 This action costs money. Approve it in your browser:\n"
+                              f"  {frame.get('panel_url', '')}\n"
+                              f"Then ask again — you weren't charged.\n")
                     elif frame.get("type") == "final":
                         return frame["text"]
 
