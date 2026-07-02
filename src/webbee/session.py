@@ -96,13 +96,23 @@ class AgentSession:
             session_id = resp.json()["session_id"]
 
             headers = await self._headers()
+            # req_id -> already-returned result. dispatch is at-least-once
+            # (the kernel activity may retry its publish after a crash), so a
+            # duplicate tool_request MUST re-post the cached result, never
+            # re-run the tool (a second bash/write would be dangerous).
+            seen: dict = {}
             async with aconnect_sse(
                 client, "GET", f"/v1/agent/sessions/{session_id}/stream", headers=headers,
             ) as event_source:
                 async for sse in event_source.aiter_sse():
                     frame = sse.json()
                     if frame.get("type") == "tool_request":
-                        out = handle_tool_request(frame, executor, gate, self._prompt)
+                        rid = frame.get("req_id")
+                        if rid in seen:
+                            out = seen[rid]  # duplicate — do NOT re-execute
+                        else:
+                            out = handle_tool_request(frame, executor, gate, self._prompt)
+                            seen[rid] = out
                         headers = await self._headers()
                         await client.post(
                             f"/v1/agent/sessions/{session_id}/result",
