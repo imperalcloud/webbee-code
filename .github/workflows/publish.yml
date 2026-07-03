@@ -1,0 +1,28 @@
+name: publish
+
+# Publish to PyPI on a version tag (e.g. `v0.1.0`), matching the Imperal
+# convention (imperal-mcp). Auth uses the account API token stored as the
+# GitHub Actions secret `PYPI_API_TOKEN` — add it to this repo, or set an
+# `imperalcloud` org-level secret so every package inherits it. The token is
+# NEVER stored in the repo/files; only in the encrypted Actions secret.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
