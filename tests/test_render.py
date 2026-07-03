@@ -55,7 +55,7 @@ def test_end_turn_without_begin_turn_shows_zero_elapsed():
     s = _sink()
     s.end_turn("x")
     out = s.console.export_text()
-    assert "◷ 0.0s" in out
+    assert "0.0s" in out
 
 
 def test_begin_turn_twice_does_not_raise():
@@ -83,7 +83,6 @@ def test_action_feed_and_answer_english():
     assert "webbee package" in out                       # markdown answer rendered
     assert "1 action" in out                              # English footer, singular
     assert "12.3k" in out and "tok" in out
-    assert "◷" in out
     assert not NO_CYRILLIC.search(out)
 
 
@@ -176,6 +175,37 @@ def test_clear_resets_session_totals():
     s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")
     s.clear()
     assert s.session_tokens == 0 and s.session_cost == 0.0
+
+
+# ---- P0 de-clutter + hierarchy -------------------------------------------
+
+def test_salient_arg_prefers_human_fields():
+    from webbee.render import _salient_arg
+    assert _salient_arg({"note_id": "abc", "title": "Q3 budget"}) == "Q3 budget"
+    assert _salient_arg({"path": "auth.py"}) == "auth.py"
+    assert _salient_arg({"command": "ls -la"}) == "ls -la"
+    assert _salient_arg({"note_id": "abc"}) == "abc"      # falls back to id
+    assert _salient_arg({}) == ""
+    assert _salient_arg("nope") == ""
+
+
+def test_end_turn_footer_has_no_rule_bar():
+    s = _sink()
+    s.begin_turn(); s.usage(1200, 0.0143); s.end_turn("done")
+    out = s.console.export_text()
+    assert "─────" not in out                    # the heavy full-width Rule is gone
+    assert "session" in out.lower() and "1.2k" in out
+
+
+def test_consent_shows_human_summary_not_dict():
+    console = Console(record=True, width=90)
+    s = RichSink(console=console, live_enabled=False,
+                 input_fn=lambda p: "yes", clock=lambda: 0.0)
+    s.ask_consent("notes", "delete_note", {"note_id": "c93dc86b", "title": "Q3 budget"})
+    out = console.export_text()
+    assert "Q3 budget" in out                     # human-readable salient arg
+    assert "note_id" not in out and "{" not in out  # no raw dict dump
+    assert "notes·delete_note" in out
 
 
 def test_plan_blocked_prints_english_hint():

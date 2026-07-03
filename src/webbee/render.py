@@ -3,7 +3,6 @@ import time
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
@@ -19,6 +18,23 @@ _ACCENT = "cyan"      # prompt / active
 def _fmt_tokens(n: int) -> str:
     """Compact token count: 2100 -> '2.1k', 900 -> '900'."""
     return f"{n / 1000:.1f}k" if n >= 1000 else str(int(n))
+
+
+def _salient_arg(args: dict) -> str:
+    """The one human-readable arg to show for a tool/consent call (PURE) — a
+    title/path/command/name over an opaque id; falls back to the first id-ish
+    value. Keeps the feed readable instead of dumping a raw args dict."""
+    if not isinstance(args, dict):
+        return ""
+    for k in ("title", "name", "path", "pattern", "command", "query", "q"):
+        v = args.get(k)
+        if v:
+            return str(v)
+    for k in ("id", "note_id", "folder_id", "task_id"):
+        v = args.get(k)
+        if v:
+            return str(v)
+    return ""
 
 
 class RichSink:
@@ -98,16 +114,16 @@ class RichSink:
     def end_turn(self, final_text: str) -> None:
         self._stop_live()
         if final_text:
+            self.console.print()   # separation before the focus block
             self.console.print(Text("  🐝", style=f"bold {_BEE}"))
             self.console.print(Markdown(final_text))
         elapsed = self._elapsed()
         self.session_tokens += self.tokens
         self.session_cost += self.cost_usd
         noun = "action" if self._tools == 1 else "actions"
-        self.console.print(Rule(style="dim"))
         self.console.print(Text(
-            f"  ◷ {elapsed:.1f}s · ⚡ {self._tools} {noun} · 🔤 {_fmt_tokens(self.tokens)} tok"
-            f"  (session {_fmt_tokens(self.session_tokens)})",
+            f"  {elapsed:.1f}s · {self._tools} {noun} · {_fmt_tokens(self.tokens)} tok"
+            f" · session {_fmt_tokens(self.session_tokens)} tok",
             style="dim"))
         self.console.print()   # breathing room before the next prompt
 
@@ -145,10 +161,10 @@ class RichSink:
         _tool, arg = self._pending if self._pending[0] else (tool, "")
         icon = _ICON.get(_tool, "⚡")
         mark = "✓" if ok else "✗"
-        left = Text.assemble(("  " + icon + " ", ""), (_tool, f"bold {_ACCENT}"),
-                             (("  " + arg[:60]) if arg else "", "white"))
+        left = Text.assemble(("  " + icon + " ", "dim"), (_tool, "dim"),
+                             (("  " + arg[:48]) if arg else "", "dim"))
         right = Text.assemble((mark + " ", "green" if ok else "red"),
-                              (str(summary)[:70], "dim"), ("  ", ""))
+                              (str(summary)[:60], "dim"), ("  ", ""))
         row = Table.grid(expand=True, padding=0)
         row.add_column(justify="left", ratio=1, no_wrap=True)
         row.add_column(justify="right", no_wrap=True)
@@ -161,10 +177,11 @@ class RichSink:
         """Render a prompt and return the user's RAW reply (trimmed only).
         NEVER interpret — the kernel brain decides (ICNLI)."""
         self._stop_live()
-        label = f"{app_id}.{tool}" if app_id else tool
-        self.console.print(Text.assemble(("  ❓ ", "yellow"), (label, "bold yellow"),
-                                          ("  " + str(args)[:80], "dim")))
-        raw = self._input("     approve? ")
+        label = f"{app_id}·{tool}" if app_id else tool
+        sal = _salient_arg(args)
+        self.console.print(Text.assemble(("  ? approve ", "yellow"), (label, "dim"),
+                                          (("  " + sal[:60]) if sal else "", "dim")))
+        raw = self._input("     ")
         self._arm_live()  # re-arm spinner for the rest of the turn
         return raw.strip()
 
@@ -189,8 +206,8 @@ class RichSink:
         default never reach this."""
         self._stop_live()
         self.console.print(Text.assemble(
-            ("  ⛔ plan mode", f"bold {_BEE}"),
-            (f" — {tool} blocked. " if tool else " — action blocked. ", "white"),
+            ("  ⛔ plan mode", _BEE),
+            (f" — {tool} blocked. " if tool else " — action blocked. ", "dim"),
             ("Press Shift+Tab to switch to default or autopilot to allow it.", "dim")))
         self._arm_live()
 
