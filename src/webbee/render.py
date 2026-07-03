@@ -5,6 +5,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.spinner import Spinner
+from rich.table import Table
 from rich.text import Text
 
 from webbee.banner_art import WEBBEE_CODE
@@ -39,6 +40,7 @@ class RichSink:
         self._started = None
         self._live = None
         self._current = ""
+        self._pending = ("", "")
 
     # ---- welcome ------------------------------------------------------------
     def welcome(self, account, cwd: str, surface: str) -> None:
@@ -59,7 +61,8 @@ class RichSink:
         self.console.print()
         self.console.print(Text(_center_block(WEBBEE_CODE), style=f"bold {_BEE}"))
         self.console.print(Text("🐝".center(w), style=f"bold {_BEE}"))
-        self.console.print(Text("·  i m p e r a l . i o  ·".center(w), style=_ACCENT))
+        self.console.print(Text("ICNLI AI Cloud OS · Agent".center(w), style=f"bold {_ACCENT}"))
+        self.console.print(Text("·  i m p e r a l . i o  ·".center(w), style="dim"))
         self.console.print()
         rows = []
         if account.signed_in:
@@ -88,6 +91,8 @@ class RichSink:
         self._tools = 0
         self._started = self._clock()
         self._current = ""
+        self._pending = ("", "")
+        self.console.print()   # breathing room between the user's message and the response
         self._arm_live()
 
     def end_turn(self, final_text: str) -> None:
@@ -104,6 +109,7 @@ class RichSink:
             f"  ◷ {elapsed:.1f}s · ⚡ {self._tools} {noun} · 🔤 {_fmt_tokens(self.tokens)} tok"
             f"  (session {_fmt_tokens(self.session_tokens)})",
             style="dim"))
+        self.console.print()   # breathing room before the next prompt
 
     def note(self, message: str) -> None:
         self._stop_live()
@@ -128,18 +134,27 @@ class RichSink:
     # ---- TurnSink -------------------------------------------------------
     def tool_start(self, tool: str, args: dict) -> None:
         self._tools += 1
-        icon = _ICON.get(tool, "⚡")
         arg = args.get("path") or args.get("pattern") or args.get("command") or ""
+        self._pending = (tool, str(arg))
         self._current = f"{tool} {str(arg)[:40]}".strip()
-        self._print_above(Text.assemble(("  " + icon + " ", ""), (tool, f"bold {_ACCENT}"),
-                                         (("  " + str(arg)[:80]) if arg else "", "white")))
-        self._refresh()
+        self._refresh()  # the completed full-width row is printed in tool_result
 
     def tool_result(self, tool: str, ok: bool, summary: str) -> None:
+        # One full-width row: icon + tool (+arg) on the left, ✓/✗ + summary
+        # pinned to the right edge. Width is the live terminal width (dynamic).
+        _tool, arg = self._pending if self._pending[0] else (tool, "")
+        icon = _ICON.get(_tool, "⚡")
         mark = "✓" if ok else "✗"
-        style = "green" if ok else "red"
-        self._print_above(Text.assemble(("     ", ""), (mark + " ", style),
-                                         (str(summary)[:80], "dim")))
+        left = Text.assemble(("  " + icon + " ", ""), (_tool, f"bold {_ACCENT}"),
+                             (("  " + arg[:60]) if arg else "", "white"))
+        right = Text.assemble((mark + " ", "green" if ok else "red"),
+                              (str(summary)[:70], "dim"), ("  ", ""))
+        row = Table.grid(expand=True, padding=0)
+        row.add_column(justify="left", ratio=1, no_wrap=True)
+        row.add_column(justify="right", no_wrap=True)
+        row.add_row(left, right)
+        self._print_above(row)
+        self._pending = ("", "")
         self._refresh()
 
     def ask_consent(self, app_id: str, tool: str, args: dict) -> str:
