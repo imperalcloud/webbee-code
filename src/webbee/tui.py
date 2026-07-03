@@ -1,8 +1,8 @@
-"""prompt_toolkit-backed input: the typed message in a block between a top and
-bottom full-width bar, a toolbar (mode · session tokens · $) under it, and
-Shift+Tab to cycle the mode. Pure helpers (next_mode/build_toolbar) are unit-
-tested; the interactive prompt() is thin and TTY-verified, with an input()
-fallback so it never hard-fails."""
+"""Full-screen dock: a scrollable, colored output pane (Rich → ANSI) fills the
+top; a bordered input box + toolbar are pinned at the very bottom and never
+move while the output scrolls (mouse wheel / PageUp). Pure helpers
+(next_mode/build_toolbar) are unit-tested; the Application + OutputPane are
+TTY/headless-smoke verified. Grounded in prompt_toolkit 3.0.52."""
 import asyncio
 
 from webbee.render import _fmt_tokens
@@ -23,8 +23,8 @@ def build_toolbar(mode: str, tokens: int, cost: float, *, busy: bool = False,
                   consent: bool = False) -> str:
     """The single status line under the pinned input box. Three states:
     consent (awaiting an approve/deny reply), busy (a turn is running — the
-    live status the old Rich spinner used to show), and idle (mode + spend +
-    the Shift + TAB hint spelled in words)."""
+    live status the old Rich spinner used to show, with an animated frame), and
+    idle (mode + SESSION spend + the Shift + TAB hint spelled in words)."""
     if consent:
         return "  approve? type y / n / a reply · Enter to send"
     if busy:
@@ -36,80 +36,79 @@ def build_toolbar(mode: str, tokens: int, cost: float, *, busy: bool = False,
             f"   ·   Shift + TAB: switch mode")
 
 
-def _build_app(buf, kb, toolbar_getter):
-    """Build the non-fullscreen Application: a bordered input box docked at the
-    bottom with a toolbar under it. full_screen=False keeps native scrollback
-    (output printed between prompts stays above the box)."""
-    from prompt_toolkit.application import Application
-    from prompt_toolkit.layout import HSplit, Layout, Window
-    from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
-    from prompt_toolkit.layout.processors import BeforeInput
-    from prompt_toolkit.widgets import Frame
+class OutputPane:
+    """A full-screen scrollable pane that shows COLORED output. Rich renders
+    into a StringIO as ANSI; a FormattedTextControl(ANSI(...)) shows it with the
+    colours intact. The `get_cursor_position == vertical_scroll` trick makes
+    Window.vertical_scroll authoritative so the mouse wheel / PageUp scroll it;
+    notify() auto-follows the tail ONLY when the user is already at the bottom
+    (so scrolling up to read history isn't yanked back down). Grounded in
+    prompt_toolkit 3.0.52 (verified in venv)."""
 
-    body = Frame(Window(
-        BufferControl(buffer=buf, input_processors=[BeforeInput("❯ ")]),
-        height=1, wrap_lines=True))
-    toolbar = Window(FormattedTextControl(toolbar_getter), height=1, always_hide_cursor=True)
-    root = HSplit([body, toolbar])
-    return Application(layout=Layout(root, focused_element=body),
-                       key_bindings=kb, full_screen=False, mouse_support=False)
+    def __init__(self, width: int = 100) -> None:
+        import io
+
+        from prompt_toolkit.data_structures import Point
+        from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.layout.containers import Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from rich.console import Console
+
+        self._io = io.StringIO()
+        self.console = Console(file=self._io, force_terminal=True,
+                               color_system="truecolor", width=width, highlight=False)
+        self._ANSI = ANSI
+        self._cache = (None, None)   # (text, ANSI) memo — bounds re-parse cost
+        self.control = FormattedTextControl(
+            text=self._formatted, focusable=False, show_cursor=False,
+            get_cursor_position=lambda: Point(0, self.window.vertical_scroll))
+        self.window = Window(content=self.control, wrap_lines=False,
+                             always_hide_cursor=True, allow_scroll_beyond_bottom=False)
+
+    def _formatted(self):
+        text = self._io.getvalue()
+        if self._cache[0] != text:                # only re-parse when it changed
+            self._cache = (text, self._ANSI(text))
+        return self._cache[1]
+
+    def notify(self) -> None:
+        """Called after each sink print: follow the tail if the user is at the
+        bottom, then redraw. If they've scrolled up, leave their scroll alone."""
+        self._trim()
+        ri = self.window.render_info
+        if ri is not None and ri.bottom_visible:
+            n = self._io.getvalue().count("\n") + 1
+            self.window.vertical_scroll = max(0, n - ri.window_height)
+        try:
+            from prompt_toolkit.application import get_app_or_none
+            app = get_app_or_none()
+            if app is not None:
+                app.invalidate()
+        except Exception:
+            pass
+
+    def _trim(self, max_lines: int = 5000) -> None:
+        import io
+        s = self._io.getvalue()
+        if s.count("\n") > max_lines:
+            s = "\n".join(s.split("\n")[-max_lines:])
+            self._io = io.StringIO()
+            self._io.write(s)
+            self.console.file = self._io
+
+    def dump(self) -> str:
+        """The full session transcript (ANSI). Printed to real stdout on exit so
+        the conversation survives leaving the alternate screen."""
+        return self._io.getvalue()
 
 
-async def prompt(*, mode_getter, usage_getter, on_cycle) -> "str | None":
-    """Show the bordered docked input box + toolbar; return the typed line
-    (None on EOF/interrupt). The box is docked at the bottom and re-rendered
-    each input, so turn output printed between prompts stays above it and the
-    terminal's native scrollback is preserved (full_screen=False). Falls back
-    to builtin input() if prompt_toolkit can't run (no tty / error)."""
-    try:
-        from prompt_toolkit.buffer import Buffer
-        from prompt_toolkit.key_binding import KeyBindings
-    except Exception:
-        return _fallback_input()
-
-    result = {"text": None}
-    buf = Buffer(multiline=False)
-    kb = KeyBindings()
-
-    @kb.add("enter")
-    def _submit(event):
-        result["text"] = buf.text
-        event.app.exit()
-
-    @kb.add("s-tab")
-    def _cycle(event):
-        on_cycle()
-        event.app.invalidate()   # redraw the toolbar with the new mode
-
-    @kb.add("c-c")
-    @kb.add("c-d")
-    def _cancel(event):
-        result["text"] = None
-        event.app.exit()
-
-    def _toolbar():
-        tok, cost = usage_getter()
-        return build_toolbar(mode_getter(), tok, cost)
-
-    try:
-        app = _build_app(buf, kb, _toolbar)
-        await app.run_async()
-        return result["text"]
-    except (EOFError, KeyboardInterrupt):
-        return None
-    except Exception:
-        return _fallback_input()
-
-
-async def run_session(*, on_line, mode_getter, on_cycle, status,
+async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                       is_busy, consent_pending, resolve_consent) -> bool:
-    """The persistent dock: a bordered input box + toolbar pinned at the bottom
-    for the WHOLE session (non-fullscreen → native scrollback kept). A submitted
-    line either resolves a pending consent reply (ICNLI: raw verbatim) or starts
-    a turn as a BACKGROUND task, so the box stays pinned during the turn. Turn
-    output is printed by the sink and lands above the box (repl wraps this in
-    patch_stdout). Returns True after a clean exit; False if prompt_toolkit is
-    unavailable so the caller can use the plain fallback loop."""
+    """The full-screen dock: `pane` fills the top (scrollable), a bordered input
+    box + toolbar are FIXED at the bottom. Enter either resolves a pending
+    consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
+    (the box stays fixed during it). Returns True on clean exit; False if
+    prompt_toolkit is unavailable (caller uses the plain fallback loop)."""
     try:
         from prompt_toolkit.application import Application, get_app
         from prompt_toolkit.buffer import Buffer
@@ -154,12 +153,20 @@ async def run_session(*, on_line, mode_getter, on_cycle, status,
     def _interrupt(event):
         t = turn["task"]
         if t is not None and not t.done():
-            t.cancel()                          # cancel the running turn; box survives
+            t.cancel()                          # cancel the running turn; dock survives
 
     @kb.add("c-d")
     def _eof(event):
         if not is_busy():
             event.app.exit()
+
+    @kb.add("pageup")
+    def _pgup(event):
+        pane.window.vertical_scroll = max(0, pane.window.vertical_scroll - 5)
+
+    @kb.add("pagedown")
+    def _pgdn(event):
+        pane.window.vertical_scroll += 5
 
     def _toolbar():
         st = status()
@@ -167,23 +174,22 @@ async def run_session(*, on_line, mode_getter, on_cycle, status,
                              current=st["current"], elapsed=st["elapsed"],
                              tools=st["tools"], consent=st["consent"])
 
-    body = Frame(Window(
+    input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput("❯ ", style="class:prompt")]),
-        height=1, wrap_lines=True))
+        height=1)
     toolbar = Window(FormattedTextControl(_toolbar), height=1,
                      always_hide_cursor=True, style="class:toolbar")
-    root = HSplit([body, toolbar])
+    root = HSplit([pane.window, Frame(input_win), toolbar])
     style = Style.from_dict({
         "frame.border": "#5f5f5f",       # muted grey chrome — furniture, not focus
         "toolbar": "#8a8a8a",            # dim
         "prompt": "#00afd7 bold",        # cyan ❯ — the one interactive accent
     })
-    app = Application(layout=Layout(root, focused_element=body), key_bindings=kb,
-                      full_screen=False, mouse_support=False, style=style)
+    app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
+                      full_screen=True, mouse_support=True, style=style)
 
     async def _ticker():
-        # tick the elapsed clock while a turn runs (usage/tool frames also
-        # invalidate, so counters feel live without a fast tick)
+        # animate the spinner + tick the elapsed clock while a turn runs
         while True:
             await asyncio.sleep(0.25)
             if is_busy():
@@ -195,10 +201,3 @@ async def run_session(*, on_line, mode_getter, on_cycle, status,
     finally:
         tick.cancel()
     return True
-
-
-def _fallback_input() -> "str | None":
-    try:
-        return input("❯ ")
-    except (EOFError, KeyboardInterrupt):
-        return None

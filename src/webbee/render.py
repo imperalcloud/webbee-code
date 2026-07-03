@@ -37,8 +37,8 @@ def _salient_arg(args: dict) -> str:
 
 
 def _invalidate() -> None:
-    """Redraw the pinned prompt_toolkit dock if one is running. No-op when no
-    app is active (tests / non-tty fallback) — so the sink works both ways."""
+    """Redraw the running prompt_toolkit app if any. No-op when none is active
+    (tests / non-tty fallback) — the fallback when no output pane is wired."""
     try:
         from prompt_toolkit.application import get_app_or_none
         app = get_app_or_none()
@@ -50,22 +50,24 @@ def _invalidate() -> None:
 
 class RichSink:
     """Rich implementation of TurnSink. Turn output (action feed, 🐝 answer,
-    footer) is printed via the Rich Console; when a persistent prompt_toolkit
-    dock is running (repl wraps it in patch_stdout), those prints land ABOVE
-    the pinned input box as real scrollback. The live status (busy/elapsed/
-    tokens) is NOT a Rich spinner anymore — it lives in the dock toolbar, fed
-    by status(); this sink just holds the state and calls _invalidate() to
-    nudge a redraw. Consent runs through the dock via an asyncio.Future
+    footer) is rendered by the Rich Console. In the full-screen dock the Console
+    writes ANSI into the OutputPane's buffer (repl passes console=pane.console +
+    on_output=pane.notify) and the pane shows it in a scrollable region above
+    the fixed input; after each render this sink calls on_output() so the pane
+    follows the tail. The live status (busy/elapsed/tokens) is the dock toolbar,
+    fed by status(). Consent runs through the dock via an asyncio.Future
     (resolve_consent), with a sync input fallback for non-tty.
 
-    Tests pass live_enabled=False + inject input_fn/clock; with no running app
-    _invalidate() is a no-op and consent uses the injected input_fn."""
+    Tests pass live_enabled=False + inject input_fn/clock and no on_output; then
+    _nudge() is a harmless no-op and consent uses the injected input_fn."""
 
-    def __init__(self, console=None, *, live_enabled=True, input_fn=input, clock=time.monotonic):
+    def __init__(self, console=None, *, live_enabled=True, input_fn=input,
+                 clock=time.monotonic, on_output=None):
         self.console = console or Console()
         self._live_enabled = live_enabled
         self._input = input_fn
         self._clock = clock
+        self._on_output = on_output      # pane.notify (scroll+redraw) in the dock
         self.tokens = 0
         self.cost_usd = 0.0
         self.session_tokens = 0
@@ -78,12 +80,21 @@ class RichSink:
         self._consent = None            # asyncio.Future while awaiting a reply
         self._consent_summary = ""
 
+    def _nudge(self) -> None:
+        """After output/state changes: let the pane follow the tail + redraw."""
+        if self._on_output is not None:
+            self._on_output()
+        else:
+            _invalidate()
+
     # ---- welcome ------------------------------------------------------------
     def welcome(self, account, cwd: str, surface: str) -> None:
-        """One-time launch welcome: CLEAR the screen so webbee owns the window,
-        then a centered WEBBEE CODE logo + imperal.io + an honest account panel
-        (who/plan/tier/member-since). Runs BEFORE the persistent dock starts."""
-        self.console.clear()
+        """One-time launch splash: a centered WEBBEE CODE logo + imperal.io + an
+        honest account panel (who/plan/tier/member-since). Runs BEFORE the dock
+        starts. Clears the screen ONLY in the non-pane path (the full-screen
+        dock owns its own alternate screen — clearing there would corrupt it)."""
+        if self._on_output is None:
+            self.console.clear()
         w = self.console.width
 
         def _center_block(text: str) -> str:
@@ -119,6 +130,7 @@ class RichSink:
         self.console.print()
         self.console.print(Text("/help · Ctrl-D to exit".center(w), style="dim"))
         self.console.print()
+        self._nudge()
 
     # ---- turn lifecycle -------------------------------------------------
     def begin_turn(self) -> None:
@@ -130,7 +142,7 @@ class RichSink:
         self.cost_usd = 0.0
         self._busy = True
         self.console.print()   # breathing room between the user's message and the response
-        _invalidate()
+        self._nudge()
 
     def end_turn(self, final_text: str) -> None:
         self._busy = False
@@ -147,11 +159,11 @@ class RichSink:
             f" · session {_fmt_tokens(self.session_tokens)} tok",
             style="dim"))
         self.console.print()   # breathing room before the next prompt
-        _invalidate()
+        self._nudge()
 
     def note(self, message: str) -> None:
         self.console.print(Text("  " + message, style=_BEE))
-        _invalidate()
+        self._nudge()
 
     def user_echo(self, text: str) -> None:
         """Commit the just-sent user message as its own clearly-readable line
@@ -159,9 +171,10 @@ class RichSink:
         as 'what I sent' in the scrollback."""
         self.console.print(Text.assemble(
             ("  ", ""), (" ❯ " + text + " ", "bold white on grey30")))
+        self._nudge()
 
     def clear(self) -> None:
-        """/clear: wipe the screen + reset the session counters."""
+        """/clear: wipe the pane/screen + reset the session counters."""
         self.console.clear()
         self.tokens = 0
         self.cost_usd = 0.0
@@ -169,13 +182,13 @@ class RichSink:
         self.session_cost = 0.0
         self._tools = 0
         self._current = ""
-        _invalidate()
+        self._nudge()
 
     def abort(self) -> None:
         """Ctrl-C mid-turn: clear busy so the toolbar drops back to idle. No
         printing — the caller (repl.py) prints the note."""
         self._busy = False
-        _invalidate()
+        self._nudge()
 
     # ---- TurnSink -------------------------------------------------------
     def tool_start(self, tool: str, args: dict) -> None:
@@ -183,7 +196,7 @@ class RichSink:
         arg = args.get("path") or args.get("pattern") or args.get("command") or ""
         self._pending = (tool, str(arg))
         self._current = f"{tool} {str(arg)[:40]}".strip()
-        _invalidate()  # the completed full-width row is printed in tool_result
+        self._nudge()  # the completed line is printed in tool_result
 
     def tool_result(self, tool: str, ok: bool, summary: str) -> None:
         # One calm dim line: icon + tool (+arg), then the ✓/✗ RIGHT NEXT TO the
@@ -201,7 +214,7 @@ class RichSink:
             (str(summary)[:50], "dim"),
         ))
         self._pending = ("", "")
-        _invalidate()
+        self._nudge()
 
     async def ask_consent(self, app_id: str, tool: str, args: dict) -> str:
         """Ask for consent and return the user's RAW reply (trimmed only) —
@@ -217,12 +230,13 @@ class RichSink:
         if fut is None:                       # non-tty / no running app
             raw = self._input("     ")
         else:
+            self._nudge()
             raw = await fut
         self._consent = None
         self._consent_summary = ""
         raw = (raw or "").strip()
         self.console.print(Text("  ↳ " + raw, style="dim"))   # quiet echo of the reply
-        _invalidate()
+        self._nudge()
         return raw
 
     def panel_release(self, panel_url: str, summary: str) -> None:
@@ -233,11 +247,12 @@ class RichSink:
             ("Then ask again — you weren't charged.", "dim"),
         )
         self.console.print(Panel(body, title="💳 This costs money", border_style="magenta"))
-        _invalidate()
+        self._nudge()
 
     def progress(self, text: str) -> None:
         if text:
             self.console.print(Text("  " + text, style="dim italic"))
+            self._nudge()
 
     def plan_blocked(self, tool: str) -> None:
         """Plan mode auto-declines writes/destructive. Tell the user WHY and how
@@ -246,13 +261,13 @@ class RichSink:
             ("  ⛔ plan mode", _BEE),
             (f" — {tool} blocked. " if tool else " — action blocked. ", "dim"),
             ("Press Shift+Tab to switch to default or autopilot to allow it.", "dim")))
-        _invalidate()
+        self._nudge()
 
     def usage(self, tokens: int, cost_usd: float) -> None:
         # Cumulative frame — trust the server's running totals verbatim.
         self.tokens = tokens
         self.cost_usd = cost_usd
-        _invalidate()
+        self._nudge()
 
     # ---- dock bridge (read by tui.run_session's toolbar + Enter binding) ---
     def status(self) -> dict:
@@ -288,7 +303,6 @@ class RichSink:
                 return None
             self._consent = asyncio.get_running_loop().create_future()
             self._consent_summary = summary or label
-            _invalidate()
             return self._consent
         except Exception:
             return None

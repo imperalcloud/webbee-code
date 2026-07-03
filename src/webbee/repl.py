@@ -109,14 +109,16 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         agent = agent_factory(cfg, token_provider, workspace, state["mode"])
 
     if use_dock:
-        from prompt_toolkit.patch_stdout import patch_stdout
-        from rich.console import Console
+        ok = False
+        pane = None
+        try:
+            import shutil
 
-        from webbee import tui
-        from webbee.render import RichSink
-        with patch_stdout(raw=True):
-            await _boot(RichSink(console=Console(file=sys.stdout, force_terminal=True,
-                                                 color_system="truecolor")))
+            from webbee import tui
+            from webbee.render import RichSink
+            width = shutil.get_terminal_size((100, 24)).columns
+            pane = tui.OutputPane(width=width)
+            await _boot(RichSink(console=pane.console, on_output=pane.notify))
 
             async def _on_line(text: str) -> None:
                 if await _handle(text) == "exit":
@@ -124,12 +126,19 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                     get_app().exit()
 
             ok = await tui.run_session(
-                on_line=_on_line, mode_getter=lambda: state["mode"], on_cycle=_cycle,
-                status=_sink.status, is_busy=_sink.is_busy,
+                pane=pane, on_line=_on_line, mode_getter=lambda: state["mode"],
+                on_cycle=_cycle, status=_sink.status, is_busy=_sink.is_busy,
                 consent_pending=_sink.consent_pending, resolve_consent=_sink.resolve_consent)
-            if ok:
-                return
-            # prompt_toolkit unavailable → fall through to the fallback loop
+        except Exception:
+            ok = False
+        if ok:
+            # the alt screen is gone — reprint the session transcript to real
+            # stdout so the conversation stays in the terminal scrollback.
+            if pane is not None:
+                sys.stdout.write(pane.dump())
+                sys.stdout.flush()
+            return
+        # dock unavailable → fall through to the plain fallback loop
 
     # Fallback loop (tests / non-tty / dock unavailable).
     if _sink is None:

@@ -44,28 +44,12 @@ def test_toolbar_busy_spinner_animates_with_elapsed():
     assert "working" in a and "working" in b
 
 
-def test_fallback_input_used_off_tty(monkeypatch):
-    # When prompt_toolkit can't be imported, prompt() must degrade to _fallback_input.
-    import webbee.tui as tui
-    monkeypatch.setattr(tui, "_fallback_input", lambda: "typed line")
-    import builtins, asyncio
-    real_import = builtins.__import__
-    def boom(name, *a, **k):
-        if name.startswith("prompt_toolkit"):
-            raise ImportError("no ptk")
-        return real_import(name, *a, **k)
-    monkeypatch.setattr(builtins, "__import__", boom)
-    out = asyncio.run(tui.prompt(mode_getter=lambda: "default",
-                                 usage_getter=lambda: (0, 0.0), on_cycle=lambda: None))
-    assert out == "typed line"
-
-
-def test_build_app_constructs_and_is_not_fullscreen():
-    # The layout builds without a tty and stays non-fullscreen (scrollback kept).
-    import webbee.tui as tui
-    from prompt_toolkit.buffer import Buffer
-    from prompt_toolkit.key_binding import KeyBindings
-    buf = Buffer(multiline=False)
-    kb = KeyBindings()
-    app = tui._build_app(buf, kb, lambda: build_toolbar("default", 0, 0.0))
-    assert app.full_screen is False          # never alt-screen (scrollback kept)
+def test_output_pane_captures_colored_text():
+    # The pane's Rich Console renders into a buffer as ANSI (colours preserved
+    # for the FormattedTextControl to show); construction works headlessly.
+    from webbee.tui import OutputPane
+    pane = OutputPane(width=80)
+    pane.console.print("[bold red]Error[/] ok")
+    out = pane.dump()
+    assert "Error" in out and "ok" in out
+    assert "\x1b[" in out          # ANSI colour escapes preserved for the pane
