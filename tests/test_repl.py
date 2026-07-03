@@ -1,0 +1,79 @@
+import asyncio
+import pytest
+from webbee.repl import run_repl
+
+
+class FakeSink:
+    def __init__(self): self.turns = []; self.notes = []; self.credits = 0; self.mode = None
+    def begin_turn(self): ...
+    def end_turn(self, text): self.turns.append(text)
+    def note(self, m): self.notes.append(m)
+    # TurnSink no-ops
+    def tool_start(self, *a): ...
+    def tool_result(self, *a): ...
+    def ask_consent(self, *a): return "yes"
+    def panel_release(self, *a): ...
+    def progress(self, *a): ...
+    def usage(self, *a): ...
+
+
+class FakeAgent:
+    def __init__(self): self.tasks = []; self.mode = "default"
+    async def run(self, task, sink):
+        self.tasks.append(task)
+        return f"answer:{task}"
+
+
+class FakeAuth:
+    NotLoggedInError = RuntimeError
+    def __init__(self, logged_in=True): self._in = logged_in; self.logged_out = False
+    async def ensure_access_token(self, cfg):
+        if not self._in: raise self.NotLoggedInError("no creds")
+        return "tok"
+    def login(self, cfg, *, open_browser=True): self._in = True; return "u@imperal.io"
+    async def logout(self, cfg): self._in = False; self.logged_out = True
+
+
+def _lines(*items):
+    it = iter(items)
+    def read(prompt=""):
+        try: return next(it)
+        except StopIteration: raise EOFError
+    return read
+
+
+def _run(**kw):
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+    sink = kw.pop("sink", FakeSink())
+    agent = kw.pop("agent", FakeAgent())
+    asyncio.run(run_repl(cfg, "default", sink=sink, agent_factory=lambda c, tp, ws, m: agent,
+                         read_line=kw.pop("read_line"), auth=kw.pop("auth", FakeAuth())))
+    return sink, agent
+
+
+def test_task_is_sent_to_agent_and_answer_rendered():
+    sink, agent = _run(read_line=_lines("исправь баг", "/exit"))
+    assert agent.tasks == ["исправь баг"]
+    assert sink.turns == ["answer:исправь баг"]
+
+
+def test_exit_command_stops_loop():
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert agent.tasks == []
+
+
+def test_blank_lines_skipped():
+    sink, agent = _run(read_line=_lines("", "  ", "/exit"))
+    assert agent.tasks == []
+
+
+def test_eof_exits_cleanly():
+    sink, agent = _run(read_line=_lines("привет"))  # no /exit → EOF after
+    assert agent.tasks == ["привет"]
+
+
+def test_logout_command_calls_auth():
+    auth = FakeAuth()
+    sink, agent = _run(read_line=_lines("/logout", "/exit"), auth=auth)
+    assert auth.logged_out
