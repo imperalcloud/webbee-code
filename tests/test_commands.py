@@ -1,4 +1,8 @@
+import re
+
 from webbee.commands import dispatch, CommandContext, SlashResult
+
+NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
 
 
 def _ctx(**kw):
@@ -9,7 +13,7 @@ def _ctx(**kw):
 
 
 def test_non_slash_is_not_handled():
-    r = dispatch("напиши тест", _ctx())
+    r = dispatch("write a test", _ctx())
     assert r == SlashResult(handled=False)
 
 
@@ -24,6 +28,13 @@ def test_help_lists_commands():
     assert r.handled and r.action == "help"
     for c in ("/login", "/logout", "/clear", "/mode", "/cost", "/status", "/exit"):
         assert c in r.message
+
+
+def test_help_is_english():
+    r = dispatch("/help", _ctx())
+    for c in ("/login", "/logout", "/clear", "/mode", "/cost", "/status", "/exit"):
+        assert c in r.message
+    assert not NO_CYRILLIC.search(r.message)
 
 
 def test_mode_switch_valid():
@@ -47,6 +58,12 @@ def test_status_reports_state():
     assert "terminal" in r.message and "99" in r.message and "dev" in r.message and "0.1.0" in r.message
 
 
+def test_status_english():
+    r = dispatch("/status", _ctx(tokens=1500))
+    assert "terminal" in r.message and "1500" in r.message and "0.1.0" in r.message
+    assert not NO_CYRILLIC.search(r.message)
+
+
 def test_cost_and_usage_alias():
     assert dispatch("/cost", _ctx()).action == "cost"
     assert dispatch("/usage", _ctx()).action == "cost"
@@ -56,6 +73,12 @@ def test_cost_shows_tokens():
     r = dispatch("/cost", _ctx(tokens=1500, cost_usd=0.012))
     assert r.action == "cost"
     assert "1500" in r.message and "token" in r.message.lower()
+
+
+def test_cost_english_tokens():
+    r = dispatch("/cost", _ctx(tokens=1500, cost_usd=0.012))
+    assert r.action == "cost" and "1500" in r.message and "token" in r.message.lower()
+    assert not NO_CYRILLIC.search(r.message)
 
 
 def test_status_shows_tokens():
@@ -72,3 +95,9 @@ def test_clear_login_logout_actions():
 def test_unknown_slash_is_handled_with_hint():
     r = dispatch("/frobnicate", _ctx())
     assert r.handled and "/help" in r.message
+
+
+def test_mode_and_unknown_english():
+    assert not NO_CYRILLIC.search(dispatch("/mode", _ctx()).message)
+    assert not NO_CYRILLIC.search(dispatch("/mode turbo", _ctx()).message)
+    assert not NO_CYRILLIC.search(dispatch("/frobnicate", _ctx()).message)

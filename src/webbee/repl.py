@@ -43,14 +43,15 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
             return False
 
     logged_in = await _logged_in()
+    sink.banner(__version__, workspace, logged_in, "terminal")
     if not logged_in:
-        sink.note("Ты не вошёл. Набери /login чтобы войти.")
+        sink.note("You're not signed in. Type /login to sign in.")
 
     agent = agent_factory(cfg, token_provider, workspace, mode)
 
     while True:
         try:
-            line = read_line("webbee> ")
+            line = read_line("❯ ")
         except (EOFError, KeyboardInterrupt):
             return
         if not line.strip():
@@ -69,12 +70,12 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
             if res.action == "login":
                 email = auth.login(cfg)
                 logged_in = True
-                sink.note(f"Вошёл как {email}.")
+                sink.note(f"Signed in as {email}.")
                 continue
             if res.action == "logout":
                 await auth.logout(cfg)
                 logged_in = False
-                sink.note("Вышел, локальные креды удалены.")
+                sink.note("Signed out, local credentials removed.")
                 continue
             if res.action == "clear":
                 sink.clear()
@@ -93,9 +94,9 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
             text = await agent.run(line, sink)
         except (KeyboardInterrupt, asyncio.CancelledError):
             sink.abort()
-            sink.note("Прервано.")
+            sink.note("Interrupted.")
             continue
         except Exception as e:  # network/auth/etc — never crash the REPL
-            sink.note(f"Ошибка: {type(e).__name__}: {e}")
+            sink.note(f"Error: {type(e).__name__}: {e}")
             continue
         sink.end_turn(text)

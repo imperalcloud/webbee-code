@@ -2,15 +2,15 @@ from dataclasses import dataclass
 
 _MODES = ("default", "plan", "autopilot")
 
-_HELP = """Команды:
-  /help              эта справка
-  /login             вход в аккаунт Imperal (браузер)
-  /logout            выйти, удалить локальные креды
-  /clear             очистить экран + сбросить счётчики сессии
-  /mode [default|plan|autopilot]   режим согласия (без арг — показать текущий)
-  /cost  (=/usage)   токены + $-стоимость за сессию
-  /status            cwd · git · поверхность · тир · баланс · версия
-  /exit  (=/quit)    выход"""
+_HELP = """Commands:
+  /help              show this help
+  /login             sign in to your Imperal account (browser)
+  /logout            sign out and remove local credentials
+  /clear             clear the screen + reset session counters
+  /mode [default|plan|autopilot]   consent mode (no arg — show current)
+  /cost  (=/usage)   tokens + $ cost this session
+  /status            cwd · git · surface · tokens · version
+  /exit  (=/quit)    quit"""
 
 
 @dataclass(frozen=True)
@@ -53,25 +53,25 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
     if cmd == "/logout":
         return SlashResult(handled=True, action="logout")
     if cmd == "/clear":
-        return SlashResult(handled=True, action="clear", message="Экран очищен, счётчики сброшены.")
+        return SlashResult(handled=True, action="clear", message="Screen cleared, counters reset.")
     if cmd in ("/cost", "/usage"):
         return SlashResult(handled=True, action="cost",
-                           message=f"За сессию: {ctx.tokens} tokens (~${ctx.cost_usd:.4f}). "
-                                   f"LLM-ходы не списывают credits.")
+                           message=f"This session: {ctx.tokens} tokens (~${ctx.cost_usd:.4f}). "
+                                   f"LLM turns don't spend credits.")
     if cmd == "/status":
-        auth = "вошёл" if ctx.logged_in else "НЕ вошёл (/login)"
-        msg = (f"поверхность: {ctx.surface}   режим: {ctx.mode}   {auth}\n"
+        auth = "signed in" if ctx.logged_in else "not signed in (/login)"
+        msg = (f"surface: {ctx.surface}   mode: {ctx.mode}   {auth}\n"
                f"cwd: {ctx.workspace}   git: {ctx.git_branch}\n"
                f"tokens: {ctx.tokens} (~${ctx.cost_usd:.4f})   webbee v{ctx.version}")
         return SlashResult(handled=True, action="status", message=msg)
     if cmd == "/mode":
         if not args:
             return SlashResult(handled=True, action="mode", new_mode=None,
-                               message=f"Текущий режим: {ctx.mode}. Доступно: {', '.join(_MODES)}.")
+                               message=f"Current mode: {ctx.mode}. Available: {', '.join(_MODES)}.")
         want = args[0].lower()
         if want not in _MODES:
             return SlashResult(handled=True, action="mode", new_mode=None,
-                               message=f"Неизвестный режим «{want}». Доступно: {', '.join(_MODES)}.")
+                               message=f"Unknown mode '{want}'. Available: {', '.join(_MODES)}.")
         return SlashResult(handled=True, action="mode", new_mode=want,
-                           message=f"Режим → {want}.")
-    return SlashResult(handled=True, message=f"Неизвестная команда «{cmd}». /help — список.")
+                           message=f"Mode → {want}.")
+    return SlashResult(handled=True, message=f"Unknown command '{cmd}'. /help for the list.")

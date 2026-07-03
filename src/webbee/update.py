@@ -48,5 +48,5 @@ def check_for_update(current: str, *, cache_path, now: float, fetch, ttl: float 
                 pass
 
     if latest and _ver(latest) > _ver(current):
-        return f"🐝 webbee v{latest} доступна — обнови: pipx upgrade webbee  (или: uv tool upgrade webbee)"
+        return f"🐝 webbee v{latest} available — upgrade: pipx upgrade webbee  (or: uv tool upgrade webbee)"
     return None

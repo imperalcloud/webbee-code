@@ -40,7 +40,7 @@ def main(argv=None) -> None:
         # unwinds here — exit clean, no traceback. (repl.py itself now cancels
         # a Ctrl-C mid-turn internally and returns to the prompt instead of
         # propagating — see run_repl.)
-        print("\nПока! 🐝")
+        print("\nBye 🐝")
 
 
 def _maybe_print_update_notice() -> None:

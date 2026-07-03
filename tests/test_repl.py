@@ -1,5 +1,9 @@
 import asyncio
+import re
+
 from webbee.repl import run_repl
+
+NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
 
 
 class FakeSink:
@@ -11,6 +15,7 @@ class FakeSink:
     def note(self, m): self.notes.append(m)
     def clear(self): self.cleared = True
     def abort(self): self.aborted = True
+    def banner(self, *a, **kw): ...
     # TurnSink no-ops
     def tool_start(self, *a): ...
     def tool_result(self, *a): ...
@@ -80,6 +85,7 @@ def test_logout_command_calls_auth():
     auth = FakeAuth()
     sink, agent = _run(read_line=_lines("/logout", "/exit"), auth=auth)
     assert auth.logged_out
+    assert any(not NO_CYRILLIC.search(n) for n in sink.notes)
 
 
 def test_agent_error_is_swallowed_and_loop_continues():
@@ -91,7 +97,8 @@ def test_agent_error_is_swallowed_and_loop_continues():
     agent = RaisingAgent()
     sink, agent = _run(read_line=_lines("do it", "/exit"), agent=agent)
     assert agent.tasks == ["do it"]
-    assert any("Ошибка" in n for n in sink.notes)
+    assert any("Error" in n for n in sink.notes)
+    assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
     assert sink.turns == []
 
 
@@ -99,6 +106,7 @@ def test_login_command_calls_auth_and_logs_in():
     auth = FakeAuth(logged_in=False)
     sink, agent = _run(read_line=_lines("/login", "/exit"), auth=auth)
     assert auth._in is True
+    assert any(not NO_CYRILLIC.search(n) for n in sink.notes)
 
 
 def test_mode_command_switches_agent_mode():
@@ -121,5 +129,19 @@ def test_ctrl_c_mid_turn_aborts_and_returns_to_prompt():
     sink, agent = _run(read_line=_lines("go", "/exit"), agent=agent)
     assert agent.tasks == ["go"]
     assert sink.aborted is True
-    assert any("Прервано" in n for n in sink.notes)
+    assert any("Interrupted" in n for n in sink.notes)
+    assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
     assert sink.turns == []
+
+
+def test_banner_shown_on_start():
+    class BSink(FakeSink):
+        def __init__(self):
+            super().__init__()
+            self.bannered = False
+        def banner(self, *a, **kw):
+            self.bannered = True
+
+    sink = BSink()
+    _run(read_line=_lines("/exit"), sink=sink)
+    assert sink.bannered
