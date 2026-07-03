@@ -224,6 +224,15 @@ def test_answer_marker_shows_webbee_name():
     assert "🐝 Webbee" in out            # name + bee, not a bare bee icon
 
 
+def test_status_bottom_counter_is_session_total():
+    s = _sink()
+    s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")     # session = 100
+    s.begin_turn(); s.usage(250, 0.02)                       # mid-turn (busy)
+    assert s.status()["tokens"] == 350                        # live session total incl. in-flight
+    s.end_turn("b")                                           # session = 350
+    assert s.status()["tokens"] == 350                        # idle: session total, no double-count
+
+
 def test_plan_blocked_prints_english_hint():
     s = _sink()
     s.plan_blocked("notes.delete_note")

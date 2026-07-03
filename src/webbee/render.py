@@ -126,6 +126,8 @@ class RichSink:
         self._started = self._clock()
         self._current = ""
         self._pending = ("", "")
+        self.tokens = 0        # per-turn live counters (usage frames are per-turn cumulative)
+        self.cost_usd = 0.0
         self._busy = True
         self.console.print()   # breathing room between the user's message and the response
         _invalidate()
@@ -254,10 +256,14 @@ class RichSink:
 
     # ---- dock bridge (read by tui.run_session's toolbar + Enter binding) ---
     def status(self) -> dict:
-        """Live state for the dock toolbar."""
+        """Live state for the dock toolbar. The bottom counter shows the SESSION
+        TOTAL (not per-turn): the running session total, plus the in-flight
+        turn's spend while busy (so it grows live), with no double-count at idle
+        (end_turn has already folded the finished turn into the session)."""
         return {"busy": self._busy, "current": self._current,
                 "elapsed": self._elapsed(), "tools": self._tools,
-                "tokens": self.tokens, "cost": self.cost_usd,
+                "tokens": self.session_tokens + (self.tokens if self._busy else 0),
+                "cost": self.session_cost + (self.cost_usd if self._busy else 0.0),
                 "consent": self.consent_pending()}
 
     def is_busy(self) -> bool:
