@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- Fix `/login` inside the REPL: it now runs the shared `imperal_mcp` auth flow
+  off the event loop, so the browser sign-in completes instead of failing with
+  "asyncio.run() cannot be called from a running event loop". (`webbee login`
+  from the shell already worked; this fixes the in-REPL command too — one auth
+  mechanism for every surface.)
+
 ## 0.1.0
 
 First public release.
