@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 
@@ -74,6 +75,10 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                 logged_in = False
                 sink.note("Вышел, локальные креды удалены.")
                 continue
+            if res.action == "clear":
+                sink.clear()
+                sink.note(res.message)
+                continue
             if res.action == "mode" and res.new_mode:
                 mode = res.new_mode
                 agent.mode = mode
@@ -85,6 +90,10 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         sink.begin_turn()
         try:
             text = await agent.run(line, sink)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            sink.abort()
+            sink.note("Прервано.")
+            continue
         except Exception as e:  # network/auth/etc — never crash the REPL
             sink.note(f"Ошибка: {type(e).__name__}: {e}")
             continue

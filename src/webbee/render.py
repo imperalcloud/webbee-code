@@ -46,6 +46,18 @@ class RichSink:
         self._stop_live()
         self.console.print(Text(message, style="yellow"))
 
+    def clear(self) -> None:
+        """/clear: wipe the terminal screen and reset the session counters
+        (credits, tools). Does NOT touch _started — that's turn-scoped."""
+        self.console.clear()
+        self.credits = 0
+        self._tools = 0
+
+    def abort(self) -> None:
+        """Ctrl-C mid-turn: stop any running Live cleanly (restores the
+        cursor). No printing — the caller (repl.py) prints the note."""
+        self._stop_live()
+
     # ---- TurnSink -------------------------------------------------------
     def tool_start(self, tool: str, args: dict) -> None:
         self._tools += 1

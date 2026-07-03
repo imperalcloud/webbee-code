@@ -31,13 +31,15 @@ def main(argv=None) -> None:
         return
 
     # Default: the polished REPL. Fire a non-blocking update-check first.
-    _maybe_print_update_notice()
     from webbee.repl import run_repl
     try:
+        _maybe_print_update_notice()
         asyncio.run(run_repl(cfg, args.mode))
     except KeyboardInterrupt:
-        # Ctrl-C mid-turn (while awaiting the agent) unwinds here — exit clean,
-        # no traceback. (repl.py catches Ctrl-C only around the input prompt.)
+        # Ctrl-C during the update-check fetch, or at the read_line() prompt,
+        # unwinds here — exit clean, no traceback. (repl.py itself now cancels
+        # a Ctrl-C mid-turn internally and returns to the prompt instead of
+        # propagating — see run_repl.)
         print("\nПока! 🐝")
 
 

@@ -3,10 +3,14 @@ from webbee.repl import run_repl
 
 
 class FakeSink:
-    def __init__(self): self.turns = []; self.notes = []; self.credits = 0; self.mode = None
+    def __init__(self):
+        self.turns = []; self.notes = []; self.credits = 0; self.mode = None
+        self.aborted = False; self.cleared = False
     def begin_turn(self): ...
     def end_turn(self, text): self.turns.append(text)
     def note(self, m): self.notes.append(m)
+    def clear(self): self.cleared = True
+    def abort(self): self.aborted = True
     # TurnSink no-ops
     def tool_start(self, *a): ...
     def tool_result(self, *a): ...
@@ -100,3 +104,22 @@ def test_login_command_calls_auth_and_logs_in():
 def test_mode_command_switches_agent_mode():
     sink, agent = _run(read_line=_lines("/mode autopilot", "/exit"))
     assert agent.mode == "autopilot"
+
+
+def test_clear_command_clears_sink():
+    sink, agent = _run(read_line=_lines("/clear", "/exit"))
+    assert sink.cleared is True
+
+
+def test_ctrl_c_mid_turn_aborts_and_returns_to_prompt():
+    class InterruptingAgent(FakeAgent):
+        async def run(self, task, sink):
+            self.tasks.append(task)
+            raise KeyboardInterrupt
+
+    agent = InterruptingAgent()
+    sink, agent = _run(read_line=_lines("go", "/exit"), agent=agent)
+    assert agent.tasks == ["go"]
+    assert sink.aborted is True
+    assert any("Прервано" in n for n in sink.notes)
+    assert sink.turns == []

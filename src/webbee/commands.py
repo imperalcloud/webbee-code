@@ -6,7 +6,7 @@ _HELP = """Команды:
   /help              эта справка
   /login             вход в аккаунт Imperal (браузер)
   /logout            выйти, удалить локальные креды
-  /clear             новая сессия (сброс контекста + экран)
+  /clear             очистить экран + сбросить счётчики сессии
   /mode [default|plan|autopilot]   режим согласия (без арг — показать текущий)
   /cost  (=/usage)   потраченные credits за сессию
   /status            cwd · git · поверхность · тир · баланс · версия
@@ -52,7 +52,7 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
     if cmd == "/logout":
         return SlashResult(handled=True, action="logout")
     if cmd == "/clear":
-        return SlashResult(handled=True, action="clear", message="Новая сессия.")
+        return SlashResult(handled=True, action="clear", message="Экран очищен, счётчики сброшены.")
     if cmd in ("/cost", "/usage"):
         return SlashResult(handled=True, action="cost",
                            message=f"Потрачено за сессию: {ctx.credits} credits.")

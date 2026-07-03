@@ -80,3 +80,17 @@ def test_panel_release_shows_url():
     s.panel_release("https://panel.imperal.io/x", "Это стоит денег")
     out = s.console.export_text()
     assert "panel.imperal.io/x" in out
+
+
+def test_clear_resets_credits_and_tools():
+    s = _sink()
+    s.credits = 5
+    s._tools = 3
+    s.clear()
+    assert s.credits == 0
+    assert s._tools == 0
+
+
+def test_abort_does_not_raise_without_active_live():
+    s = _sink()
+    s.abort()  # no live running — must be a clean no-op
