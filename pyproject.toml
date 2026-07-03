@@ -1,8 +1,8 @@
 [project]
 name = "webbee"
-version = "0.0.1"
+version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["imperal-mcp>=0.4.0", "imperal-sdk>=5.9.2", "httpx>=0.27", "httpx-sse>=0.4"]
+dependencies = ["imperal-mcp>=0.4.0", "imperal-sdk>=5.9.2", "httpx>=0.27", "httpx-sse>=0.4", "rich>=13.7"]
 
 [project.scripts]
 webbee = "webbee.cli:main"
