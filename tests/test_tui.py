@@ -18,5 +18,6 @@ def test_toolbar_has_mode_tokens_cost_and_hint():
     assert "plan" in t
     assert "51.0k" in t
     assert "$0.0664" in t
-    assert "tab" in t.lower()          # Shift+Tab hint
+    assert "Shift + TAB" in t          # spelled in words, no glyph
+    assert "⇧⇥" not in t     # the ⇧⇥ glyph must NOT appear
     assert not NO_CYRILLIC.search(t)

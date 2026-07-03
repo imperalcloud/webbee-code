@@ -18,8 +18,8 @@ def next_mode(mode: str) -> str:
 
 
 def build_toolbar(mode: str, tokens: int, cost: float) -> str:
-    return (f" mode  {mode}   ·   🔤 {_fmt_tokens(tokens)} · ${cost:.4f}"
-            f"   ·   ⇧⇥ tab: mode ")
+    return (f" mode: {mode}   ·   🔤 {_fmt_tokens(tokens)} · ${cost:.4f}"
+            f"   ·   Shift + TAB: switch mode ")
 
 
 async def prompt(*, mode_getter, usage_getter, on_cycle) -> "str | None":
