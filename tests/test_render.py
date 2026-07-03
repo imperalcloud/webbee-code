@@ -71,22 +71,6 @@ def test_abort_does_not_raise_without_active_live():
 
 # ---- WOW visual system (R1 Task 1) --------------------------------------
 
-def test_banner_english_and_context():
-    s = _sink()
-    s.banner("0.1.0", "/home/x/proj", True, "terminal")
-    out = s.console.export_text()
-    assert "webbee" in out and "0.1.0" in out
-    assert "terminal" in out and "signed in" in out
-    assert "/help" in out
-    assert not NO_CYRILLIC.search(out)
-
-
-def test_banner_signed_out_hint():
-    s = _sink()
-    s.banner("0.1.0", "/x", False, "terminal")
-    assert "/login" in s.console.export_text()
-
-
 def test_action_feed_and_answer_english():
     s = _sink()
     s.begin_turn()
@@ -139,3 +123,56 @@ def test_usage_and_clear_still_work():
     s._tools = 3
     s.clear()
     assert s.tokens == 0 and s.cost_usd == 0.0 and s._tools == 0
+
+
+# ---- WEBBEE CODE welcome + account panel + session /cost (Chunk 1 Task 2) --
+
+def test_welcome_full_account_aligned():
+    from webbee.account import Account
+    from webbee.banner_art import WEBBEE_CODE
+    s = _sink()
+    acc = Account(signed_in=True, email="v@imperal.io", nickname="notvallium",
+                  plan="pro", plan_status="active", plan_renews="2026-08-01",
+                  dev_tier="explorer", member_since="Apr 2026")
+    s.welcome(acc, "/home/x/proj", "terminal")
+    out = s.console.export_text()
+    # WEBBEE_CODE is figlet-style line art (no literal "WEBBEE" letters) —
+    # assert a stable fragment of the actual logo constant renders instead.
+    assert WEBBEE_CODE.splitlines()[2] in out                  # ascii logo present
+    assert "i m p e r a l . i o" in out  # letter-spaced brand caption, per Target welcome
+    assert "v@imperal.io" in out and "notvallium" in out
+    assert "pro" in out.lower() and "active" in out
+    assert "explorer" in out and "Apr 2026" in out
+    assert "/help" in out
+    assert not NO_CYRILLIC.search(out)
+
+
+def test_welcome_signed_out_minimal():
+    from webbee.account import Account
+    s = _sink()
+    s.welcome(Account(signed_in=False), "/x", "terminal")
+    out = s.console.export_text()
+    assert "i m p e r a l . i o" in out  # letter-spaced brand caption, per Target welcome and "/login" in out
+
+
+def test_session_cost_accumulates_across_turns():
+    s = _sink()
+    s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")
+    s.begin_turn(); s.usage(250, 0.02); s.end_turn("b")   # per-turn cumulative frames
+    assert s.session_tokens == 350
+    assert abs(s.session_cost - 0.03) < 1e-9
+
+
+def test_turn_footer_shows_session_total():
+    s = _sink()
+    s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")
+    s.begin_turn(); s.usage(250, 0.02); s.end_turn("b")
+    out = s.console.export_text()
+    assert "session" in out.lower() and "350" in out
+
+
+def test_clear_resets_session_totals():
+    s = _sink()
+    s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")
+    s.clear()
+    assert s.session_tokens == 0 and s.session_cost == 0.0
