@@ -1,3 +1,5 @@
+import asyncio
+
 from webbee.session import handle_tool_request, handle_confirm_request, build_coding_context
 
 
@@ -17,15 +19,17 @@ def test_handle_tool_request_runs_and_wraps():
 
 def test_confirm_autopilot_approves_without_asking():
     called = []
-    out = handle_confirm_request({"req_id": "r2"}, "autopilot", lambda a, t, g: called.append(1) or "x")
+    out = asyncio.run(handle_confirm_request(
+        {"req_id": "r2"}, "autopilot", lambda a, t, g: called.append(1) or "x"))
     assert out == {"req_id": "r2", "result": {"approved": True}}
     assert called == []  # never prompts in autopilot
 
 
 def test_confirm_plan_denies_with_reason_without_asking():
     called = []
-    out = handle_confirm_request({"req_id": "r3", "tool": "delete_note"}, "plan",
-                                 lambda a, t, g: called.append(1) or "x")
+    out = asyncio.run(handle_confirm_request(
+        {"req_id": "r3", "tool": "delete_note"}, "plan",
+        lambda a, t, g: called.append(1) or "x"))
     assert out == {"req_id": "r3", "result": {"approved": False, "reason": "plan_mode"}}
     assert called == []  # plan never prompts either
 
@@ -34,10 +38,10 @@ def test_confirm_default_relays_raw_reply_verbatim():
     # ICNLI: client must NOT interpret — it relays the raw reply as-is.
     frame = {"req_id": "r4", "app_id": "webbee", "tool": "bash", "args": {"command": "ls"}}
     seen = {}
-    def ask(app_id, tool, args):
+    async def ask(app_id, tool, args):
         seen.update(app_id=app_id, tool=tool, args=args)
         return "давай, только осторожно"
-    out = handle_confirm_request(frame, "default", ask)
+    out = asyncio.run(handle_confirm_request(frame, "default", ask))
     assert out == {"req_id": "r4", "result": {"consent_reply": "давай, только осторожно"}}
     assert seen == {"app_id": "webbee", "tool": "bash", "args": {"command": "ls"}}
 

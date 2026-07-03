@@ -9,17 +9,18 @@ def handle_tool_request(frame: dict, executor) -> dict:
     return {"req_id": frame["req_id"], "result": executor.run(frame["tool"], frame.get("args", {}))}
 
 
-def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
+async def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
     """ICNLI consent path. The client does NOT interpret consent words — it
     relays the user's RAW reply; the kernel brain interprets intent
     (safe-by-default). autopilot/plan are explicit and never prompt.
-    `ask_consent(app_id, tool, args) -> str` returns the raw reply."""
+    `ask_consent(app_id, tool, args)` is an async coroutine returning the raw
+    reply (resolved through the pinned dock, or a sync fallback reader)."""
     req_id = frame["req_id"]
     if mode == "autopilot":
         return {"req_id": req_id, "result": {"approved": True}}
     if mode == "plan":
         return {"req_id": req_id, "result": {"approved": False, "reason": "plan_mode"}}
-    raw = ask_consent(frame.get("app_id", ""), frame.get("tool", ""), frame.get("args", {}))
+    raw = await ask_consent(frame.get("app_id", ""), frame.get("tool", ""), frame.get("args", {}))
     return {"req_id": req_id, "result": {"consent_reply": raw}}
 
 
@@ -123,7 +124,7 @@ class AgentSession:
                         else:
                             if self.mode == "plan":
                                 sink.plan_blocked(frame.get("tool", ""))
-                            out = handle_confirm_request(frame, self.mode, sink.ask_consent)
+                            out = await handle_confirm_request(frame, self.mode, sink.ask_consent)
                             seen[rid] = out
                         await self._post_result(client, session_id, out)
 

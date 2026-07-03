@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 from rich.console import Console
@@ -29,7 +30,7 @@ def test_tool_lines_render():
 def test_ask_consent_relays_raw_input():
     console = Console(record=True, width=80)
     s = RichSink(console=console, live_enabled=False, input_fn=lambda p: "  ага давай  ", clock=lambda: 0.0)
-    reply = s.ask_consent("webbee", "bash", {"command": "ls"})
+    reply = asyncio.run(s.ask_consent("webbee", "bash", {"command": "ls"}))
     assert reply == "ага давай"  # trimmed, but NOT interpreted — user's own words, any language
 
 
@@ -201,7 +202,7 @@ def test_consent_shows_human_summary_not_dict():
     console = Console(record=True, width=90)
     s = RichSink(console=console, live_enabled=False,
                  input_fn=lambda p: "yes", clock=lambda: 0.0)
-    s.ask_consent("notes", "delete_note", {"note_id": "c93dc86b", "title": "Q3 budget"})
+    asyncio.run(s.ask_consent("notes", "delete_note", {"note_id": "c93dc86b", "title": "Q3 budget"}))
     out = console.export_text()
     assert "Q3 budget" in out                     # human-readable salient arg
     assert "note_id" not in out and "{" not in out  # no raw dict dump
