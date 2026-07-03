@@ -2,40 +2,27 @@ import os
 import subprocess
 
 
-def handle_tool_request(frame: dict, executor, gate, prompt) -> dict:
-    """Offline-testable core of the tool loop. `frame` is a `tool_request`
-    frame; `executor` is a LocalToolExecutor; `gate` is a ConsentGate;
-    `prompt` is a callable (tool, args) -> bool (True = allow)."""
+def handle_tool_request(frame: dict, executor) -> dict:
+    """Offline-testable core: run a (kernel-pre-approved) local tool.
+    The kernel gates write/bash consent via confirm_request BEFORE
+    dispatching, so a tool_request here is always cleared to run."""
+    return {"req_id": frame["req_id"], "result": executor.run(frame["tool"], frame.get("args", {}))}
+
+
+def handle_confirm_request(frame: dict, mode: str, read_reply=input) -> dict:
+    """Offline-testable core of the ICNLI consent path. The client does NOT
+    interpret consent words — it relays the user's RAW reply; the kernel
+    brain interprets intent (safe-by-default). autopilot/plan are explicit."""
     req_id = frame["req_id"]
-    tool = frame["tool"]
-    args = frame.get("args", {})
-
-    d = gate.evaluate(tool)
-    if not d.allow:
-        result = {"ok": False, "content": d.reason}
-    elif d.needs_prompt and not prompt(tool, args):
-        result = {"ok": False, "content": "user declined"}
-    else:
-        result = executor.run(tool, args)
-
-    return {"req_id": req_id, "result": result}
-
-
-def handle_confirm_request(frame: dict, prompt, mode: str) -> dict:
-    """Offline-testable core of the extension-consent path. Returns the reply
-    body for POST /result: {"req_id", "result": {"approved": bool}}. Reuses the
-    same y/N `prompt` callable as local tools; mode-aware (autopilot auto-approves,
-    plan disables writes) — the SAME safe-by-default philosophy as ConsentGate."""
-    req_id = frame["req_id"]
+    if mode == "autopilot":
+        return {"req_id": req_id, "result": {"approved": True}}
+    if mode == "plan":
+        return {"req_id": req_id, "result": {"approved": False}}
     app_id = frame.get("app_id", "")
     tool = frame.get("tool", "")
-    if mode == "autopilot":
-        approved = True
-    elif mode == "plan":
-        approved = False
-    else:
-        approved = bool(prompt(f"{app_id}.{tool}", frame.get("args", {})))
-    return {"req_id": req_id, "result": {"approved": approved}}
+    label = f"{app_id}.{tool}" if app_id else tool
+    raw = read_reply(f"Run {label} {frame.get('args', {})}? ")
+    return {"req_id": req_id, "result": {"consent_reply": raw}}
 
 
 def build_coding_context(workspace_root: str) -> dict:
@@ -71,8 +58,9 @@ def build_coding_context(workspace_root: str) -> dict:
 class AgentSession:
     """Client-side driver for a coding session against the Imperal cloud.
     The brain runs server-side; this is the "hands" — it streams down
-    tool_request frames over SSE, runs each tool locally under the
-    ConsentGate, and posts results back until a final frame arrives."""
+    kernel-pre-approved tool_request frames over SSE, runs each tool
+    locally, relays confirm_request replies raw for the brain to
+    interpret, and posts results back until a final frame arrives."""
 
     def __init__(self, cfg, token_provider, workspace_root: str, mode: str = "default") -> None:
         self.cfg = cfg
@@ -84,15 +72,10 @@ class AgentSession:
         token = await self.token_provider()
         return {"Authorization": f"Bearer {token}"}
 
-    def _prompt(self, tool: str, args: dict) -> bool:
-        resp = input(f"Run {tool} {args}? [y/N] ")
-        return resp.strip().lower() == "y"
-
     async def run(self, task: str) -> str:
         import httpx
         from httpx_sse import aconnect_sse
 
-        from webbee.consent import ConsentGate
         from webbee.tools import LocalToolExecutor
         from imperal_mcp.client import ImperalClient
 
@@ -100,7 +83,6 @@ class AgentSession:
         imperal_id = await ImperalClient(self.cfg, self.token_provider).whoami()
 
         executor = LocalToolExecutor(self.workspace_root)
-        gate = ConsentGate(self.mode)
 
         headers = await self._headers()
         async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:
@@ -128,7 +110,7 @@ class AgentSession:
                         if rid in seen:
                             out = seen[rid]  # duplicate — do NOT re-execute
                         else:
-                            out = handle_tool_request(frame, executor, gate, self._prompt)
+                            out = handle_tool_request(frame, executor)
                             seen[rid] = out
                         headers = await self._headers()
                         await client.post(
@@ -141,7 +123,7 @@ class AgentSession:
                         if rid in seen:
                             out = seen[rid]  # duplicate — do NOT re-prompt
                         else:
-                            out = handle_confirm_request(frame, self._prompt, self.mode)
+                            out = handle_confirm_request(frame, self.mode)
                             seen[rid] = out
                         headers = await self._headers()
                         await client.post(
