@@ -9,4 +9,14 @@ def test_turnsink_is_runtime_checkable():
         def panel_release(self, panel_url, summary): ...
         def progress(self, text): ...
         def usage(self, tokens, cost_usd): ...
+        def plan_blocked(self, tool): ...
     assert isinstance(Fake(), TurnSink)
+
+
+def test_richsink_still_satisfies_turnsink_with_plan_blocked():
+    from webbee.render import RichSink
+    from rich.console import Console
+    s = RichSink(console=Console(record=True), live_enabled=False,
+                 input_fn=lambda p: "", clock=lambda: 0.0)
+    assert isinstance(s, TurnSink)
+    assert hasattr(s, "plan_blocked")

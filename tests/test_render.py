@@ -176,3 +176,13 @@ def test_clear_resets_session_totals():
     s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")
     s.clear()
     assert s.session_tokens == 0 and s.session_cost == 0.0
+
+
+def test_plan_blocked_prints_english_hint():
+    s = _sink()
+    s.plan_blocked("notes.delete_note")
+    out = s.console.export_text()
+    assert "plan mode" in out.lower()
+    assert "notes.delete_note" in out
+    assert "shift+tab" in out.lower()
+    assert not NO_CYRILLIC.search(out)

@@ -22,9 +22,12 @@ def test_confirm_autopilot_approves_without_asking():
     assert called == []  # never prompts in autopilot
 
 
-def test_confirm_plan_denies_without_asking():
-    out = handle_confirm_request({"req_id": "r3"}, "plan", lambda a, t, g: "x")
-    assert out == {"req_id": "r3", "result": {"approved": False}}
+def test_confirm_plan_denies_with_reason_without_asking():
+    called = []
+    out = handle_confirm_request({"req_id": "r3", "tool": "delete_note"}, "plan",
+                                 lambda a, t, g: called.append(1) or "x")
+    assert out == {"req_id": "r3", "result": {"approved": False, "reason": "plan_mode"}}
+    assert called == []  # plan never prompts either
 
 
 def test_confirm_default_relays_raw_reply_verbatim():

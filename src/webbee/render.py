@@ -183,6 +183,17 @@ class RichSink:
         if text:
             self._print_above(Text("  " + text, style="dim italic"))
 
+    def plan_blocked(self, tool: str) -> None:
+        """Plan mode auto-declines writes/destructive. Tell the user WHY and
+        how to allow it (Shift+Tab) — never silently do nothing. Autopilot and
+        default never reach this."""
+        self._stop_live()
+        self.console.print(Text.assemble(
+            ("  ⛔ plan mode", f"bold {_BEE}"),
+            (f" — {tool} blocked. " if tool else " — action blocked. ", "white"),
+            ("Press Shift+Tab to switch to default or autopilot to allow it.", "dim")))
+        self._arm_live()
+
     def usage(self, tokens: int, cost_usd: float) -> None:
         # Cumulative frame — trust the server's running totals verbatim.
         self.tokens = tokens

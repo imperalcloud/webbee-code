@@ -18,7 +18,7 @@ def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
     if mode == "autopilot":
         return {"req_id": req_id, "result": {"approved": True}}
     if mode == "plan":
-        return {"req_id": req_id, "result": {"approved": False}}
+        return {"req_id": req_id, "result": {"approved": False, "reason": "plan_mode"}}
     raw = ask_consent(frame.get("app_id", ""), frame.get("tool", ""), frame.get("args", {}))
     return {"req_id": req_id, "result": {"consent_reply": raw}}
 
@@ -121,6 +121,8 @@ class AgentSession:
                         if rid in seen:
                             out = seen[rid]
                         else:
+                            if self.mode == "plan":
+                                sink.plan_blocked(frame.get("tool", ""))
                             out = handle_confirm_request(frame, self.mode, sink.ask_consent)
                             seen[rid] = out
                         await self._post_result(client, session_id, out)
