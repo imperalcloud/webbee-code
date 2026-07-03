@@ -20,8 +20,8 @@ class CommandContext:
     version: str
     surface: str
     logged_in: bool
-    tokens: int
-    cost_usd: float
+    session_tokens: int
+    session_cost: float
     git_branch: str
 
 
@@ -56,13 +56,13 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         return SlashResult(handled=True, action="clear", message="Screen cleared, counters reset.")
     if cmd in ("/cost", "/usage"):
         return SlashResult(handled=True, action="cost",
-                           message=f"This session: {ctx.tokens} tokens (~${ctx.cost_usd:.4f}). "
+                           message=f"This session: {ctx.session_tokens} tokens (~${ctx.session_cost:.4f}). "
                                    f"LLM turns don't spend credits.")
     if cmd == "/status":
         auth = "signed in" if ctx.logged_in else "not signed in (/login)"
         msg = (f"surface: {ctx.surface}   mode: {ctx.mode}   {auth}\n"
                f"cwd: {ctx.workspace}   git: {ctx.git_branch}\n"
-               f"tokens: {ctx.tokens} (~${ctx.cost_usd:.4f})   webbee v{ctx.version}")
+               f"tokens: {ctx.session_tokens} (~${ctx.session_cost:.4f})   webbee v{ctx.version}")
         return SlashResult(handled=True, action="status", message=msg)
     if cmd == "/mode":
         if not args:

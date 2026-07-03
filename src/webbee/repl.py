@@ -17,10 +17,10 @@ def _git_branch(workspace: str) -> str:
 
 
 async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
-                   agent_factory=None, auth=None) -> None:
+                   agent_factory=None, auth=None, account_fetcher=None) -> None:
     """Interactive coding REPL. Non-slash lines go to the agent; slash lines
-    are handled locally. Injectable deps (sink/read_line/agent_factory/auth)
-    exist for tests; production passes none."""
+    are handled locally. Injectable deps (sink/read_line/agent_factory/auth/
+    account_fetcher) exist for tests; production passes none."""
     if auth is None:
         from imperal_mcp import auth as _auth
         auth = _auth
@@ -29,23 +29,17 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         sink = RichSink()
     if agent_factory is None:
         agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m)  # noqa: E731
+    if account_fetcher is None:
+        from webbee.account import fetch_account as account_fetcher
 
     workspace = os.getcwd()
 
     async def token_provider() -> str:
         return await auth.ensure_access_token(cfg)
 
-    async def _logged_in() -> bool:
-        try:
-            await auth.ensure_access_token(cfg)
-            return True
-        except Exception:
-            return False
-
-    logged_in = await _logged_in()
-    sink.banner(__version__, workspace, logged_in, "terminal")
-    if not logged_in:
-        sink.note("You're not signed in. Type /login to sign in.")
+    account = await account_fetcher(cfg, token_provider)
+    logged_in = account.signed_in
+    sink.welcome(account, workspace, "terminal")
 
     agent = agent_factory(cfg, token_provider, workspace, mode)
 
@@ -59,8 +53,8 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
 
         ctx = CommandContext(mode=mode, workspace=workspace, version=__version__,
                              surface="terminal", logged_in=logged_in,
-                             tokens=getattr(sink, "tokens", 0),
-                             cost_usd=getattr(sink, "cost_usd", 0.0),
+                             session_tokens=getattr(sink, "session_tokens", 0),
+                             session_cost=getattr(sink, "session_cost", 0.0),
                              git_branch=_git_branch(workspace))
         res = dispatch(line, ctx)
 

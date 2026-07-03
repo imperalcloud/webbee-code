@@ -6,8 +6,7 @@ class _Cfg:
     api_url = "https://auth.imperal.io"
 
 
-def _run(get, tp=None):
-    tp = tp or (lambda: _ok_token())
+def _run(get):
     async def _tok(): return "tok"
     return asyncio.run(fetch_account(_Cfg(), _tok, get=get))
 

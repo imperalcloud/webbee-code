@@ -1,6 +1,7 @@
 import asyncio
 import re
 
+from webbee.account import Account
 from webbee.repl import run_repl
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
@@ -15,7 +16,7 @@ class FakeSink:
     def note(self, m): self.notes.append(m)
     def clear(self): self.cleared = True
     def abort(self): self.aborted = True
-    def banner(self, *a, **kw): ...
+    def welcome(self, *a, **kw): ...
     # TurnSink no-ops
     def tool_start(self, *a): ...
     def tool_result(self, *a): ...
@@ -50,13 +51,20 @@ def _lines(*items):
     return read
 
 
+async def _fake_account_fetcher(cfg, token_provider):
+    """Default test double for run_repl's account_fetcher — never touches the
+    network (unlike the real fetch_account, which calls out over httpx)."""
+    return Account(signed_in=True, email="u@imperal.io")
+
+
 def _run(**kw):
     from webbee.config import Config
     cfg = Config(api_url="http://x", panel_url="http://p")
     sink = kw.pop("sink", FakeSink())
     agent = kw.pop("agent", FakeAgent())
     asyncio.run(run_repl(cfg, "default", sink=sink, agent_factory=lambda c, tp, ws, m: agent,
-                         read_line=kw.pop("read_line"), auth=kw.pop("auth", FakeAuth())))
+                         read_line=kw.pop("read_line"), auth=kw.pop("auth", FakeAuth()),
+                         account_fetcher=kw.pop("account_fetcher", _fake_account_fetcher)))
     return sink, agent
 
 
@@ -134,14 +142,10 @@ def test_ctrl_c_mid_turn_aborts_and_returns_to_prompt():
     assert sink.turns == []
 
 
-def test_banner_shown_on_start():
-    class BSink(FakeSink):
-        def __init__(self):
-            super().__init__()
-            self.bannered = False
-        def banner(self, *a, **kw):
-            self.bannered = True
-
-    sink = BSink()
+def test_welcome_shown_on_start():
+    class WSink(FakeSink):
+        def __init__(self): super().__init__(); self.welcomed=False
+        def welcome(self, account, cwd, surface): self.welcomed=True
+    sink=WSink()
     _run(read_line=_lines("/exit"), sink=sink)
-    assert sink.bannered
+    assert sink.welcomed
