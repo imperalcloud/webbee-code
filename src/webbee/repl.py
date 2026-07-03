@@ -105,6 +105,7 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
             continue
 
         # A task for the agent.
+        sink.user_echo(line)
         sink.begin_turn()
         try:
             text = await agent.run(line, sink)

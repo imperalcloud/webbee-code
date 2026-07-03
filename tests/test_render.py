@@ -208,6 +208,14 @@ def test_consent_shows_human_summary_not_dict():
     assert "notes·delete_note" in out
 
 
+def test_user_echo_is_dim_unboxed_line():
+    s = _sink()
+    s.user_echo("delete my Q3 note")
+    out = s.console.export_text()
+    assert "❯ delete my Q3 note" in out
+    assert "╭" not in out and "│" not in out and "╰" not in out   # NOT boxed
+
+
 def test_plan_blocked_prints_english_hint():
     s = _sink()
     s.plan_blocked("notes.delete_note")

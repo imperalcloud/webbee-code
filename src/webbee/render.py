@@ -131,6 +131,11 @@ class RichSink:
         self._stop_live()
         self.console.print(Text("  " + message, style=_BEE))
 
+    def user_echo(self, text: str) -> None:
+        """Commit the just-sent user message as a quiet, UN-boxed dim line so
+        past turns read as calm scrollback — only the LIVE input is bordered."""
+        self.console.print(Text("  ❯ " + text, style="dim"))
+
     def clear(self) -> None:
         """/clear: wipe the screen + reset the session counters (tokens,
         cost, tools). Does NOT touch _started — that's turn-scoped."""
