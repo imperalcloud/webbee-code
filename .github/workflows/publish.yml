@@ -13,6 +13,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release for the tag
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,3 +28,20 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+      # Mirror the PyPI release as a GitHub Release (so the repo's Releases
+      # sidebar tracks the latest version) with notes from CHANGELOG.md.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python - "$VERSION" > notes.md <<'PY'
+          import sys, re, pathlib
+          v = sys.argv[1]
+          text = pathlib.Path("CHANGELOG.md").read_text()
+          m = re.search(rf"^## {re.escape(v)}\b.*?(?=^## |\Z)", text, re.S | re.M)
+          sys.stdout.write(m.group(0).strip() if m else
+                           f"Published to PyPI: https://pypi.org/project/webbee/{v}/")
+          PY
+          gh release create "$GITHUB_REF_NAME" \
+            --title "webbee ${GITHUB_REF_NAME}" --latest --notes-file notes.md
