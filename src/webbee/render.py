@@ -42,12 +42,24 @@ class RichSink:
 
     # ---- welcome ------------------------------------------------------------
     def welcome(self, account, cwd: str, surface: str) -> None:
-        """One-time launch welcome: WEBBEE CODE ASCII + imperal.io + an honest
-        account panel (who/plan/tier/member-since). Missing fields simply omit
-        their row; signed-out shows only the /login hint."""
+        """One-time launch welcome: CLEAR the screen so webbee owns the window,
+        then a centered WEBBEE CODE logo + imperal.io + an honest account panel
+        (who/plan/tier/member-since). Everything is centered to the terminal
+        width as one splash — nothing floats. Missing fields omit their row;
+        signed-out shows only the /login hint."""
+        self.console.clear()
+        w = self.console.width
+
+        def _center_block(text: str) -> str:
+            lines = text.splitlines()
+            bw = max((len(line) for line in lines), default=0)
+            pad = " " * max(0, (w - bw) // 2)
+            return "\n".join(pad + line for line in lines)
+
         self.console.print()
-        self.console.print(Text(WEBBEE_CODE + "  🐝", style=f"bold {_BEE}"))
-        self.console.print(Text("·  i m p e r a l . i o  ·".center(self.console.width), style=_ACCENT))
+        self.console.print(Text(_center_block(WEBBEE_CODE), style=f"bold {_BEE}"))
+        self.console.print(Text("🐝".center(w), style=f"bold {_BEE}"))
+        self.console.print(Text("·  i m p e r a l . i o  ·".center(w), style=_ACCENT))
         self.console.print()
         rows = []
         if account.signed_in:
@@ -63,10 +75,12 @@ class RichSink:
                 rows.append(("Member since", account.member_since))
         else:
             rows.append(("", "not signed in — /login"))
+        bw = max((len(label.ljust(14) + value) for label, value in rows), default=0)
+        pad = " " * max(0, (w - bw) // 2)
         for label, value in rows:
-            self.console.print(Text.assemble(("   " + label.ljust(14), "dim"), (value, "white")))
+            self.console.print(Text.assemble((pad + label.ljust(14), "dim"), (value, "white")))
         self.console.print()
-        self.console.print(Text("   /help · Ctrl-D to exit", style="dim"))
+        self.console.print(Text("/help · Ctrl-D to exit".center(w), style="dim"))
         self.console.print()
 
     # ---- turn lifecycle -------------------------------------------------
