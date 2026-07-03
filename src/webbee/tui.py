@@ -20,20 +20,28 @@ def next_mode(mode: str) -> str:
 
 def build_toolbar(mode: str, tokens: int, cost: float, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
-                  consent: bool = False) -> str:
-    """The single status line under the pinned input box. Three states:
-    consent (awaiting an approve/deny reply), busy (a turn is running — the
-    live status the old Rich spinner used to show, with an animated frame), and
-    idle (mode + SESSION spend + the Shift + TAB hint spelled in words)."""
+                  consent: bool = False) -> list:
+    """The status line under the pinned input box, as prompt_toolkit formatted
+    text (per-segment styled). Three states: consent (awaiting a reply), busy
+    (a turn is running — an ANIMATED coloured spinner + the current action in
+    accent, so it pops, not grey), and idle (mode value coloured PER MODE —
+    default cyan / plan purple / autopilot yellow — + SESSION spend + the
+    Shift + TAB hint). Style classes are defined in run_session's Style."""
     if consent:
-        return "  approve? type y / n / a reply · Enter to send"
+        return [("class:tb.consent", "  approve? type y / n / a reply · Enter to send")]
     if busy:
-        _cur = f" · {current}" if current else ""
-        _spin = _SPINNER[int(elapsed * 10) % len(_SPINNER)]   # animates via the ticker
-        return (f"  {_spin} working{_cur} · {elapsed:.0f}s · {tools}"
-                f" · {_fmt_tokens(tokens)} tok   ·   Ctrl-C to stop")
-    return (f"  mode: {mode}   ·   {_fmt_tokens(tokens)} tok · ${cost:.4f}"
-            f"   ·   Shift + TAB: switch mode")
+        spin = _SPINNER[int(elapsed * 10) % len(_SPINNER)]   # animates via the ticker
+        frags = [("class:tb.spin", f"  {spin} "), ("class:tb.working", "working")]
+        if current:
+            frags += [("class:tb.dim", " · "), ("class:tb.action", current)]
+        frags.append(("class:tb.dim",
+                      f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"
+                      f"   ·   Ctrl-C to stop"))
+        return frags
+    return [("class:tb.dim", "  mode: "),
+            (f"class:tb.mode.{mode}", mode),
+            ("class:tb.dim",
+             f"   ·   {_fmt_tokens(tokens)} tok · ${cost:.4f}   ·   Shift + TAB: switch mode")]
 
 
 class OutputPane:
@@ -177,13 +185,19 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput("❯ ", style="class:prompt")]),
         height=1)
-    toolbar = Window(FormattedTextControl(_toolbar), height=1,
-                     always_hide_cursor=True, style="class:toolbar")
+    toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
     root = HSplit([pane.window, Frame(input_win), toolbar])
     style = Style.from_dict({
-        "frame.border": "#5f5f5f",       # muted grey chrome — furniture, not focus
-        "toolbar": "#8a8a8a",            # dim
-        "prompt": "#00afd7 bold",        # cyan ❯ — the one interactive accent
+        "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
+        "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
+        "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
+        "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
+        "tb.working": "#e8a317",             # 'working' — yellow
+        "tb.action": "#00afd7",              # current action — cyan
+        "tb.consent": "#e8a317 bold",        # consent prompt line — yellow
+        "tb.mode.default": "#00afd7",        # default — cyan
+        "tb.mode.plan": "#af87ff",           # plan — purple
+        "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
     })
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)
