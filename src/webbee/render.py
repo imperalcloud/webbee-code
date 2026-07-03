@@ -86,7 +86,7 @@ class RichSink:
     # ---- TurnSink -------------------------------------------------------
     def tool_start(self, tool: str, args: dict) -> None:
         self._tools += 1
-        icon = _ICON.get(tool, "•")
+        icon = _ICON.get(tool, "⚡")
         arg = args.get("path") or args.get("pattern") or args.get("command") or ""
         self._current = f"{tool} {str(arg)[:40]}".strip()
         self._print_above(Text.assemble(("  " + icon + " ", ""), (tool, f"bold {_ACCENT}"),

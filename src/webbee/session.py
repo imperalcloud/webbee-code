@@ -128,6 +128,13 @@ class AgentSession:
                     elif ftype == "panel_release_required":
                         sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
 
+                    elif ftype == "action":  # R2 — ext-tool call (server-side) surfaced in the feed
+                        _lbl = "·".join(x for x in (frame.get("app_id", ""), frame.get("tool", "")) if x)
+                        if frame.get("phase") == "start":
+                            sink.tool_start(_lbl, {})
+                        else:
+                            sink.tool_result(_lbl, bool(frame.get("ok")), str(frame.get("summary", "")))
+
                     elif ftype == "progress":  # P2 — server not emitting yet; forward-compatible
                         sink.progress(frame.get("text", ""))
 

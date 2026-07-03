@@ -122,6 +122,16 @@ def test_money_card_english():
     assert not NO_CYRILLIC.search(out)
 
 
+def test_ext_action_default_icon():
+    s = _sink()
+    s.begin_turn()
+    s.tool_start("tasks·list_tasks", {})
+    s.tool_result("tasks·list_tasks", True, "200 open")
+    out = s.console.export_text()
+    assert "tasks·list_tasks" in out and "200 open" in out
+    assert "⚡" in out
+
+
 def test_usage_and_clear_still_work():
     s = _sink()
     s.usage(2100, 0.02)

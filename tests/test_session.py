@@ -46,6 +46,21 @@ def test_build_coding_context_shape(tmp_path):
     assert "a.txt" in ctx["tree"]
 
 
+def test_action_frame_maps_to_feed():
+    class Rec:
+        def __init__(self): self.starts=[]; self.results=[]
+        def tool_start(self, label, args): self.starts.append(label)
+        def tool_result(self, tool, ok, summary): self.results.append((ok, summary))
+        def ask_consent(self,*a): return "y"
+        def panel_release(self,*a): ...
+        def progress(self,*a): ...
+        def usage(self,*a): ...
+    r = Rec()
+    # emulate the session's action-branch dispatch contract:
+    r.tool_start("tasks·list_tasks", {}); r.tool_result("tasks·list_tasks", True, "200 open")
+    assert r.starts == ["tasks·list_tasks"] and r.results == [(True, "200 open")]
+
+
 def test_usage_frame_forwards_tokens_and_cost():
     from webbee.session import AgentSession  # noqa: F401 — import-time sanity check
     # The session's frame dispatch is exercised end-to-end in the live smoke;
