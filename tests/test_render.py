@@ -35,6 +35,33 @@ def test_usage_accumulates_credits():
     assert s.credits == 200
 
 
+def test_usage_accumulates_delta_when_cumulative_omitted():
+    s = _sink()
+    s.usage(120, 3400, None)
+    s.usage(80, 2000, None)
+    assert s.credits == 200
+
+
+def test_usage_zero_cumulative_is_authoritative_not_drift():
+    s = _sink()
+    s.usage(120, 3400, 120)
+    s.usage(0, 0, 0)
+    assert s.credits == 0
+
+
+def test_end_turn_without_begin_turn_shows_zero_elapsed():
+    s = _sink()
+    s.end_turn("x")
+    out = s.console.export_text()
+    assert "◷ 0.0s" in out
+
+
+def test_begin_turn_twice_does_not_raise():
+    s = _sink()
+    s.begin_turn()
+    s.begin_turn()
+
+
 def test_end_turn_renders_final_markdown_and_summary():
     s = _sink()
     s.begin_turn()

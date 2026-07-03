@@ -135,7 +135,7 @@ class AgentSession:
                         sink.usage(
                             int(frame.get("credits", 0)),
                             int(frame.get("tokens", 0)),
-                            int(frame.get("cumulative_credits", 0)),
+                            frame.get("cumulative_credits"),
                         )
 
                     elif ftype == "final":

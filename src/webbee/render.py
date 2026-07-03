@@ -23,7 +23,7 @@ class RichSink:
         self._clock = clock
         self.credits = 0
         self._tools = 0
-        self._started = 0.0
+        self._started = None
         self._live = None
 
     # ---- turn lifecycle -------------------------------------------------
@@ -36,7 +36,7 @@ class RichSink:
         self._stop_live()
         if final_text:
             self.console.print(Markdown(final_text))
-        elapsed = self._clock() - self._started
+        elapsed = self._elapsed()
         summary = Text(f"◷ {elapsed:.1f}s   ⛁ {self._tools} действия   🪙 {self.credits} credits",
                        style="dim")
         self.console.print(Text("─" * 46, style="dim"))
@@ -88,9 +88,11 @@ class RichSink:
         if text:
             self._print_above(Text(text, style="dim italic"))
 
-    def usage(self, credits: int, tokens: int, cumulative_credits: int) -> None:
-        # Trust the server's running total when present; else accumulate.
-        self.credits = cumulative_credits or (self.credits + credits)
+    def usage(self, credits: int, tokens: int, cumulative_credits: "int | None") -> None:
+        # Trust the server's running total when present (even if 0 — that's
+        # authoritative, not "absent"); only accumulate the per-step delta
+        # when the frame omits cumulative_credits entirely.
+        self.credits = self.credits + credits if cumulative_credits is None else cumulative_credits
         self._refresh()
 
     # ---- internals ------------------------------------------------------
@@ -100,11 +102,17 @@ class RichSink:
         return Group(Spinner("dots", text=Text(" Думаю…", style="cyan")), bar)
 
     def _elapsed(self) -> float:
+        if self._started is None:
+            return 0.0
         return self._clock() - self._started
 
     def _arm_live(self) -> None:
-        """Start a fresh transient Live (spinner + status bar). No-op when
-        live is disabled (tests) — all console.print calls still fire."""
+        """Start a fresh transient Live (spinner + status bar). Always stops
+        any previously-running Live first (a second begin_turn() without
+        cleanup would otherwise leak the previous Live's thread and freeze
+        the bar). No-op when live is disabled (tests) — all console.print
+        calls still fire."""
+        self._stop_live()
         if not self._live_enabled:
             return
         from rich.live import Live
@@ -113,8 +121,9 @@ class RichSink:
         self._live.start()
 
     def _print_above(self, renderable) -> None:
-        # Rich Live prints via its own console above the live region cleanly.
-        (self._live.console if self._live else self.console).print(renderable)
+        # Live is always built with console=self.console, so printing to the
+        # shared console prints cleanly above the live region too.
+        self.console.print(renderable)
 
     def _refresh(self) -> None:
         if self._live:
