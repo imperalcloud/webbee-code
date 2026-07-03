@@ -133,7 +133,10 @@ class AgentSession:
                         if frame.get("phase") == "start":
                             sink.tool_start(_lbl, {})
                         else:
-                            sink.tool_result(_lbl, bool(frame.get("ok")), str(frame.get("summary", "")))
+                            _summ = str(frame.get("summary", "") or "")
+                            if _summ in ("None", "none"):  # tool result had no content — clean ✓
+                                _summ = ""
+                            sink.tool_result(_lbl, bool(frame.get("ok")), _summ)
 
                     elif ftype == "progress":  # P2 — server not emitting yet; forward-compatible
                         sink.progress(frame.get("text", ""))
