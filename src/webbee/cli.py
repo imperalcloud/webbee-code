@@ -2,48 +2,53 @@ import argparse
 import asyncio
 import os
 
+from webbee import __version__
 from webbee.config import Config
-from webbee.session import AgentSession
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="webbee", description="Webbee 🐝 — coding agent in your terminal")
+    p.add_argument("--version", action="version", version=f"webbee {__version__}")
+    p.add_argument("--mode", choices=["default", "plan", "autopilot"], default="default")
+    sub = p.add_subparsers(dest="cmd")
+    sub.add_parser("login", help="Log in to your Imperal account in the browser")
+    sub.add_parser("logout", help="Log out and remove local credentials")
+    return p
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(prog="webbee")
-    parser.add_argument("--mode", choices=["default", "plan", "autopilot"], default="default")
-    sub = parser.add_subparsers(dest="cmd")
-    sub.add_parser("login", help="Log in to your Imperal account in the browser")
-    sub.add_parser("logout", help="Log out and remove local credentials")
-    args = parser.parse_args(argv)
-
+    args = build_parser().parse_args(argv)
     cfg = Config.from_env()
 
     if args.cmd == "login":
         from imperal_mcp import auth
-
-        email = auth.login(cfg)
-        print(f"Logged in as {email}.")
+        print(f"Logged in as {auth.login(cfg)}.")
         return
-
     if args.cmd == "logout":
         from imperal_mcp import auth
-
         asyncio.run(auth.logout(cfg))
         print("Logged out.")
         return
 
-    # default: REPL — read a task line from stdin, run a coding session, print the answer.
-    from imperal_mcp import auth
+    # Default: the polished REPL. Fire a non-blocking update-check first.
+    _maybe_print_update_notice()
+    from webbee.repl import run_repl
+    try:
+        asyncio.run(run_repl(cfg, args.mode))
+    except KeyboardInterrupt:
+        # Ctrl-C mid-turn (while awaiting the agent) unwinds here — exit clean,
+        # no traceback. (repl.py catches Ctrl-C only around the input prompt.)
+        print("\nПока! 🐝")
 
-    async def token_provider() -> str:
-        return await auth.ensure_access_token(cfg)
 
-    session = AgentSession(cfg, token_provider, os.getcwd(), args.mode)
-
-    while True:
-        try:
-            task = input("webbee> ")
-        except EOFError:
-            return
-        if not task.strip():
-            continue
-        text = asyncio.run(session.run(task))
-        print(text)
+def _maybe_print_update_notice() -> None:
+    try:
+        from pathlib import Path
+        import time
+        from webbee.update import check_for_update, default_fetch
+        cache = Path(os.path.expanduser("~/.cache/webbee/update.json"))
+        notice = check_for_update(__version__, cache_path=cache, now=time.time(), fetch=default_fetch)
+        if notice:
+            print(notice)
+    except Exception:
+        pass  # update-check must never block or crash startup
