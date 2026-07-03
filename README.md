@@ -12,14 +12,18 @@ Webbee is the [Imperal Cloud](https://imperal.io) coding agent, in your terminal
 ## Install
 
 ```sh
-pipx install webbee          # or:  uv tool install webbee
+pipx install webbee          # recommended — or:  uv tool install webbee
 ```
 
-No Python on the box? One line:
+Plain `pip` works too, inside a virtualenv:
 
 ```sh
-curl -LsSf https://webbee.imperal.io/install.sh | sh
+python3 -m venv .venv && . .venv/bin/activate && pip install webbee
 ```
+
+> On Ubuntu/Debian a *global* `pip install` is blocked by the system (that's
+> [PEP 668](https://peps.python.org/pep-0668/), not webbee) — use `pipx` or a
+> venv. No Python on the box? `curl -LsSf https://webbee.imperal.io/install.sh | sh`.
 
 ## Use
 
