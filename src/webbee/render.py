@@ -8,6 +8,8 @@ from rich.text import Text
 
 _ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "✎",
          "edit_file": "🔧", "bash": "⚡"}
+_BEE = "yellow"       # bee-yellow brand accent
+_ACCENT = "cyan"      # prompt / active
 
 
 def _fmt_tokens(n: int) -> str:
@@ -31,27 +33,41 @@ class RichSink:
         self._tools = 0
         self._started = None
         self._live = None
+        self._current = ""
+
+    # ---- banner -----------------------------------------------------------
+    def banner(self, version: str, cwd: str, signed_in: bool, surface: str) -> None:
+        """One-time launch banner: brand line + context + hint."""
+        who = "signed in" if signed_in else "not signed in — /login"
+        self.console.print()
+        self.console.print(Text.assemble(("  🐝  ", ""), ("webbee", f"bold {_BEE}"),
+                                          (f"  v{version}", "dim")))
+        self.console.print(Text(f"  {cwd} · {surface} · {who}", style="dim"))
+        self.console.print(Text("  /help · Ctrl-D to exit", style="dim"))
+        self.console.print()
 
     # ---- turn lifecycle -------------------------------------------------
     def begin_turn(self) -> None:
         self._tools = 0
         self._started = self._clock()
+        self._current = ""
         self._arm_live()
 
     def end_turn(self, final_text: str) -> None:
         self._stop_live()
         if final_text:
+            self.console.print(Text("  🐝", style=f"bold {_BEE}"))
             self.console.print(Markdown(final_text))
         elapsed = self._elapsed()
-        summary = Text(
-            f"◷ {elapsed:.1f}s   ⛁ {self._tools} действия   🔤 {_fmt_tokens(self.tokens)} tokens",
-            style="dim")
-        self.console.print(Text("─" * 46, style="dim"))
-        self.console.print(summary)
+        noun = "action" if self._tools == 1 else "actions"
+        self.console.print(Text("  " + "─" * 46, style="dim"))
+        self.console.print(Text(
+            f"  ◷ {elapsed:.1f}s · ⚡ {self._tools} {noun} · 🔤 {_fmt_tokens(self.tokens)} tok",
+            style="dim"))
 
     def note(self, message: str) -> None:
         self._stop_live()
-        self.console.print(Text(message, style="yellow"))
+        self.console.print(Text("  " + message, style=_BEE))
 
     def clear(self) -> None:
         """/clear: wipe the screen + reset the session counters (tokens,
@@ -60,6 +76,7 @@ class RichSink:
         self.tokens = 0
         self.cost_usd = 0.0
         self._tools = 0
+        self._current = ""
 
     def abort(self) -> None:
         """Ctrl-C mid-turn: stop any running Live cleanly (restores the
@@ -71,15 +88,16 @@ class RichSink:
         self._tools += 1
         icon = _ICON.get(tool, "•")
         arg = args.get("path") or args.get("pattern") or args.get("command") or ""
-        self._print_above(Text.assemble((f" {icon} ", ""), (tool, "bold cyan"),
-                                         ("  " + str(arg)[:80], "white")))
+        self._current = f"{tool} {str(arg)[:40]}".strip()
+        self._print_above(Text.assemble(("  " + icon + " ", ""), (tool, f"bold {_ACCENT}"),
+                                         (("  " + str(arg)[:80]) if arg else "", "white")))
         self._refresh()
 
     def tool_result(self, tool: str, ok: bool, summary: str) -> None:
         mark = "✓" if ok else "✗"
         style = "green" if ok else "red"
-        self._print_above(Text.assemble(("   └─ ", "dim"), (mark + " ", style),
-                                         (summary, "dim")))
+        self._print_above(Text.assemble(("     ", ""), (mark + " ", style),
+                                         (str(summary)[:80], "dim")))
         self._refresh()
 
     def ask_consent(self, app_id: str, tool: str, args: dict) -> str:
@@ -87,9 +105,9 @@ class RichSink:
         NEVER interpret — the kernel brain decides (ICNLI)."""
         self._stop_live()
         label = f"{app_id}.{tool}" if app_id else tool
-        self.console.print(Text.assemble(("❓ ", "yellow"), (label, "bold yellow"),
+        self.console.print(Text.assemble(("  ❓ ", "yellow"), (label, "bold yellow"),
                                           ("  " + str(args)[:80], "dim")))
-        raw = self._input("   approve? ")
+        raw = self._input("     approve? ")
         self._arm_live()  # re-arm spinner for the rest of the turn
         return raw.strip()
 
@@ -97,16 +115,16 @@ class RichSink:
         self._stop_live()
         body = Text.assemble(
             (summary + "\n\n" if summary else "", "white"),
-            ("Подтверди в браузере:\n", "white"),
-            (f"  {panel_url}\n", "bold cyan"),
-            ("Потом попроси снова — с тебя не списали.", "dim"),
+            ("Approve it in your browser:\n", "white"),
+            (f"  {panel_url}\n", f"bold {_ACCENT}"),
+            ("Then ask again — you weren't charged.", "dim"),
         )
-        self.console.print(Panel(body, title="💳 Это стоит денег", border_style="magenta"))
+        self.console.print(Panel(body, title="💳 This costs money", border_style="magenta"))
         self._arm_live()
 
     def progress(self, text: str) -> None:
         if text:
-            self._print_above(Text(text, style="dim italic"))
+            self._print_above(Text("  " + text, style="dim italic"))
 
     def usage(self, tokens: int, cost_usd: float) -> None:
         # Cumulative frame — trust the server's running totals verbatim.
@@ -116,9 +134,10 @@ class RichSink:
 
     # ---- internals ------------------------------------------------------
     def _status(self):
-        bar = Text(f"  ◷ {self._elapsed():.0f}s   ⛁ {self._tools}   🔤 {_fmt_tokens(self.tokens)} tok",
+        label = self._current or "Thinking"
+        bar = Text(f"  ◷ {self._elapsed():.0f}s · ⚡ {self._tools} · 🔤 {_fmt_tokens(self.tokens)} tok",
                    style="dim")
-        return Group(Spinner("dots", text=Text(" Думаю…", style="cyan")), bar)
+        return Group(Spinner("dots", text=Text(" " + label + "…", style=_ACCENT)), bar)
 
     def _elapsed(self) -> float:
         if self._started is None:
