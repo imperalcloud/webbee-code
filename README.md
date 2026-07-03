@@ -1,9 +1,9 @@
 # Webbee 🐝 — the coding agent in your terminal
 
-[![PyPI](https://img.shields.io/pypi/v/webbee.svg)](https://pypi.org/project/webbee/)
-[![Python](https://img.shields.io/pypi/pyversions/webbee.svg)](https://pypi.org/project/webbee/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-imperal.io-00afd7.svg)](https://docs.imperal.io)
+[![PyPI](https://img.shields.io/pypi/v/webbee)](https://pypi.org/project/webbee/)
+[![Python](https://img.shields.io/pypi/pyversions/webbee)](https://pypi.org/project/webbee/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-imperal.io-00afd7)](https://docs.imperal.io)
 
 Webbee is the [Imperal Cloud](https://imperal.io) coding agent, in your terminal. It reads, writes, and runs code in your working directory — while the brain runs in the cloud on **ICNLI**, the open protocol behind Webbee. No model keys on your machine. Swap the model underneath and it behaves the same, because the safety was never in the model.
 
@@ -29,7 +29,7 @@ python3 -m venv .venv && . .venv/bin/activate && pip install webbee
 
 ```sh
 webbee            # start the agent in the current directory
-webbee login      # sign in to your Imperal account (opens the browser)
+webbee login      # sign in — shows a code + URL to open in any browser
 ```
 
 Type in plain English. Webbee reads your files, runs commands, and reaches your connected Imperal apps — mail, notes, tasks, and more — to get the job done. `/help` lists the commands: `/login` `/logout` `/mode` `/cost` `/status` `/clear` `/exit`.
