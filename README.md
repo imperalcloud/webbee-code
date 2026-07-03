@@ -1,34 +1,54 @@
-# Webbee 🐝 — coding agent in your terminal
+# Webbee 🐝 — the coding agent in your terminal
 
-Webbee is the Imperal Cloud coding agent. It reads, writes, and runs code in
-your current directory, while the brain runs safely in the Imperal Cloud —
-no model keys, no vendor lock-in.
+[![PyPI](https://img.shields.io/pypi/v/webbee.svg)](https://pypi.org/project/webbee/)
+[![Python](https://img.shields.io/pypi/pyversions/webbee.svg)](https://pypi.org/project/webbee/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-imperal.io-00afd7.svg)](https://docs.imperal.io)
+
+Webbee is the [Imperal Cloud](https://imperal.io) coding agent, in your terminal. It reads, writes, and runs code in your working directory — while the brain runs in the cloud on **ICNLI**, the open protocol behind Webbee. No model keys on your machine. Swap the model underneath and it behaves the same, because the safety was never in the model.
+
+**The model proposes. The kernel decides. The key — delete, drop, wipe — stays with you.**
 
 ## Install
 
 ```sh
-# one line, no Python needed:
-curl -LsSf https://webbee.imperal.io/install.sh | sh
+pipx install webbee          # or:  uv tool install webbee
+```
 
-# or, if you have pipx / uv:
-pipx install webbee
-uv tool install webbee
+No Python on the box? One line:
+
+```sh
+curl -LsSf https://webbee.imperal.io/install.sh | sh
 ```
 
 ## Use
 
 ```sh
-webbee            # start the coding REPL in the current directory
-webbee login      # log in to your Imperal account
+webbee            # start the agent in the current directory
+webbee login      # sign in to your Imperal account (opens the browser)
 ```
 
-Inside the REPL: `/help` lists commands (`/login`, `/mode`, `/cost`,
-`/status`, `/clear`, `/exit`). Works on macOS, Linux, and Windows.
+Type in plain English. Webbee reads your files, runs commands, and reaches your connected Imperal apps — mail, notes, tasks, and more — to get the job done. `/help` lists the commands: `/login` `/logout` `/mode` `/cost` `/status` `/clear` `/exit`.
 
-## Update
+## Modes — you hold the key
 
-```sh
-pipx upgrade webbee    # or: uv tool upgrade webbee
-```
+Cycle with **Shift + TAB**:
 
-Learn more at [imperal.io](https://imperal.io) · [docs.imperal.io](https://docs.imperal.io).
+- **default** — Webbee does the small, reversible stuff herself. Anything she can't undo, she stops and asks you first.
+- **plan** — read-only. She plans and reads; she touches nothing.
+- **autopilot** — she acts without asking. (Spending money always needs a browser approval — no terminal reply can release it.)
+
+## How it works
+
+Your machine runs the hands — read, write, edit, run. The brain runs in the Imperal Cloud and reasons over your files, your history, and your connected apps through ICNLI. The model is a replaceable proposer at the edge; the kernel resolves, grounds, and decides. Webbee reads your facts. She doesn't invent them.
+
+## Links
+
+- **Imperal Cloud** — [imperal.io](https://imperal.io)
+- **Docs** — [docs.imperal.io](https://docs.imperal.io)
+- **ICNLI** — the open protocol, CC BY-SA 4.0 — [icnli.org](https://icnli.org)
+- **More from Imperal** — [github.com/imperalcloud](https://github.com/imperalcloud)
+
+---
+
+MIT © Imperal, Inc.
