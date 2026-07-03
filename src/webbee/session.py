@@ -3,34 +3,30 @@ import subprocess
 
 
 def handle_tool_request(frame: dict, executor) -> dict:
-    """Offline-testable core: run a (kernel-pre-approved) local tool.
-    The kernel gates write/bash consent via confirm_request BEFORE
-    dispatching, so a tool_request here is always cleared to run."""
+    """Run a (kernel-pre-approved) local tool. The kernel gates write/bash
+    consent via confirm_request BEFORE dispatching, so a tool_request here is
+    always cleared to run."""
     return {"req_id": frame["req_id"], "result": executor.run(frame["tool"], frame.get("args", {}))}
 
 
-def handle_confirm_request(frame: dict, mode: str, read_reply=input) -> dict:
-    """Offline-testable core of the ICNLI consent path. The client does NOT
-    interpret consent words — it relays the user's RAW reply; the kernel
-    brain interprets intent (safe-by-default). autopilot/plan are explicit."""
+def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
+    """ICNLI consent path. The client does NOT interpret consent words — it
+    relays the user's RAW reply; the kernel brain interprets intent
+    (safe-by-default). autopilot/plan are explicit and never prompt.
+    `ask_consent(app_id, tool, args) -> str` returns the raw reply."""
     req_id = frame["req_id"]
     if mode == "autopilot":
         return {"req_id": req_id, "result": {"approved": True}}
     if mode == "plan":
         return {"req_id": req_id, "result": {"approved": False}}
-    app_id = frame.get("app_id", "")
-    tool = frame.get("tool", "")
-    label = f"{app_id}.{tool}" if app_id else tool
-    raw = read_reply(f"Run {label} {frame.get('args', {})}? ")
+    raw = ask_consent(frame.get("app_id", ""), frame.get("tool", ""), frame.get("args", {}))
     return {"req_id": req_id, "result": {"consent_reply": raw}}
 
 
 def build_coding_context(workspace_root: str) -> dict:
-    """Snapshot of the workspace to hand the cloud brain: cwd (realpath),
-    `git status -sb` output (empty string for non-git dirs / any error),
-    and a bounded newline-joined file tree."""
+    """Snapshot handed to the cloud brain: cwd (realpath), `git status -sb`
+    (empty for non-git/any error), and a bounded newline-joined file tree."""
     cwd = os.path.realpath(workspace_root)
-
     try:
         proc = subprocess.run(
             ["git", "status", "-sb"], cwd=cwd,
@@ -39,28 +35,34 @@ def build_coding_context(workspace_root: str) -> dict:
         git = proc.stdout if proc.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         git = ""
-
     paths = []
     for dirpath, dirnames, filenames in os.walk(cwd):
         dirnames[:] = [d for d in dirnames if d != ".git" and not d.startswith(".")]
         for fn in filenames:
-            rel = os.path.relpath(os.path.join(dirpath, fn), cwd)
-            paths.append(rel)
+            paths.append(os.path.relpath(os.path.join(dirpath, fn), cwd))
             if len(paths) >= 200:
                 break
         if len(paths) >= 200:
             break
-    tree = "\n".join(paths)
+    return {"cwd": cwd, "git": git, "tree": "\n".join(paths)}
 
-    return {"cwd": cwd, "git": git, "tree": tree}
+
+def _summary(result: dict) -> str:
+    """One-line summary of a tool result for the UI."""
+    content = str(result.get("content", ""))
+    first = content.strip().splitlines()[0] if content.strip() else ""
+    return first[:120]
 
 
 class AgentSession:
-    """Client-side driver for a coding session against the Imperal cloud.
-    The brain runs server-side; this is the "hands" — it streams down
-    kernel-pre-approved tool_request frames over SSE, runs each tool
-    locally, relays confirm_request replies raw for the brain to
-    interpret, and posts results back until a final frame arrives."""
+    """Client-side driver for one coding turn against the Imperal cloud.
+    The brain runs server-side; this is the hands — it streams kernel-
+    pre-approved tool_request frames over SSE, runs each tool locally, relays
+    confirm_request replies RAW for the brain to interpret, drives the sink
+    for live UI, and posts results back until a final frame arrives.
+
+    P1: one POST per turn (server reloads the shared webbee-terminal thread,
+    so context carries across turns). Persistent signal-based sessions are P3."""
 
     def __init__(self, cfg, token_provider, workspace_root: str, mode: str = "default") -> None:
         self.cfg = cfg
@@ -72,7 +74,7 @@ class AgentSession:
         token = await self.token_provider()
         return {"Authorization": f"Bearer {token}"}
 
-    async def run(self, task: str) -> str:
+    async def run(self, task: str, sink) -> str:
         import httpx
         from httpx_sse import aconnect_sse
 
@@ -81,7 +83,6 @@ class AgentSession:
 
         coding_context = build_coding_context(self.workspace_root)
         imperal_id = await ImperalClient(self.cfg, self.token_provider).whoami()
-
         executor = LocalToolExecutor(self.workspace_root)
 
         headers = await self._headers()
@@ -94,48 +95,54 @@ class AgentSession:
             resp.raise_for_status()
             session_id = resp.json()["session_id"]
 
+            seen: dict = {}  # req_id -> already-posted result (at-least-once dedup)
             headers = await self._headers()
-            # req_id -> already-returned result. dispatch is at-least-once
-            # (the kernel activity may retry its publish after a crash), so a
-            # duplicate tool_request MUST re-post the cached result, never
-            # re-run the tool (a second bash/write would be dangerous).
-            seen: dict = {}
             async with aconnect_sse(
                 client, "GET", f"/v1/agent/sessions/{session_id}/stream", headers=headers,
             ) as event_source:
                 async for sse in event_source.aiter_sse():
                     frame = sse.json()
-                    if frame.get("type") == "tool_request":
+                    ftype = frame.get("type")
+
+                    if ftype == "tool_request":
                         rid = frame.get("req_id")
                         if rid in seen:
-                            out = seen[rid]  # duplicate — do NOT re-execute
+                            out = seen[rid]
                         else:
+                            sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
                             out = handle_tool_request(frame, executor)
+                            res = out["result"]
+                            sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
                             seen[rid] = out
-                        headers = await self._headers()
-                        await client.post(
-                            f"/v1/agent/sessions/{session_id}/result",
-                            json=out,
-                            headers=headers,
-                        )
-                    elif frame.get("type") == "confirm_request":
+                        await self._post_result(client, session_id, out)
+
+                    elif ftype == "confirm_request":
                         rid = frame.get("req_id")
                         if rid in seen:
-                            out = seen[rid]  # duplicate — do NOT re-prompt
+                            out = seen[rid]
                         else:
-                            out = handle_confirm_request(frame, self.mode)
+                            out = handle_confirm_request(frame, self.mode, sink.ask_consent)
                             seen[rid] = out
-                        headers = await self._headers()
-                        await client.post(
-                            f"/v1/agent/sessions/{session_id}/result",
-                            json=out,
-                            headers=headers,
+                        await self._post_result(client, session_id, out)
+
+                    elif ftype == "panel_release_required":
+                        sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
+
+                    elif ftype == "progress":  # P2 — server not emitting yet; forward-compatible
+                        sink.progress(frame.get("text", ""))
+
+                    elif ftype == "usage":  # P2 — forward-compatible
+                        sink.usage(
+                            int(frame.get("credits", 0)),
+                            int(frame.get("tokens", 0)),
+                            int(frame.get("cumulative_credits", 0)),
                         )
-                    elif frame.get("type") == "panel_release_required":
-                        print(f"\n💳 This action costs money. Approve it in your browser:\n"
-                              f"  {frame.get('panel_url', '')}\n"
-                              f"Then ask again — you weren't charged.\n")
-                    elif frame.get("type") == "final":
-                        return frame["text"]
+
+                    elif ftype == "final":
+                        return frame.get("text", "")
 
         return ""
+
+    async def _post_result(self, client, session_id: str, out: dict) -> None:
+        headers = await self._headers()
+        await client.post(f"/v1/agent/sessions/{session_id}/result", json=out, headers=headers)
