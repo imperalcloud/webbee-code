@@ -3,7 +3,7 @@ from webbee.commands import dispatch, CommandContext, SlashResult
 
 def _ctx(**kw):
     base = dict(mode="default", workspace="/w", version="0.1.0", surface="terminal",
-                logged_in=True, credits=42, git_branch="main")
+                logged_in=True, tokens=42, cost_usd=0.0, git_branch="main")
     base.update(kw)
     return CommandContext(**base)
 
@@ -42,7 +42,7 @@ def test_mode_rejects_unknown():
 
 
 def test_status_reports_state():
-    r = dispatch("/status", _ctx(credits=99, git_branch="dev"))
+    r = dispatch("/status", _ctx(tokens=99, git_branch="dev"))
     assert r.action == "status"
     assert "terminal" in r.message and "99" in r.message and "dev" in r.message and "0.1.0" in r.message
 
@@ -50,6 +50,17 @@ def test_status_reports_state():
 def test_cost_and_usage_alias():
     assert dispatch("/cost", _ctx()).action == "cost"
     assert dispatch("/usage", _ctx()).action == "cost"
+
+
+def test_cost_shows_tokens():
+    r = dispatch("/cost", _ctx(tokens=1500, cost_usd=0.012))
+    assert r.action == "cost"
+    assert "1500" in r.message and "token" in r.message.lower()
+
+
+def test_status_shows_tokens():
+    r = dispatch("/status", _ctx(tokens=1500))
+    assert "1500" in r.message
 
 
 def test_clear_login_logout_actions():

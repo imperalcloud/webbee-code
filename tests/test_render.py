@@ -28,25 +28,22 @@ def test_ask_consent_relays_raw_input():
     assert reply == "ага давай"  # trimmed, but NOT interpreted
 
 
-def test_usage_accumulates_credits():
+def test_usage_sets_tokens_and_cost():
     s = _sink()
-    s.usage(120, 3400, 120)
-    s.usage(80, 2000, 200)
-    assert s.credits == 200
+    s.usage(1400, 0.0123)
+    s.usage(2100, 0.0201)        # cumulative frame — latest wins
+    assert s.tokens == 2100
+    assert s.cost_usd == 0.0201
 
 
-def test_usage_accumulates_delta_when_cumulative_omitted():
+def test_status_and_summary_show_tokens_not_credits():
     s = _sink()
-    s.usage(120, 3400, None)
-    s.usage(80, 2000, None)
-    assert s.credits == 200
-
-
-def test_usage_zero_cumulative_is_authoritative_not_drift():
-    s = _sink()
-    s.usage(120, 3400, 120)
-    s.usage(0, 0, 0)
-    assert s.credits == 0
+    s.begin_turn()
+    s.usage(2100, 0.02)
+    s.end_turn("**ok**")
+    out = s.console.export_text()
+    assert "2100" in out or "2.1k" in out          # tokens shown
+    assert "tokens" in out.lower() or "tok" in out.lower()
 
 
 def test_end_turn_without_begin_turn_shows_zero_elapsed():
@@ -67,12 +64,12 @@ def test_end_turn_renders_final_markdown_and_summary():
     s.begin_turn()
     s.tool_start("bash", {"command": "pytest"})
     s.tool_result("bash", True, "12 passed")
-    s.usage(200, 5000, 200)
+    s.usage(5000, 0.05)
     s.end_turn("**Готово.** Тесты зелёные.")
     out = s.console.export_text()
     assert "Готово" in out
-    assert "200" in out            # credits in summary
-    assert "credits" in out.lower() or "кредит" in out.lower()
+    assert "5.0k" in out            # tokens in summary
+    assert "tokens" in out.lower()
 
 
 def test_panel_release_shows_url():
@@ -82,13 +79,11 @@ def test_panel_release_shows_url():
     assert "panel.imperal.io/x" in out
 
 
-def test_clear_resets_credits_and_tools():
+def test_clear_resets_tokens_and_cost():
     s = _sink()
-    s.credits = 5
-    s._tools = 3
+    s.usage(500, 0.01); s._tools = 2
     s.clear()
-    assert s.credits == 0
-    assert s._tools == 0
+    assert s.tokens == 0 and s.cost_usd == 0.0 and s._tools == 0
 
 
 def test_abort_does_not_raise_without_active_live():

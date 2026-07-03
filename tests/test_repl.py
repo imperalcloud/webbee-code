@@ -4,7 +4,7 @@ from webbee.repl import run_repl
 
 class FakeSink:
     def __init__(self):
-        self.turns = []; self.notes = []; self.credits = 0; self.mode = None
+        self.turns = []; self.notes = []; self.tokens = 0; self.cost_usd = 0.0; self.mode = None
         self.aborted = False; self.cleared = False
     def begin_turn(self): ...
     def end_turn(self, text): self.turns.append(text)

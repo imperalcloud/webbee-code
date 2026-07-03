@@ -10,10 +10,15 @@ _ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "
          "edit_file": "🔧", "bash": "⚡"}
 
 
+def _fmt_tokens(n: int) -> str:
+    """Compact token count: 2100 -> '2.1k', 900 -> '900'."""
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(int(n))
+
+
 class RichSink:
     """Rich implementation of TurnSink — the 'Rich inline' look: action lines
     stream top-to-bottom, a transient Live shows a spinner + bottom status
-    bar (timer · tools · 🪙 credits). Not full-screen. In tests pass
+    bar (timer · tools · 🔤 tokens). Not full-screen. In tests pass
     live_enabled=False (no animation) and inject input_fn/clock."""
 
     def __init__(self, console=None, *, live_enabled=True, input_fn=input, clock=time.monotonic):
@@ -21,7 +26,8 @@ class RichSink:
         self._live_enabled = live_enabled
         self._input = input_fn
         self._clock = clock
-        self.credits = 0
+        self.tokens = 0
+        self.cost_usd = 0.0
         self._tools = 0
         self._started = None
         self._live = None
@@ -37,8 +43,9 @@ class RichSink:
         if final_text:
             self.console.print(Markdown(final_text))
         elapsed = self._elapsed()
-        summary = Text(f"◷ {elapsed:.1f}s   ⛁ {self._tools} действия   🪙 {self.credits} credits",
-                       style="dim")
+        summary = Text(
+            f"◷ {elapsed:.1f}s   ⛁ {self._tools} действия   🔤 {_fmt_tokens(self.tokens)} tokens",
+            style="dim")
         self.console.print(Text("─" * 46, style="dim"))
         self.console.print(summary)
 
@@ -47,10 +54,11 @@ class RichSink:
         self.console.print(Text(message, style="yellow"))
 
     def clear(self) -> None:
-        """/clear: wipe the terminal screen and reset the session counters
-        (credits, tools). Does NOT touch _started — that's turn-scoped."""
+        """/clear: wipe the screen + reset the session counters (tokens,
+        cost, tools). Does NOT touch _started — that's turn-scoped."""
         self.console.clear()
-        self.credits = 0
+        self.tokens = 0
+        self.cost_usd = 0.0
         self._tools = 0
 
     def abort(self) -> None:
@@ -100,16 +108,15 @@ class RichSink:
         if text:
             self._print_above(Text(text, style="dim italic"))
 
-    def usage(self, credits: int, tokens: int, cumulative_credits: "int | None") -> None:
-        # Trust the server's running total when present (even if 0 — that's
-        # authoritative, not "absent"); only accumulate the per-step delta
-        # when the frame omits cumulative_credits entirely.
-        self.credits = self.credits + credits if cumulative_credits is None else cumulative_credits
+    def usage(self, tokens: int, cost_usd: float) -> None:
+        # Cumulative frame — trust the server's running totals verbatim.
+        self.tokens = tokens
+        self.cost_usd = cost_usd
         self._refresh()
 
     # ---- internals ------------------------------------------------------
     def _status(self):
-        bar = Text(f"  ◷ {self._elapsed():.0f}s   ⛁ {self._tools}   🪙 {self.credits} credits",
+        bar = Text(f"  ◷ {self._elapsed():.0f}s   ⛁ {self._tools}   🔤 {_fmt_tokens(self.tokens)} tok",
                    style="dim")
         return Group(Spinner("dots", text=Text(" Думаю…", style="cyan")), bar)
 

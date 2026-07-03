@@ -58,7 +58,8 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
 
         ctx = CommandContext(mode=mode, workspace=workspace, version=__version__,
                              surface="terminal", logged_in=logged_in,
-                             credits=getattr(sink, "credits", 0),
+                             tokens=getattr(sink, "tokens", 0),
+                             cost_usd=getattr(sink, "cost_usd", 0.0),
                              git_branch=_git_branch(workspace))
         res = dispatch(line, ctx)
 

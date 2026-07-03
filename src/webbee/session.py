@@ -131,11 +131,10 @@ class AgentSession:
                     elif ftype == "progress":  # P2 — server not emitting yet; forward-compatible
                         sink.progress(frame.get("text", ""))
 
-                    elif ftype == "usage":  # P2 — forward-compatible
+                    elif ftype == "usage":  # P2 — cumulative tokens + USD cost
                         sink.usage(
-                            int(frame.get("credits", 0)),
-                            int(frame.get("tokens", 0)),
-                            frame.get("cumulative_credits"),
+                            int(frame.get("tokens", 0) or 0),
+                            float(frame.get("cost_usd", 0.0) or 0.0),
                         )
 
                     elif ftype == "final":

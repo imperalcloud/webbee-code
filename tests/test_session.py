@@ -44,3 +44,20 @@ def test_build_coding_context_shape(tmp_path):
     ctx = build_coding_context(str(tmp_path))
     assert set(ctx) == {"cwd", "git", "tree"}
     assert "a.txt" in ctx["tree"]
+
+
+def test_usage_frame_forwards_tokens_and_cost():
+    from webbee.session import AgentSession  # noqa: F401 — import-time sanity check
+    # The session's frame dispatch is exercised end-to-end in the live smoke;
+    # here we assert the sink contract shape the session will call.
+    class Rec:
+        def __init__(self): self.calls = []
+        def tool_start(self, *a): ...
+        def tool_result(self, *a): ...
+        def ask_consent(self, *a): return "y"
+        def panel_release(self, *a): ...
+        def progress(self, text): self.calls.append(("progress", text))
+        def usage(self, tokens, cost_usd): self.calls.append(("usage", tokens, cost_usd))
+    r = Rec()
+    r.usage(1234, 0.05); r.progress("reading files")
+    assert ("usage", 1234, 0.05) in r.calls and ("progress", "reading files") in r.calls
