@@ -36,7 +36,10 @@ def check_for_update(current: str, *, cache_path, now: float, fetch, ttl: float 
         latest = None
 
     if latest is None:
-        latest = fetch()
+        try:
+            latest = fetch()
+        except Exception:
+            latest = None
         if latest:
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)

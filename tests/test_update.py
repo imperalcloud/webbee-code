@@ -41,3 +41,9 @@ def test_malformed_cache_is_ignored(tmp_path):
     cache.write_text("{not json")
     msg = check_for_update("0.1.0", cache_path=cache, now=1000.0, fetch=lambda: "0.2.0")
     assert "0.2.0" in msg
+
+
+def test_raising_fetch_is_swallowed(tmp_path):
+    def boom():
+        raise RuntimeError("network exploded")
+    assert check_for_update("0.1.0", cache_path=tmp_path / "u.json", now=1000.0, fetch=boom) is None
