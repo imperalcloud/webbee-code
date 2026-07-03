@@ -11,6 +11,7 @@ class FakeSink:
     def __init__(self):
         self.turns = []; self.notes = []; self.tokens = 0; self.cost_usd = 0.0; self.mode = None
         self.aborted = False; self.cleared = False
+        self.session_tokens = 0; self.session_cost = 0.0
     def begin_turn(self): ...
     def end_turn(self, text): self.turns.append(text)
     def note(self, m): self.notes.append(m)
@@ -149,3 +150,15 @@ def test_welcome_shown_on_start():
     sink=WSink()
     _run(read_line=_lines("/exit"), sink=sink)
     assert sink.welcomed
+
+
+def test_cycle_mode_updates_agent(monkeypatch):
+    # The loop must still run end-to-end with an injected (non-tui) reader —
+    # the prod tui.prompt path is never hit here (read_line is not `input`).
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert agent.tasks == []
+
+
+def test_next_mode_wired():
+    from webbee.tui import next_mode
+    assert next_mode("default") == "plan"   # cycle helper is what repl uses

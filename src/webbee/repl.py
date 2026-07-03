@@ -1,10 +1,12 @@
 import asyncio
 import os
 import subprocess
+import sys
 
 from webbee import __version__
 from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
+from webbee.tui import next_mode
 
 
 def _git_branch(workspace: str) -> str:
@@ -43,10 +45,30 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
 
     agent = agent_factory(cfg, token_provider, workspace, mode)
 
-    while True:
+    def _cycle() -> None:
+        nonlocal mode
+        mode = next_mode(mode)
+        agent.mode = mode
+
+    async def _read_line() -> "str | None":
+        # Production (tty, default reader): the rich prompt_toolkit input.
+        if read_line is input and sys.stdin.isatty():
+            from webbee import tui
+            return await tui.prompt(
+                mode_getter=lambda: mode,
+                usage_getter=lambda: (getattr(sink, "session_tokens", 0),
+                                      getattr(sink, "session_cost", 0.0)),
+                on_cycle=_cycle,
+            )
+        # Tests / non-tty: the injected (or builtin) sync reader.
         try:
-            line = read_line("❯ ")
+            return read_line("❯ ")
         except (EOFError, KeyboardInterrupt):
+            return None
+
+    while True:
+        line = await _read_line()
+        if line is None:
             return
         if not line.strip():
             continue
