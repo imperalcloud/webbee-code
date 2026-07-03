@@ -8,6 +8,7 @@ import asyncio
 from webbee.render import _fmt_tokens
 
 _MODES = ("default", "plan", "autopilot")
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # braille frames — animated while a turn runs
 
 
 def next_mode(mode: str) -> str:
@@ -28,7 +29,8 @@ def build_toolbar(mode: str, tokens: int, cost: float, *, busy: bool = False,
         return "  approve? type y / n / a reply · Enter to send"
     if busy:
         _cur = f" · {current}" if current else ""
-        return (f"  ● working{_cur} · {elapsed:.0f}s · {tools}"
+        _spin = _SPINNER[int(elapsed * 10) % len(_SPINNER)]   # animates via the ticker
+        return (f"  {_spin} working{_cur} · {elapsed:.0f}s · {tools}"
                 f" · {_fmt_tokens(tokens)} tok   ·   Ctrl-C to stop")
     return (f"  mode: {mode}   ·   {_fmt_tokens(tokens)} tok · ${cost:.4f}"
             f"   ·   Shift + TAB: switch mode")

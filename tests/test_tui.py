@@ -37,6 +37,13 @@ def test_toolbar_consent_state():
     assert not NO_CYRILLIC.search(t)
 
 
+def test_toolbar_busy_spinner_animates_with_elapsed():
+    a = build_toolbar("default", 0, 0.0, busy=True, elapsed=0.0)
+    b = build_toolbar("default", 0, 0.0, busy=True, elapsed=0.4)
+    assert a != b                       # the spinner frame advances as time passes
+    assert "working" in a and "working" in b
+
+
 def test_fallback_input_used_off_tty(monkeypatch):
     # When prompt_toolkit can't be imported, prompt() must degrade to _fallback_input.
     import webbee.tui as tui

@@ -4,7 +4,6 @@ import time
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
 from webbee.banner_art import WEBBEE_CODE
@@ -135,7 +134,7 @@ class RichSink:
         self._busy = False
         if final_text:
             self.console.print()   # separation before the focus block
-            self.console.print(Text("  🐝", style=f"bold {_BEE}"))
+            self.console.print(Text("  🐝 Webbee", style=f"bold {_BEE}"))
             self.console.print(Markdown(final_text))
         elapsed = self._elapsed()
         self.session_tokens += self.tokens
@@ -153,9 +152,11 @@ class RichSink:
         _invalidate()
 
     def user_echo(self, text: str) -> None:
-        """Commit the just-sent user message as a quiet, UN-boxed dim line so
-        past turns read as calm scrollback — only the LIVE input is bordered."""
-        self.console.print(Text("  ❯ " + text, style="dim"))
+        """Commit the just-sent user message as its own clearly-readable line
+        with a background bar (NOT boxed like the live input) so it stands out
+        as 'what I sent' in the scrollback."""
+        self.console.print(Text.assemble(
+            ("  ", ""), (" ❯ " + text + " ", "bold white on grey30")))
 
     def clear(self) -> None:
         """/clear: wipe the screen + reset the session counters."""
@@ -183,20 +184,20 @@ class RichSink:
         _invalidate()  # the completed full-width row is printed in tool_result
 
     def tool_result(self, tool: str, ok: bool, summary: str) -> None:
-        # One calm dim full-width row: icon + tool (+arg) left, ✓/✗ + summary
-        # right. Only the ✓/✗ carries colour — the rest recedes (dim).
+        # One calm dim line: icon + tool (+arg), then the ✓/✗ RIGHT NEXT TO the
+        # action (not pinned to the far right), then a dim summary. Only the
+        # ✓/✗ carries colour — the rest recedes (dim).
         _tool, arg = self._pending if self._pending[0] else (tool, "")
         icon = _ICON.get(_tool, "⚡")
         mark = "✓" if ok else "✗"
-        left = Text.assemble(("  " + icon + " ", "dim"), (_tool, "dim"),
-                             (("  " + arg[:48]) if arg else "", "dim"))
-        right = Text.assemble((mark + " ", "green" if ok else "red"),
-                              (str(summary)[:60], "dim"), ("  ", ""))
-        row = Table.grid(expand=True, padding=0)
-        row.add_column(justify="left", ratio=1, no_wrap=True)
-        row.add_column(justify="right", no_wrap=True)
-        row.add_row(left, right)
-        self.console.print(row)
+        self.console.print(Text.assemble(
+            ("  " + icon + " ", "dim"),
+            (_tool, "dim"),
+            (("  " + arg[:40]) if arg else "", "dim"),
+            ("   ", ""),
+            (mark + " ", "green" if ok else "red"),
+            (str(summary)[:50], "dim"),
+        ))
         self._pending = ("", "")
         _invalidate()
 
