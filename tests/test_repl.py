@@ -1,5 +1,4 @@
 import asyncio
-import pytest
 from webbee.repl import run_repl
 
 
@@ -77,3 +76,27 @@ def test_logout_command_calls_auth():
     auth = FakeAuth()
     sink, agent = _run(read_line=_lines("/logout", "/exit"), auth=auth)
     assert auth.logged_out
+
+
+def test_agent_error_is_swallowed_and_loop_continues():
+    class RaisingAgent(FakeAgent):
+        async def run(self, task, sink):
+            self.tasks.append(task)
+            raise RuntimeError("boom")
+
+    agent = RaisingAgent()
+    sink, agent = _run(read_line=_lines("do it", "/exit"), agent=agent)
+    assert agent.tasks == ["do it"]
+    assert any("Ошибка" in n for n in sink.notes)
+    assert sink.turns == []
+
+
+def test_login_command_calls_auth_and_logs_in():
+    auth = FakeAuth(logged_in=False)
+    sink, agent = _run(read_line=_lines("/login", "/exit"), auth=auth)
+    assert auth._in is True
+
+
+def test_mode_command_switches_agent_mode():
+    sink, agent = _run(read_line=_lines("/mode autopilot", "/exit"))
+    assert agent.mode == "autopilot"
