@@ -249,6 +249,21 @@ class RichSink:
         self.console.print(Panel(body, title="💳 This costs money", border_style="magenta"))
         self._nudge()
 
+    def login_prompt(self, user_code: str, url: str) -> None:
+        """Device-code sign-in: show the URL to open + the code to enter, as a
+        clear framed block. A bare print would be invisible in the full-screen
+        dock, so this renders into the feed; the terminal then polls silently
+        until you authorize in the browser."""
+        body = Text.assemble(
+            ("Open this URL in any browser (a phone is fine):\n", "white"),
+            (f"  {url}\n\n", f"bold {_ACCENT}"),
+            ("and enter this code:\n", "white"),
+            (f"  {user_code}\n\n", f"bold {_BEE}"),
+            ("Waiting for you to authorize…", "dim"),
+        )
+        self.console.print(Panel(body, title="🐝 Connect this terminal", border_style=_BEE))
+        self._nudge()
+
     def progress(self, text: str) -> None:
         if text:
             self.console.print(Text("  " + text, style="dim italic"))

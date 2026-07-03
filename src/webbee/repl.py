@@ -65,14 +65,18 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
             if res.exit:
                 return "exit"
             if res.action == "login":
-                # auth.login (the ONE shared imperal_mcp mechanism) is sync and
-                # uses asyncio.run() internally (token exchange + whoami). We are
-                # inside the REPL's event loop, so calling it directly raises
-                # "asyncio.run() cannot be called from a running event loop".
-                # Run the SAME mechanism off-loop in an executor thread (no
-                # running loop there) — this also keeps the dock responsive
-                # while the browser flow completes.
-                email = await asyncio.get_running_loop().run_in_executor(None, auth.login, cfg)
+                # ONE shared imperal_mcp mechanism: device-code flow (RFC 8628),
+                # async, so we await it directly on the dock's event loop (the
+                # /login turn runs as a background task, so the dock stays
+                # responsive while it polls). on_prompt renders the code + URL
+                # into the feed — a bare print would be invisible in the dock.
+                def _login_prompt(user_code, uri, uri_complete):
+                    show = getattr(_sink, "login_prompt", None)
+                    if show:
+                        show(user_code, uri)
+                    else:
+                        _sink.note(f"Open {uri} and enter code: {user_code}")
+                email = await auth.login_device(cfg, on_prompt=_login_prompt)
                 state["logged_in"] = True
                 _sink.note(f"Signed in as {email}.")
                 return "continue"

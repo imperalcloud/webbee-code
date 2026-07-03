@@ -27,6 +27,15 @@ def test_tool_lines_render():
     assert "read_file" in out and "auth.py" in out
 
 
+def test_login_prompt_shows_code_and_url():
+    s = _sink()
+    s.login_prompt("WDBK-7Q3M", "https://panel.imperal.io/device")
+    out = s.console.export_text()
+    assert "WDBK-7Q3M" in out
+    assert "panel.imperal.io/device" in out
+    assert not NO_CYRILLIC.search(out)   # English UI only
+
+
 def test_ask_consent_relays_raw_input():
     console = Console(record=True, width=80)
     s = RichSink(console=console, live_enabled=False, input_fn=lambda p: "  ага давай  ", clock=lambda: 0.0)

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.2
+
+- **Device-code login (RFC 8628).** `/login` and `webbee login` now use the
+  device-authorization flow (via `imperal-mcp` 0.5.0): the terminal shows a
+  short code + `https://panel.imperal.io/device`; you approve in any browser
+  (even a phone), and the terminal polls until it's signed in. Works
+  identically on a local machine, over SSH, in WSL, or headless — no
+  `127.0.0.1` callback that a remote browser can never reach. Replaces the
+  loopback browser-login and the 0.1.1 executor workaround.
+- The dock renders the sign-in code + URL into the action feed (a bare print is
+  invisible in the full-screen UI).
+- Fix `__version__` so it tracks `pyproject.toml` (was pinned at 0.1.0).
+
 ## 0.1.1
 
 - Fix `/login` inside the REPL: it now runs the shared `imperal_mcp` auth flow

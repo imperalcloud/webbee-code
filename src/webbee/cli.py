@@ -22,7 +22,7 @@ def main(argv=None) -> None:
 
     if args.cmd == "login":
         from imperal_mcp import auth
-        print(f"Logged in as {auth.login(cfg)}.")
+        print(f"Logged in as {asyncio.run(auth.login_device(cfg))}.")
         return
     if args.cmd == "logout":
         from imperal_mcp import auth

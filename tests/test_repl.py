@@ -41,7 +41,12 @@ class FakeAuth:
     async def ensure_access_token(self, cfg):
         if not self._in: raise self.NotLoggedInError("no creds")
         return "tok"
-    def login(self, cfg, *, open_browser=True): self._in = True; return "u@imperal.io"
+    async def login_device(self, cfg, *, on_prompt=None, open_browser=True):
+        if on_prompt:
+            on_prompt("WDBK-7Q3M", "https://panel.imperal.io/device",
+                      "https://panel.imperal.io/device?code=WDBK-7Q3M")
+        self._in = True
+        return "u@imperal.io"
     async def logout(self, cfg): self._in = False; self.logged_out = True
 
 
@@ -119,20 +124,15 @@ def test_login_command_calls_auth_and_logs_in():
     assert any(not NO_CYRILLIC.search(n) for n in sink.notes)
 
 
-def test_login_survives_auth_using_asyncio_run_internally():
-    # imperal_mcp.auth.login is SYNC and calls asyncio.run() inside (token
-    # exchange + whoami). run_repl runs inside a loop, so calling it directly
-    # raises "asyncio.run() cannot be called from a running event loop". repl
-    # must run it OFF the loop (executor thread) so the nested asyncio.run works.
-    class RunAuth(FakeAuth):
-        def login(self, cfg, *, open_browser=True):
-            asyncio.run(asyncio.sleep(0))     # mimic auth.login's internal asyncio.run
-            self._in = True
-            return "u@imperal.io"
-    auth = RunAuth(logged_in=False)
+def test_login_uses_device_flow_and_renders_prompt():
+    # Device-code flow (RFC 8628): repl awaits auth.login_device directly (async,
+    # no executor) and on_prompt renders the code + URL into the feed before the
+    # poll completes. Confirms the prompt reaches the sink and login persists.
+    auth = FakeAuth(logged_in=False)
     sink, agent = _run(read_line=_lines("/login", "/exit"), auth=auth)
     assert auth._in is True
-    assert any("Signed in" in n for n in sink.notes)
+    assert any("WDBK-7Q3M" in n and "panel.imperal.io/device" in n for n in sink.notes)
+    assert any("Signed in as u@imperal.io" in n for n in sink.notes)
 
 
 def test_mode_command_switches_agent_mode():
