@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6
+
+- **Input height is truly dynamic.** The box is one line and grows only as far
+  as your (wrapped) text needs — up to 10 rows — then shrinks back, instead of a
+  fixed tall block.
+- **Selection is visible.** Dragging highlights the text as you go (and copies
+  it on release); the highlight clears when you let go.
+
 ## 0.1.5
 
 - **No lag on large sessions + never-truncated answers.** The output pane now

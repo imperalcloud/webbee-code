@@ -70,6 +70,8 @@ class OutputPane:
         self._offset = 0                   # index of the top visible line
         self._view_h = 20                  # viewport height (updated from render_info)
         self._follow = True                # stick to the tail unless the user scrolls up
+        self._sel = None                   # (abs_start, abs_end) during a drag → live highlight
+        self._plain_cache = (None, [""])   # (text, ANSI-stripped lines) for select/highlight
         self.copy_flash = ""               # transient toolbar note after a copy
         self._flash_until = 0.0
         pane = self
@@ -93,13 +95,23 @@ class OutputPane:
                     return None
                 if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.LEFT:
                     self._down = ev.position
+                    a = (ev.position.y + pane._offset, ev.position.x)
+                    pane._sel = (a, a)                 # zero-width start (no highlight yet)
+                    pane._invalidate()
                     return None
                 if et == MouseEventType.MOUSE_MOVE:
-                    return None if self._down is not None else NotImplemented
+                    if self._down is None:
+                        return NotImplemented
+                    pane._sel = ((self._down.y + pane._offset, self._down.x),
+                                 (ev.position.y + pane._offset, ev.position.x))
+                    pane._invalidate()                 # grow the highlight as you drag
+                    return None
                 if et == MouseEventType.MOUSE_UP:
                     down, self._down = self._down, None
                     if down is not None and (down.x, down.y) != (ev.position.x, ev.position.y):
                         pane._copy_selection(down, ev.position)  # real drag, not a click
+                    pane._sel = None
+                    pane._invalidate()                 # clear the highlight (colours restored)
                     return None
                 return NotImplemented
 
@@ -113,6 +125,17 @@ class OutputPane:
             self._lines_cache = (s, s.split("\n"))
         return self._lines_cache[1]
 
+    def _plain_lines(self):
+        import re
+        s = self._io.getvalue()
+        if self._plain_cache[0] != s:
+            self._plain_cache = (s, re.sub(r"\x1b\[[0-9;]*m", "", s).split("\n"))
+        return self._plain_cache[1]
+
+    def _norm_sel(self):
+        (a, b) = self._sel
+        return (a, b) if a <= b else (b, a)
+
     def _formatted(self):
         ri = self.window.render_info
         if ri is not None and ri.window_height:
@@ -121,7 +144,24 @@ class OutputPane:
         h = max(1, self._view_h)
         off = max(0, min(self._offset, max(0, len(lines) - h)))
         self._offset = off
-        return self._ANSI("\n".join(lines[off:off + h]))
+        visible = lines[off:off + h]
+        if self._sel is None:
+            return self._ANSI("\n".join(visible))
+        # A drag is in progress — overlay reverse-video on the selected columns
+        # (selected lines render plain+reversed; colours return when it clears).
+        (y1, x1), (y2, x2) = self._norm_sel()
+        plain = self._plain_lines()
+        out = []
+        for vi, aln in enumerate(range(off, off + len(visible))):
+            if y1 <= aln <= y2 and aln < len(plain):
+                ln = plain[aln]
+                a = max(0, min(x1 if aln == y1 else 0, len(ln)))
+                b = max(-1, min(x2 if aln == y2 else len(ln) - 1, len(ln) - 1))
+                out.append(ln[:a] + "\x1b[7m" + ln[a:b + 1] + "\x1b[0m" + ln[b + 1:]
+                           if b >= a else ln)
+            else:
+                out.append(visible[vi])
+        return self._ANSI("\n".join(out))
 
     def scroll(self, delta: int) -> None:
         lines = self._all_lines()
@@ -166,9 +206,7 @@ class OutputPane:
         """Plain text (ANSI stripped) covered by a drag. start/end .y are
         VIEWPORT rows → add `_offset` for absolute content lines. wrap_lines is
         False so a content line maps 1:1 to a `\\n`-split line, col = char index."""
-        import re
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", self._io.getvalue())
-        lines = plain.split("\n")
+        lines = self._plain_lines()
         p1 = (start.y + self._offset, start.x)
         p2 = (end.y + self._offset, end.x)
         if p1 > p2:
@@ -226,7 +264,6 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, Window
-        from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.layout.processors import BeforeInput
         from prompt_toolkit.styles import Style
@@ -290,12 +327,21 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                              current=st["current"], elapsed=st["elapsed"],
                              tools=st["tools"], consent=st["consent"])
 
-    # wrap_lines + a growing height (1→10 rows) so ALL typed text stays visible
-    # (it wraps instead of scrolling off the side). multiline=False keeps Enter
-    # as submit.
+    # Dynamic height: EXACTLY the rows the wrapped input needs (1→10), so the box
+    # grows as you type and shrinks back — never a fixed huge block. Enter still
+    # submits (multiline=False); the pane above absorbs all remaining space.
+    def _input_height():
+        import shutil
+        text = buf.text
+        cols = max(10, shutil.get_terminal_size((100, 24)).columns - 4)  # frame + "❯ "
+        if not text:
+            return 1
+        rows = sum(max(1, -(-len(ln) // cols)) for ln in text.split("\n"))
+        return min(10, max(1, rows))
+
     input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput("❯ ", style="class:prompt")]),
-        height=Dimension(min=1, max=10), wrap_lines=True)
+        height=_input_height, wrap_lines=True)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
     root = HSplit([pane.window, Frame(input_win), toolbar])
     style = Style.from_dict({
