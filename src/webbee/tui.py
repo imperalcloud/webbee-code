@@ -253,12 +253,15 @@ class OutputPane:
 
 
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
-                      is_busy, consent_pending, resolve_consent) -> bool:
+                      is_busy, consent_pending, resolve_consent, steps_nav=None) -> bool:
     """The full-screen dock: `pane` fills the top (scrollable), a bordered input
     box + toolbar are FIXED at the bottom. Enter either resolves a pending
     consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
-    (the box stays fixed during it). Returns True on clean exit; False if
-    prompt_toolkit is unavailable (caller uses the plain fallback loop)."""
+    (the box stays fixed during it). When `steps_nav` is given and the input is
+    empty and no turn is running, Up/Down move a step selection (toolbar shows
+    `step k/N`) and Enter expands it via `steps_nav["expand"]`; Esc clears it.
+    Returns True on clean exit; False if prompt_toolkit is unavailable (caller
+    uses the plain fallback loop)."""
     try:
         from prompt_toolkit.application import Application, get_app
         from prompt_toolkit.buffer import Buffer
@@ -290,6 +293,10 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         if consent_pending():
             resolve_consent(text)              # ICNLI: relay the raw reply verbatim
             return
+        if not text.strip() and sel["i"] is not None and steps_nav and not is_busy():
+            idx, sel["i"] = sel["i"], None
+            event.app.create_background_task(steps_nav["expand"](idx))
+            return
         if is_busy() or not text.strip():
             return
         turn["task"] = event.app.create_background_task(_run_turn(text))
@@ -310,6 +317,33 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         if not is_busy():
             event.app.exit()
 
+    sel = {"i": None}   # None = no selection; else 0-based step index
+
+    def _nav_count() -> int:
+        try:
+            return int(steps_nav["count"]()) if steps_nav else 0
+        except Exception:
+            return 0
+
+    @kb.add("up")
+    def _step_up(event):
+        n = _nav_count()
+        if n and not buf.text and not is_busy():
+            sel["i"] = (n - 1) if sel["i"] is None else max(0, sel["i"] - 1)
+            event.app.invalidate()
+
+    @kb.add("down")
+    def _step_down(event):
+        n = _nav_count()
+        if n and not buf.text and not is_busy():
+            sel["i"] = 0 if sel["i"] is None else min(n - 1, sel["i"] + 1)
+            event.app.invalidate()
+
+    @kb.add("escape")
+    def _step_clear(event):
+        sel["i"] = None
+        event.app.invalidate()
+
     @kb.add("pageup")
     def _pgup(event):
         pane.scroll(-(max(1, pane._view_h) - 2))
@@ -322,6 +356,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         f = pane.flash()
         if f:
             return [("class:tb.working", "  " + f)]   # transient copy confirmation
+        if sel["i"] is not None and steps_nav:
+            return [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
         st = status()
         return build_toolbar(mode_getter(), st["tokens"], st["cost"], busy=st["busy"],
                              current=st["current"], elapsed=st["elapsed"],

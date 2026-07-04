@@ -113,6 +113,29 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                 n = await sessions_client.revoke_others(cfg, token_provider)
                 _sink.note(f"Signed out {n} other session(s)." if n >= 0 else "Failed to sign out other sessions.")
                 return "continue"
+            if res.action == "steps":
+                from webbee.details import format_steps
+                _sink.note(format_steps(getattr(agent, "steps", [])))
+                return "continue"
+            if res.action == "step_detail":
+                from webbee.details import build_step_ref, fetch_step_detail, format_steps
+                _steps = getattr(agent, "steps", [])
+                try:
+                    _idx = int(res.arg) - 1
+                    _step = _steps[_idx]
+                except (ValueError, IndexError):
+                    _sink.note(f"No such step. {format_steps(_steps)}")
+                    return "continue"
+                if not _step.get("step_id") or not getattr(agent, "session_id", ""):
+                    _sink.note("No detail ref for this step.")
+                    return "continue"
+                _detail = await fetch_step_detail(
+                    cfg, token_provider, build_step_ref(agent.session_id, _step["step_id"]))
+                if _detail:
+                    _sink.step_detail(_detail)
+                else:
+                    _sink.note("Detail unavailable (expired or not recorded).")
+                return "continue"
             if res.action == "clear":
                 _sink.clear()
                 _sink.note(res.message)
@@ -167,7 +190,12 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
             ok = await tui.run_session(
                 pane=pane, on_line=_on_line, mode_getter=lambda: state["mode"],
                 on_cycle=_cycle, status=_sink.status, is_busy=_sink.is_busy,
-                consent_pending=_sink.consent_pending, resolve_consent=_sink.resolve_consent)
+                consent_pending=_sink.consent_pending, resolve_consent=_sink.resolve_consent,
+                steps_nav={
+                    "count": lambda: len(getattr(agent, "steps", [])),
+                    "expand": lambda i: _handle(f"/steps {i + 1}"),
+                },
+            )
         except Exception:
             ok = False
         if ok:

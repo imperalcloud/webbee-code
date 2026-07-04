@@ -70,6 +70,8 @@ class AgentSession:
         self.token_provider = token_provider
         self.workspace_root = workspace_root
         self.mode = mode
+        self.session_id: str = ""
+        self.steps: list = []
 
     async def _headers(self) -> dict:
         token = await self.token_provider()
@@ -95,6 +97,8 @@ class AgentSession:
             )
             resp.raise_for_status()
             session_id = resp.json()["session_id"]
+            self.session_id = session_id
+            self.steps = []
 
             seen: dict = {}  # req_id -> already-posted result (at-least-once dedup)
             headers = await self._headers()
@@ -114,6 +118,9 @@ class AgentSession:
                             out = handle_tool_request(frame, executor)
                             res = out["result"]
                             sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
+                            self.steps.append({"step_id": str(rid or ""),
+                                               "label": frame.get("tool", ""),
+                                               "ok": bool(res.get("ok"))})
                             seen[rid] = out
                         await self._post_result(client, session_id, out)
 
@@ -140,6 +147,10 @@ class AgentSession:
                             if _summ in ("None", "none"):  # tool result had no content — clean ✓
                                 _summ = ""
                             sink.tool_result(_lbl, bool(frame.get("ok")), _summ)
+                        if frame.get("phase") != "start":
+                            self.steps.append({"step_id": str(frame.get("step_id", "") or ""),
+                                               "label": _lbl,
+                                               "ok": bool(frame.get("ok"))})
 
                     elif ftype == "progress":  # P2 — server not emitting yet; forward-compatible
                         sink.progress(frame.get("text", ""))

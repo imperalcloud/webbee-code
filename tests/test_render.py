@@ -262,6 +262,31 @@ def test_status_bottom_counter_is_session_total():
     assert s.status()["tokens"] == 350                        # idle: session total, no double-count
 
 
+# ---- step drill-down (Task 20 P1b) ---------------------------------------
+
+def test_step_detail_renders_facts_and_previews():
+    s = _sink()
+    s.step_detail({"ok": True, "app_id": "mail", "tool": "list_messages",
+                   "duration_ms": 1234, "trace_id": "abc123",
+                   "args": {"preview": "{'folder': 'INBOX'}"},
+                   "result": {"preview": "5 messages", "truncated": False}})
+    out = s.console.export_text()
+    assert "mail" in out and "list_messages" in out
+    assert "1.2s" in out
+    assert "abc123" in out
+    assert "INBOX" in out and "5 messages" in out
+
+
+def test_step_detail_shows_truncated_note():
+    s = _sink()
+    s.step_detail({"ok": False, "app_id": "", "tool": "bash",
+                   "args": {"preview": "ls -la"},
+                   "result": {"preview": "x" * 10, "truncated": True, "total_bytes": 9999}})
+    out = s.console.export_text()
+    assert "truncated" in out and "9999" in out
+    assert "✗" in out
+
+
 def test_plan_blocked_prints_english_hint():
     s = _sink()
     s.plan_blocked("notes.delete_note")

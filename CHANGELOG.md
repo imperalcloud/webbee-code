@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9
+
+- **`/steps` — see what the last turn actually did.** Lists every tool/action
+  from the last turn with a ✓/✗ mark; `/steps N` (or Up/Down + Enter in the
+  dock, when the input is empty and idle) fetches and shows the full detail
+  for one step — args/result previews, duration, trace id — from the gateway.
+
 ## 0.1.8
 
 - **More robust file tools.** The local file tools now find the path under any

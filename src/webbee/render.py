@@ -289,6 +289,22 @@ class RichSink:
         self.console.print(Text("  /sessions revoke <#>  ·  /logout-others", style="dim"))
         self._nudge()
 
+    def step_detail(self, detail: dict) -> None:
+        """P1b drill-down: one bordered block — facts row + bounded
+        args/result previews (already PII-masked server-side)."""
+        def _prev(p):
+            p = p or {}
+            note = f"  (truncated, {p.get('total_bytes', 0)} bytes total)" if p.get("truncated") else ""
+            return (str(p.get("preview", "") or "")[:2000]) + note
+
+        mark = "✓" if detail.get("ok") else "✗"
+        head = (f"{mark} {detail.get('app_id', '')}·{detail.get('tool', '')}  "
+                f"{(detail.get('duration_ms', 0) or 0) / 1000:.1f}s  "
+                f"trace {detail.get('trace_id', '')}")
+        body = f"{head}\n\nargs:\n{_prev(detail.get('args'))}\n\nresult:\n{_prev(detail.get('result'))}"
+        self.console.print(Panel(body, border_style="dim", title="step detail", title_align="left"))
+        self._nudge()
+
     def progress(self, text: str) -> None:
         if text:
             self.console.print(Text("  " + text, style="dim italic"))

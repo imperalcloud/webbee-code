@@ -223,3 +223,58 @@ def test_cycle_mode_updates_agent(monkeypatch):
 def test_next_mode_wired():
     from webbee.tui import next_mode
     assert next_mode("default") == "plan"   # cycle helper is what repl uses
+
+
+# ── /steps + step drill-down (Task 20 P1b) ────────────────────────────────────
+
+class StepAgent(FakeAgent):
+    def __init__(self, steps=None, session_id="sess-1"):
+        super().__init__()
+        self.steps = steps or []
+        self.session_id = session_id
+
+
+def test_slash_steps_lists_last_turn_steps():
+    agent = StepAgent(steps=[{"step_id": "r1", "label": "read_file", "ok": True}])
+    sink, agent = _run(read_line=_lines("/steps", "/exit"), agent=agent)
+    assert any("read_file" in n for n in sink.notes)
+
+
+def test_slash_steps_empty_says_no_steps():
+    sink, agent = _run(read_line=_lines("/steps", "/exit"), agent=StepAgent())
+    assert any("No steps" in n for n in sink.notes)
+
+
+def test_slash_steps_out_of_range_reports_no_such_step():
+    agent = StepAgent(steps=[{"step_id": "r1", "label": "read_file", "ok": True}])
+    sink, agent = _run(read_line=_lines("/steps 5", "/exit"), agent=agent)
+    assert any("No such step" in n for n in sink.notes)
+
+
+def test_slash_steps_detail_fetches_and_renders(monkeypatch):
+    agent = StepAgent(steps=[{"step_id": "toolu_1", "label": "read_file", "ok": True}])
+
+    async def fake_fetch(cfg, tp, ref):
+        assert ref == "terminal:sess-1:toolu_1"
+        return {"ok": True, "tool": "read_file"}
+    monkeypatch.setattr("webbee.details.fetch_step_detail", fake_fetch)
+
+    class DetailSink(FakeSink):
+        def __init__(self):
+            super().__init__()
+            self.details = []
+        def step_detail(self, d): self.details.append(d)
+
+    sink, agent = _run(read_line=_lines("/steps 1", "/exit"), agent=agent, sink=DetailSink())
+    assert sink.details == [{"ok": True, "tool": "read_file"}]
+
+
+def test_slash_steps_detail_unavailable_notes_when_fetch_empty(monkeypatch):
+    agent = StepAgent(steps=[{"step_id": "toolu_1", "label": "read_file", "ok": True}])
+
+    async def fake_fetch(cfg, tp, ref):
+        return {}
+    monkeypatch.setattr("webbee.details.fetch_step_detail", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("/steps 1", "/exit"), agent=agent)
+    assert any("unavailable" in n.lower() for n in sink.notes)
