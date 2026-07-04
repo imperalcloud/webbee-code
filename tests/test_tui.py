@@ -106,3 +106,35 @@ def test_copy_flash_expires():
     pane.copy_flash = "✓ copied 5 chars"
     pane._flash_until = 0.0            # already in the past
     assert pane.flash() == ""
+
+
+# ── virtualization: render only the visible slice, follow the tail ────────────
+
+def test_pane_follows_tail_on_notify():
+    from webbee.tui import OutputPane
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(50)))   # 50 lines
+    pane.notify()
+    assert pane._offset == len(pane._all_lines()) - 10          # pinned to the bottom
+
+
+def test_pane_scroll_up_pauses_follow_then_rearms():
+    from webbee.tui import OutputPane
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(50)))
+    pane.notify()                      # offset=40, following
+    pane.scroll(-5)
+    assert pane._offset == 35 and pane._follow is False
+    pane.scroll(100)                   # clamp back to bottom
+    assert pane._offset == 40 and pane._follow is True
+
+
+def test_selected_text_respects_scroll_offset():
+    from webbee.tui import OutputPane
+    from prompt_toolkit.data_structures import Point
+    pane = OutputPane(width=80)
+    pane._io.write("aaa\nbbb\nccc\nddd\n")
+    pane._offset = 2                   # viewport top = content line 2 ("ccc")
+    assert pane._selected_text(Point(0, 0), Point(2, 0)) == "ccc"

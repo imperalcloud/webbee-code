@@ -45,18 +45,17 @@ def build_toolbar(mode: str, tokens: int, cost: float, *, busy: bool = False,
 
 
 class OutputPane:
-    """A full-screen scrollable pane that shows COLORED output. Rich renders
-    into a StringIO as ANSI; a FormattedTextControl(ANSI(...)) shows it with the
-    colours intact. The `get_cursor_position == vertical_scroll` trick makes
-    Window.vertical_scroll authoritative so the mouse wheel / PageUp scroll it;
-    notify() auto-follows the tail ONLY when the user is already at the bottom
-    (so scrolling up to read history isn't yanked back down). Grounded in
-    prompt_toolkit 3.0.52 (verified in venv)."""
+    """A scrollable, colored output pane. Rich renders the full transcript into
+    a StringIO as ANSI; the pane VIRTUALIZES — the FormattedTextControl is fed
+    ONLY the currently-visible slice of lines, so every frame costs O(viewport),
+    not O(session). That keeps huge sessions lag-free and never truncates a long
+    answer (the visible region is always rendered in full; scroll to see more).
+    Wheel / PageUp move `_offset`; left-drag copies the covered text via OSC 52.
+    Grounded in prompt_toolkit 3.0.52 (verified in venv)."""
 
     def __init__(self, width: int = 100) -> None:
         import io
 
-        from prompt_toolkit.data_structures import Point
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.layout.containers import Window
         from prompt_toolkit.layout.controls import FormattedTextControl
@@ -67,16 +66,18 @@ class OutputPane:
         self.console = Console(file=self._io, force_terminal=True,
                                color_system="truecolor", width=width, highlight=False)
         self._ANSI = ANSI
-        self._cache = (None, None)   # (text, ANSI) memo — bounds re-parse cost
-        self.copy_flash = ""         # transient toolbar note after a copy
+        self._lines_cache = (None, [""])   # (text, split-lines) — memoize the split
+        self._offset = 0                   # index of the top visible line
+        self._view_h = 20                  # viewport height (updated from render_info)
+        self._follow = True                # stick to the tail unless the user scrolls up
+        self.copy_flash = ""               # transient toolbar note after a copy
         self._flash_until = 0.0
         pane = self
 
-        # Copy-on-select: left-drag over the pane copies the covered text to the
-        # system clipboard via OSC 52 (works locally + over SSH). The Window
-        # gives us CONTENT coordinates (Point(x=col, y=row)); with wrap_lines
-        # False, row = content line, col = char index. SCROLL events return
-        # NotImplemented so the Window keeps handling the wheel.
+        # Content fed to the control is only the visible slice, so the mouse row
+        # is a VIEWPORT row (0..view_h-1) — add `_offset` for the absolute line.
+        # Wheel scroll adjusts `_offset` directly (the control shows no more than
+        # a viewport, so there is nothing for the Window itself to scroll).
         class _SelectControl(FormattedTextControl):
             def __init__(self, **kw):
                 super().__init__(**kw)
@@ -84,6 +85,12 @@ class OutputPane:
 
             def mouse_handler(self, ev):
                 et = ev.event_type
+                if et == MouseEventType.SCROLL_UP:
+                    pane.scroll(-3)
+                    return None
+                if et == MouseEventType.SCROLL_DOWN:
+                    pane.scroll(3)
+                    return None
                 if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.LEFT:
                     self._down = ev.position
                     return None
@@ -94,28 +101,44 @@ class OutputPane:
                     if down is not None and (down.x, down.y) != (ev.position.x, ev.position.y):
                         pane._copy_selection(down, ev.position)  # real drag, not a click
                     return None
-                return NotImplemented   # SCROLL_UP/DOWN → Window scrolls
+                return NotImplemented
 
-        self.control = _SelectControl(
-            text=self._formatted, focusable=False, show_cursor=False,
-            get_cursor_position=lambda: Point(0, self.window.vertical_scroll))
-        self.window = Window(content=self.control, wrap_lines=False,
-                             always_hide_cursor=True, allow_scroll_beyond_bottom=False)
+        self.control = _SelectControl(text=self._formatted, focusable=False, show_cursor=False)
+        self.window = Window(content=self.control, wrap_lines=False, always_hide_cursor=True)
+
+    # ---- virtualized render ---------------------------------------------
+    def _all_lines(self):
+        s = self._io.getvalue()
+        if self._lines_cache[0] != s:            # re-split only when the buffer changed
+            self._lines_cache = (s, s.split("\n"))
+        return self._lines_cache[1]
 
     def _formatted(self):
-        text = self._io.getvalue()
-        if self._cache[0] != text:                # only re-parse when it changed
-            self._cache = (text, self._ANSI(text))
-        return self._cache[1]
+        ri = self.window.render_info
+        if ri is not None and ri.window_height:
+            self._view_h = ri.window_height
+        lines = self._all_lines()
+        h = max(1, self._view_h)
+        off = max(0, min(self._offset, max(0, len(lines) - h)))
+        self._offset = off
+        return self._ANSI("\n".join(lines[off:off + h]))
+
+    def scroll(self, delta: int) -> None:
+        lines = self._all_lines()
+        max_off = max(0, len(lines) - max(1, self._view_h))
+        self._offset = max(0, min(self._offset + delta, max_off))
+        self._follow = self._offset >= max_off   # re-arm tail-follow once back at bottom
+        self._invalidate()
 
     def notify(self) -> None:
-        """Called after each sink print: follow the tail if the user is at the
-        bottom, then redraw. If they've scrolled up, leave their scroll alone."""
+        """After each sink print: follow the tail unless the user scrolled up."""
         self._trim()
-        ri = self.window.render_info
-        if ri is not None and ri.bottom_visible:
-            n = self._io.getvalue().count("\n") + 1
-            self.window.vertical_scroll = max(0, n - ri.window_height)
+        lines = self._all_lines()
+        max_off = max(0, len(lines) - max(1, self._view_h))
+        self._offset = max_off if self._follow else min(self._offset, max_off)
+        self._invalidate()
+
+    def _invalidate(self) -> None:
         try:
             from prompt_toolkit.application import get_app_or_none
             app = get_app_or_none()
@@ -124,7 +147,7 @@ class OutputPane:
         except Exception:
             pass
 
-    def _trim(self, max_lines: int = 5000) -> None:
+    def _trim(self, max_lines: int = 20000) -> None:
         import io
         s = self._io.getvalue()
         if s.count("\n") > max_lines:
@@ -140,13 +163,14 @@ class OutputPane:
 
     # ---- copy-on-select --------------------------------------------------
     def _selected_text(self, start, end) -> str:
-        """Plain text (ANSI stripped) covered by a drag from `start` to `end`
-        (both Points with content col=x / line=y). wrap_lines is False so a
-        content line maps 1:1 to a `\\n`-split line and col = char index."""
+        """Plain text (ANSI stripped) covered by a drag. start/end .y are
+        VIEWPORT rows → add `_offset` for absolute content lines. wrap_lines is
+        False so a content line maps 1:1 to a `\\n`-split line, col = char index."""
         import re
         plain = re.sub(r"\x1b\[[0-9;]*m", "", self._io.getvalue())
         lines = plain.split("\n")
-        p1, p2 = (start.y, start.x), (end.y, end.x)
+        p1 = (start.y + self._offset, start.x)
+        p2 = (end.y + self._offset, end.x)
         if p1 > p2:
             p1, p2 = p2, p1
         (y1, x1), (y2, x2) = p1, p2
@@ -202,6 +226,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.layout.processors import BeforeInput
         from prompt_toolkit.styles import Style
@@ -250,11 +275,11 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("pageup")
     def _pgup(event):
-        pane.window.vertical_scroll = max(0, pane.window.vertical_scroll - 5)
+        pane.scroll(-(max(1, pane._view_h) - 2))
 
     @kb.add("pagedown")
     def _pgdn(event):
-        pane.window.vertical_scroll += 5
+        pane.scroll(max(1, pane._view_h) - 2)
 
     def _toolbar():
         f = pane.flash()
@@ -265,9 +290,12 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                              current=st["current"], elapsed=st["elapsed"],
                              tools=st["tools"], consent=st["consent"])
 
+    # wrap_lines + a growing height (1→10 rows) so ALL typed text stays visible
+    # (it wraps instead of scrolling off the side). multiline=False keeps Enter
+    # as submit.
     input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput("❯ ", style="class:prompt")]),
-        height=1)
+        height=Dimension(min=1, max=10), wrap_lines=True)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
     root = HSplit([pane.window, Frame(input_win), toolbar])
     style = Style.from_dict({

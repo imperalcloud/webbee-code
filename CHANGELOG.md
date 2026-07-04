@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5
+
+- **No lag on large sessions + never-truncated answers.** The output pane now
+  renders only the visible slice (virtualized), so scrolling and streaming stay
+  instant no matter how long the session grows, and a long answer is shown in
+  full — scroll to read all of it.
+- **Input wraps.** Long input wraps and the box grows (up to 10 rows) so
+  everything you type stays visible instead of scrolling off the side.
+
 ## 0.1.4
 
 - **Copy on select.** Drag to select text in the dock and it's copied to your
