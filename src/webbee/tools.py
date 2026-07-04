@@ -18,6 +18,15 @@ class LocalToolExecutor:
         return full
 
     def run(self, tool: str, args: dict) -> dict:
+        # Some providers deliver tool arguments as a JSON string, not a dict.
+        if isinstance(args, str):
+            import json
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
         try:
             fn = getattr(self, f"_t_{tool}", None)
             if fn is None:
@@ -30,13 +39,19 @@ class LocalToolExecutor:
 
     @staticmethod
     def _rel(a: dict) -> str:
-        """The file path from whichever key the brain used. Claude-family models
-        default to Claude-Code names (file_path), so accept the common synonyms;
-        a clean ValueError (not KeyError) lets the brain self-correct."""
-        raw = a.get("path") or a.get("file_path") or a.get("filename") or a.get("file")
-        if not raw:
-            raise ValueError("required 'path' argument is missing")
-        return raw
+        """The file path from whichever key the brain used. Models vary: Claude
+        emits file_path/old_string, GPT may use other names — accept the common
+        ones, then ANY key that mentions path/file, then fail with a clear error
+        that ECHOES the keys we DID get (so a stubborn model's shape is visible)."""
+        for k in ("path", "file_path", "filepath", "filename", "file",
+                  "target_file", "target_path", "target", "name"):
+            v = a.get(k)
+            if isinstance(v, str) and v.strip():
+                return v
+        for k, v in a.items():                       # fuzzy: any *path*/*file* key
+            if isinstance(v, str) and v.strip() and ("path" in k.lower() or "file" in k.lower()):
+                return v
+        raise ValueError(f"'path' argument is missing (got keys: {sorted(a.keys())})")
 
     def _t_read_file(self, a: dict) -> dict:
         rel = self._rel(a)

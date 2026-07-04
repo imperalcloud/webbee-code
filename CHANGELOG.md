@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8
+
+- **More robust file tools.** The local file tools now find the path under any
+  reasonable argument name (and any key that mentions path/file), parse args
+  delivered as a JSON string, and — if a path really is missing — report which
+  keys the model DID send instead of a bare error. Pairs with a server-side fix
+  that stops large file writes from being truncated.
+
 ## 0.1.7
 
 - **Fix: editing files failed with `KeyError: 'path'`.** The local file tools now
