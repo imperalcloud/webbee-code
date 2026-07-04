@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+- **Copy on select.** Drag to select text in the dock and it's copied to your
+  clipboard automatically (via OSC 52 — works locally and over SSH), with a
+  brief “✓ copied” confirmation. Mouse-wheel scrolling still works.
+
 ## 0.1.3
 
 - **Sessions & security.** `/sessions` lists everywhere your Imperal account is

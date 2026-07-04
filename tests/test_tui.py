@@ -70,3 +70,39 @@ def test_output_pane_captures_colored_text():
     out = pane.dump()
     assert "Error" in out and "ok" in out
     assert "\x1b[" in out          # ANSI colour escapes preserved for the pane
+
+
+# ── copy-on-select (drag → OSC 52) ────────────────────────────────────────────
+
+def test_selected_text_single_line():
+    from webbee.tui import OutputPane
+    from prompt_toolkit.data_structures import Point
+    pane = OutputPane(width=80)
+    pane.console.print("hello world")
+    assert pane._selected_text(Point(6, 0), Point(10, 0)) == "world"
+
+
+def test_selected_text_multi_line_strips_ansi():
+    from webbee.tui import OutputPane
+    from prompt_toolkit.data_structures import Point
+    pane = OutputPane(width=80)
+    pane.console.print("abcdef")
+    pane.console.print("[bold]ghijkl[/]")   # coloured — must be stripped
+    pane.console.print("mnopqr")
+    assert pane._selected_text(Point(3, 0), Point(2, 2)) == "def\nghijkl\nmno"
+
+
+def test_selected_text_reversed_order_normalizes():
+    from webbee.tui import OutputPane
+    from prompt_toolkit.data_structures import Point
+    pane = OutputPane(width=80)
+    pane.console.print("hello")
+    assert pane._selected_text(Point(4, 0), Point(0, 0)) == "hello"
+
+
+def test_copy_flash_expires():
+    from webbee.tui import OutputPane
+    pane = OutputPane(width=80)
+    pane.copy_flash = "✓ copied 5 chars"
+    pane._flash_until = 0.0            # already in the past
+    assert pane.flash() == ""
