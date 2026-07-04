@@ -10,6 +10,9 @@ _HELP = """Commands:
   /mode [default|plan|autopilot]   consent mode (no arg — show current)
   /cost  (=/usage)   tokens + $ cost this session
   /status            cwd · git · surface · tokens · version
+  /sessions          list active sessions (this + other devices)
+  /sessions revoke <#>   revoke a session by its number
+  /logout-others     sign out every session except this one
   /exit  (=/quit)    quit"""
 
 
@@ -32,6 +35,7 @@ class SlashResult:
     message: str = ""
     action: str = ""
     new_mode: "str | None" = None
+    arg: str = ""
 
 
 def dispatch(line: str, ctx: CommandContext) -> SlashResult:
@@ -64,6 +68,13 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
                f"cwd: {ctx.workspace}   git: {ctx.git_branch}\n"
                f"tokens: {ctx.session_tokens} (~${ctx.session_cost:.4f})   webbee v{ctx.version}")
         return SlashResult(handled=True, action="status", message=msg)
+    if cmd == "/sessions":
+        if args and args[0].lower() == "revoke":
+            return SlashResult(handled=True, action="sessions_revoke",
+                               arg=(args[1] if len(args) > 1 else ""))
+        return SlashResult(handled=True, action="sessions")
+    if cmd == "/logout-others":
+        return SlashResult(handled=True, action="logout_others")
     if cmd == "/mode":
         if not args:
             return SlashResult(handled=True, action="mode", new_mode=None,

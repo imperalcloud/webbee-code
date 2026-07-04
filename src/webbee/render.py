@@ -264,6 +264,31 @@ class RichSink:
         self.console.print(Panel(body, title="🐝 Connect this terminal", border_style=_BEE))
         self._nudge()
 
+    def sessions_table(self, sessions) -> None:
+        """Active sessions as a compact table (English-only): #, session, IP,
+        last-seen, and a bee-yellow 'this device' marker for the current one."""
+        from rich.table import Table
+        self.console.print(Text("  Active sessions", style=f"bold {_BEE}"))
+        if not sessions:
+            self.console.print(Text("  (none)", style="dim"))
+            self._nudge()
+            return
+        t = Table(show_header=True, header_style="dim", box=None, padding=(0, 3, 0, 0))
+        t.add_column("#", style="dim", justify="right")
+        t.add_column("session")
+        t.add_column("ip", style="dim")
+        t.add_column("last seen", style="dim")
+        t.add_column("")
+        for i, s in enumerate(sessions, 1):
+            label = str(s.get("label") or s.get("surface") or "?")
+            ip = str(s.get("ip_address") or "-")
+            seen = str(s.get("last_seen_at") or "")[:16].replace("T", " ")
+            here = Text("this device", style=f"bold {_BEE}") if s.get("current") else Text("")
+            t.add_row(str(i), label, ip, seen, here)
+        self.console.print(t)
+        self.console.print(Text("  /sessions revoke <#>  ·  /logout-others", style="dim"))
+        self._nudge()
+
     def progress(self, text: str) -> None:
         if text:
             self.console.print(Text("  " + text, style="dim italic"))

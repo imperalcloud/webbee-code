@@ -36,6 +36,26 @@ def test_login_prompt_shows_code_and_url():
     assert not NO_CYRILLIC.search(out)   # English UI only
 
 
+def test_sessions_table_renders():
+    s = _sink()
+    s.sessions_table([
+        {"session_id": "s1", "surface": "cli", "label": "Terminal (webbee)",
+         "ip_address": "1.2.3.4", "last_seen_at": "2026-07-04T00:00:00", "current": True},
+        {"session_id": "s2", "surface": "web", "label": "Web (Chrome)",
+         "ip_address": None, "last_seen_at": "2026-07-03T10:00:00", "current": False},
+    ])
+    out = s.console.export_text()
+    assert "Terminal (webbee)" in out and "Web (Chrome)" in out
+    assert "this device" in out and "1.2.3.4" in out
+    assert not NO_CYRILLIC.search(out)
+
+
+def test_sessions_table_empty():
+    s = _sink()
+    s.sessions_table([])
+    assert "none" in s.console.export_text().lower()
+
+
 def test_ask_consent_relays_raw_input():
     console = Console(record=True, width=80)
     s = RichSink(console=console, live_enabled=False, input_fn=lambda p: "  ага давай  ", clock=lambda: 0.0)

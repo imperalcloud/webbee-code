@@ -19,7 +19,8 @@ def _git_branch(workspace: str) -> str:
 
 
 async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
-                   agent_factory=None, auth=None, account_fetcher=None) -> None:
+                   agent_factory=None, auth=None, account_fetcher=None,
+                   sessions_client=None) -> None:
     """Interactive coding REPL. Production (a real tty, no injected sink) runs
     the persistent prompt_toolkit dock (`tui.run_session`): the bordered input
     box is pinned at the bottom, turn output scrolls above it (patch_stdout →
@@ -32,6 +33,8 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m)  # noqa: E731
     if account_fetcher is None:
         from webbee.account import fetch_account as account_fetcher
+    if sessions_client is None:
+        from webbee import sessions as sessions_client
 
     workspace = os.getcwd()
 
@@ -84,6 +87,31 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                 await auth.logout(cfg)
                 state["logged_in"] = False
                 _sink.note("Signed out, local credentials removed.")
+                return "continue"
+            if res.action == "sessions":
+                rows = await sessions_client.list_sessions(cfg, token_provider)
+                state["sessions"] = rows
+                _sink.sessions_table(rows)
+                return "continue"
+            if res.action == "sessions_revoke":
+                rows = state.get("sessions") or []
+                try:
+                    idx = int(res.arg) - 1
+                except ValueError:
+                    idx = -1
+                if idx < 0 or idx >= len(rows):
+                    _sink.note("Usage: /sessions revoke <#> — run /sessions first to see the list.")
+                    return "continue"
+                s = rows[idx]
+                if s.get("current"):
+                    _sink.note("That's this terminal — use /logout to sign out here.")
+                    return "continue"
+                ok = await sessions_client.revoke_session(cfg, token_provider, s["session_id"])
+                _sink.note(f"Revoked {s.get('label') or s.get('surface')}." if ok else "Failed to revoke session.")
+                return "continue"
+            if res.action == "logout_others":
+                n = await sessions_client.revoke_others(cfg, token_provider)
+                _sink.note(f"Signed out {n} other session(s)." if n >= 0 else "Failed to sign out other sessions.")
                 return "continue"
             if res.action == "clear":
                 _sink.clear()

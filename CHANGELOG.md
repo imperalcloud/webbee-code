@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- **Sessions & security.** `/sessions` lists everywhere your Imperal account is
+  signed in — terminal (webbee), API, and web — with the current terminal
+  marked. `/sessions revoke <#>` signs out one; `/logout-others` signs out
+  every session except this one. Manage the same sessions from the panel
+  (Settings → Security). Backed by a single gateway-owned session store.
+
 ## 0.1.2
 
 - **Device-code login (RFC 8628).** `/login` and `webbee login` now use the

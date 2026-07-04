@@ -19,6 +19,7 @@ class FakeSink:
     def abort(self): self.aborted = True
     def welcome(self, *a, **kw): ...
     def user_echo(self, text): self.echoed = getattr(self, "echoed", []) + [text]
+    def sessions_table(self, rows): self.session_tables = getattr(self, "session_tables", []) + [rows]
     # TurnSink no-ops
     def tool_start(self, *a): ...
     def tool_result(self, *a): ...
@@ -50,6 +51,19 @@ class FakeAuth:
     async def logout(self, cfg): self._in = False; self.logged_out = True
 
 
+class FakeSessions:
+    def __init__(self, rows=None):
+        self.rows = rows if rows is not None else [
+            {"session_id": "s1", "surface": "cli", "label": "Terminal (webbee)", "current": True},
+            {"session_id": "s2", "surface": "web", "label": "Web (Chrome)", "current": False},
+        ]
+        self.revoked = []
+        self.others_called = False
+    async def list_sessions(self, cfg, tp): return self.rows
+    async def revoke_session(self, cfg, tp, sid): self.revoked.append(sid); return True
+    async def revoke_others(self, cfg, tp): self.others_called = True; return 2
+
+
 def _lines(*items):
     it = iter(items)
     def read(prompt=""):
@@ -71,7 +85,8 @@ def _run(**kw):
     agent = kw.pop("agent", FakeAgent())
     asyncio.run(run_repl(cfg, "default", sink=sink, agent_factory=lambda c, tp, ws, m: agent,
                          read_line=kw.pop("read_line"), auth=kw.pop("auth", FakeAuth()),
-                         account_fetcher=kw.pop("account_fetcher", _fake_account_fetcher)))
+                         account_fetcher=kw.pop("account_fetcher", _fake_account_fetcher),
+                         sessions_client=kw.pop("sessions_client", FakeSessions())))
     return sink, agent
 
 
@@ -133,6 +148,35 @@ def test_login_uses_device_flow_and_renders_prompt():
     assert auth._in is True
     assert any("WDBK-7Q3M" in n and "panel.imperal.io/device" in n for n in sink.notes)
     assert any("Signed in as u@imperal.io" in n for n in sink.notes)
+
+
+def test_sessions_list_renders():
+    fs = FakeSessions()
+    sink, agent = _run(read_line=_lines("/sessions", "/exit"), sessions_client=fs)
+    assert getattr(sink, "session_tables", None)          # sessions_table was rendered
+    assert sink.session_tables[0] == fs.rows
+
+
+def test_sessions_revoke_by_index():
+    fs = FakeSessions()
+    sink, agent = _run(read_line=_lines("/sessions", "/sessions revoke 2", "/exit"), sessions_client=fs)
+    assert fs.revoked == ["s2"]                           # #2 = web (not current)
+    assert any("Revoked" in n for n in sink.notes)
+    assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
+
+
+def test_sessions_revoke_current_is_guarded():
+    fs = FakeSessions()
+    sink, agent = _run(read_line=_lines("/sessions", "/sessions revoke 1", "/exit"), sessions_client=fs)
+    assert fs.revoked == []                               # #1 = current terminal -> guarded
+    assert any("this terminal" in n for n in sink.notes)
+
+
+def test_logout_others_calls_client():
+    fs = FakeSessions()
+    sink, agent = _run(read_line=_lines("/logout-others", "/exit"), sessions_client=fs)
+    assert fs.others_called
+    assert any("other session" in n for n in sink.notes)
 
 
 def test_mode_command_switches_agent_mode():

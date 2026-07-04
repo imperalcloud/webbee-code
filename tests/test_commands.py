@@ -26,13 +26,13 @@ def test_exit_and_quit():
 def test_help_lists_commands():
     r = dispatch("/help", _ctx())
     assert r.handled and r.action == "help"
-    for c in ("/login", "/logout", "/clear", "/mode", "/cost", "/status", "/exit"):
+    for c in ("/login", "/logout", "/clear", "/mode", "/cost", "/status", "/sessions", "/logout-others", "/exit"):
         assert c in r.message
 
 
 def test_help_is_english():
     r = dispatch("/help", _ctx())
-    for c in ("/login", "/logout", "/clear", "/mode", "/cost", "/status", "/exit"):
+    for c in ("/login", "/logout", "/clear", "/mode", "/cost", "/status", "/sessions", "/logout-others", "/exit"):
         assert c in r.message
     assert not NO_CYRILLIC.search(r.message)
 
@@ -96,6 +96,14 @@ def test_clear_login_logout_actions():
     assert dispatch("/clear", _ctx()).action == "clear"
     assert dispatch("/login", _ctx()).action == "login"
     assert dispatch("/logout", _ctx()).action == "logout"
+
+
+def test_sessions_commands():
+    assert dispatch("/sessions", _ctx()).action == "sessions"
+    r = dispatch("/sessions revoke 2", _ctx())
+    assert r.action == "sessions_revoke" and r.arg == "2"
+    assert dispatch("/sessions revoke", _ctx()).action == "sessions_revoke"  # no index -> arg ""
+    assert dispatch("/logout-others", _ctx()).action == "logout_others"
 
 
 def test_unknown_slash_is_handled_with_hint():
