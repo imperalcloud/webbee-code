@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7
+
+- **Fix: editing files failed with `KeyError: 'path'`.** The local file tools now
+  accept the Claude-Code argument names the model naturally emits
+  (`file_path`, `old_string`, `new_string`, `content`) in addition to the short
+  ones, and a genuinely missing path returns a clear message instead of crashing
+  the tool. `write_file` / `edit_file` work reliably again.
+
 ## 0.1.6
 
 - **Input height is truly dynamic.** The box is one line and grows only as far

@@ -28,27 +28,44 @@ class LocalToolExecutor:
         except Exception as e:  # surface tool errors to the brain, don't crash
             return {"ok": False, "content": f"{type(e).__name__}: {e}"}
 
+    @staticmethod
+    def _rel(a: dict) -> str:
+        """The file path from whichever key the brain used. Claude-family models
+        default to Claude-Code names (file_path), so accept the common synonyms;
+        a clean ValueError (not KeyError) lets the brain self-correct."""
+        raw = a.get("path") or a.get("file_path") or a.get("filename") or a.get("file")
+        if not raw:
+            raise ValueError("required 'path' argument is missing")
+        return raw
+
     def _t_read_file(self, a: dict) -> dict:
-        p = self.resolve_in_workspace(a["path"])
+        rel = self._rel(a)
+        p = self.resolve_in_workspace(rel)
         with open(p, "r", encoding="utf-8") as f:
             return {"ok": True, "content": f.read()}
 
     def _t_write_file(self, a: dict) -> dict:
-        p = self.resolve_in_workspace(a["path"])
+        rel = self._rel(a)
+        p = self.resolve_in_workspace(rel)
         os.makedirs(os.path.dirname(p) or self.root, exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
-            f.write(a.get("content", ""))
-        return {"ok": True, "content": f"wrote {a['path']}"}
+            f.write(a.get("content", a.get("contents", "")))
+        return {"ok": True, "content": f"wrote {rel}"}
 
     def _t_edit_file(self, a: dict) -> dict:
-        p = self.resolve_in_workspace(a["path"])
+        rel = self._rel(a)
+        p = self.resolve_in_workspace(rel)
+        old = a.get("old", a.get("old_string", ""))       # accept Claude-Code names
+        new = a.get("new", a.get("new_string", ""))
+        if not old:
+            return {"ok": False, "content": "edit_file requires 'old' (the text to replace)"}
         with open(p, "r", encoding="utf-8") as f:
             text = f.read()
-        if a["old"] not in text:
+        if old not in text:
             return {"ok": False, "content": "old string not found"}
         with open(p, "w", encoding="utf-8") as f:
-            f.write(text.replace(a["old"], a["new"], 1))
-        return {"ok": True, "content": f"edited {a['path']}"}
+            f.write(text.replace(old, new, 1))
+        return {"ok": True, "content": f"edited {rel}"}
 
     def _t_bash(self, a: dict) -> dict:
         proc = subprocess.run(
