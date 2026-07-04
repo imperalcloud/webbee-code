@@ -2,6 +2,13 @@
 
 ## 0.1.9
 
+- **Copy-on-select actually copies.** Drag-to-select now writes to the real
+  local clipboard first (`pbcopy` on macOS, `xclip`/`wl-copy` on Linux) — OSC
+  52 is only a fallback (useful over SSH). The confirmation is now honest: it
+  only says "copied" once a local tool actually succeeded; otherwise it says
+  the reply was sent via OSC 52, or that the copy failed. Previously it always
+  flashed "✓ copied" via OSC 52 alone, which most terminals (Terminal.app
+  entirely, iTerm2 without a permission toggle) silently ignore.
 - **`/steps` — see what the last turn actually did.** Lists every tool/action
   from the last turn with a ✓/✗ mark; `/steps N` (or Up/Down + Enter in the
   dock, when the input is empty and idle) fetches and shows the full detail
