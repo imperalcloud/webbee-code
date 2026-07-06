@@ -57,7 +57,7 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                               surface="terminal", logged_in=state["logged_in"],
                               session_tokens=getattr(_sink, "session_tokens", 0),
                               session_credits=getattr(_sink, "session_credits", 0),
-                              git_branch=_git_branch(workspace))
+                              git_branch=state.get("git_branch", "-"))
 
     async def _handle(line: str) -> str:
         """Process one input line. Returns 'exit' or 'continue'."""
@@ -165,6 +165,9 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
     async def _boot(s) -> None:
         nonlocal _sink, agent
         _sink = s
+        # Cache git branch OFF the event loop (subprocess.run blocks it). Only
+        # /status reads it; recomputing it per input line froze the dock.
+        state["git_branch"] = await asyncio.to_thread(_git_branch, workspace)
         account = await account_fetcher(cfg, token_provider)
         state["logged_in"] = account.signed_in
         _sink.welcome(account, workspace, "terminal")

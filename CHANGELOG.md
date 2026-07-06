@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.12
+
+- **Fixes the dock freezing / lagging.** Building the per-turn coding context
+  (`git status` + a file-tree walk) and reading the git branch ran
+  synchronously on the UI event loop, freezing the whole terminal at every turn
+  start (and on keystrokes that triggered the branch read) — worst on large or
+  slow repos. Both now run on a worker thread, so the dock stays responsive.
+
+## 0.1.11
+
+- Pin `imperal-sdk>=5.9.3` (resolve the current SDK).
+
+## 0.1.10
+
+- **Terminal shows credits + tokens, not raw dollars.** The status toolbar and
+  `/cost` / `/status` report the session's credits + token count; the
+  underlying LLM dollar cost stays server-side.
+
 ## 0.1.9
 
 - **Copy-on-select actually copies.** Drag-to-select now writes to the real

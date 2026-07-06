@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 
@@ -92,7 +93,10 @@ class AgentSession:
         from webbee.tools import LocalToolExecutor
         from imperal_mcp.client import ImperalClient
 
-        coding_context = build_coding_context(self.workspace_root)
+        # Offload to a worker thread — build_coding_context runs sync
+        # subprocess.run(git status, timeout=10) + os.walk; inline on the dock's
+        # asyncio loop it froze the whole UI at every turn start.
+        coding_context = await asyncio.to_thread(build_coding_context, self.workspace_root)
         imperal_id = await ImperalClient(self.cfg, self.token_provider).whoami()
         executor = LocalToolExecutor(self.workspace_root)
 

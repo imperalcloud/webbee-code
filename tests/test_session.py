@@ -53,6 +53,35 @@ def test_build_coding_context_shape(tmp_path):
     assert "a.txt" in ctx["tree"]
 
 
+def test_run_offloads_blocking_context_build_off_event_loop(monkeypatch):
+    # Regression (freeze bug): build_coding_context does sync subprocess.run(git
+    # status, timeout=10) + os.walk. Called inline on the dock's asyncio loop it
+    # BLOCKED the whole UI at every turn start (freeze / "не реагирует"). run()
+    # must offload it to a worker thread so the event loop stays responsive.
+    import threading
+
+    import webbee.session as S
+
+    main = threading.main_thread()
+    captured = {}
+
+    class _Sentinel(Exception):
+        pass
+
+    def _spy(root):
+        captured["thread"] = threading.current_thread()
+        raise _Sentinel  # short-circuit run() before any network I/O
+
+    monkeypatch.setattr(S, "build_coding_context", _spy)
+    sess = S.AgentSession(cfg=object(), token_provider=lambda: None, workspace_root=".")
+    try:
+        asyncio.run(sess.run("task", sink=None))
+    except _Sentinel:
+        pass
+    assert captured.get("thread") is not None, "build_coding_context was never called"
+    assert captured["thread"] is not main, "context build ran ON the event-loop thread (blocks UI)"
+
+
 def test_action_frame_maps_to_feed():
     class Rec:
         def __init__(self): self.starts=[]; self.results=[]
