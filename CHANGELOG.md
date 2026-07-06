@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.13
+
+- **Fixes lag in long sessions.** The scrollable output pane re-read and
+  re-scanned the ENTIRE transcript (a full-buffer copy + compare) on every
+  redraw — so in a big session every keystroke, spinner tick and scroll cost
+  O(session). It now keys its line cache on the stream write position and
+  re-reads only when new output actually arrives, so redraws are O(viewport).
+
 ## 0.1.12
 
 - **Fixes the dock freezing / lagging.** Building the per-turn coding context

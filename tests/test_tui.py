@@ -138,3 +138,35 @@ def test_selected_text_respects_scroll_offset():
     pane._io.write("aaa\nbbb\nccc\nddd\n")
     pane._offset = 2                   # viewport top = content line 2 ("ccc")
     assert pane._selected_text(Point(0, 0), Point(2, 0)) == "ccc"
+
+
+def test_output_pane_no_full_reread_on_unchanged_redraw():
+    # Perf regression (long-session lag): _all_lines re-read the ENTIRE buffer
+    # (getvalue O(n) + full string compare O(n)) on EVERY redraw. Every keystroke
+    # / ticker tick / scroll in a big session cost O(session). With NO new output,
+    # a redraw must not re-read the whole buffer.
+    import io
+
+    from webbee.output_pane import OutputPane
+
+    class CountingIO(io.StringIO):
+        def __init__(self):
+            super().__init__()
+            self.gv = 0
+
+        def getvalue(self):
+            self.gv += 1
+            return super().getvalue()
+
+    pane = OutputPane(width=80)
+    cio = CountingIO()
+    pane._io = cio
+    pane.console.file = cio
+    pane.console.print("some output line")
+    pane._all_lines()                      # warm the cache
+    base = cio.gv
+    pane._all_lines(); pane._all_lines(); pane._all_lines()   # no new writes since
+    assert cio.gv == base, "re-read the whole buffer on unchanged redraws (O(session)/frame)"
+    pane.console.print("a new line")       # content changed -> one refresh is expected
+    assert any("a new line" in ln for ln in pane._all_lines())
+    assert cio.gv > base

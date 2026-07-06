@@ -24,12 +24,12 @@ class OutputPane:
         self.console = Console(file=self._io, force_terminal=True,
                                color_system="truecolor", width=width, highlight=False)
         self._ANSI = ANSI
-        self._lines_cache = (None, [""])   # (text, split-lines) — memoize the split
+        self._lines_cache = (None, [""])   # (write-pos, split-lines) — memoize the split
         self._offset = 0                   # index of the top visible line
         self._view_h = 20                  # viewport height (updated from render_info)
         self._follow = True                # stick to the tail unless the user scrolled up
         self._sel = None                   # (abs_start, abs_end) during a drag → live highlight
-        self._plain_cache = (None, [""])   # (text, ANSI-stripped lines) for select/highlight
+        self._plain_cache = (None, [""])   # (write-pos, ANSI-stripped lines) for select/highlight
         self.copy_flash = ""               # transient toolbar note after a copy
         self._flash_until = 0.0
         pane = self
@@ -78,16 +78,22 @@ class OutputPane:
 
     # ---- virtualized render ---------------------------------------------
     def _all_lines(self):
-        s = self._io.getvalue()
-        if self._lines_cache[0] != s:            # re-split only when the buffer changed
-            self._lines_cache = (s, s.split("\n"))
+        # Key the cache on the stream WRITE POSITION (O(1)), not a full-buffer
+        # getvalue()+string compare (O(session)) — that ran on EVERY redraw
+        # (keystroke / ticker / scroll) and made big sessions lag. getvalue()
+        # + re-split happen ONLY when new output actually arrived.
+        pos = self._io.tell()
+        if self._lines_cache[0] != pos:
+            s = self._io.getvalue()
+            self._lines_cache = (pos, s.split("\n"))
         return self._lines_cache[1]
 
     def _plain_lines(self):
         import re
-        s = self._io.getvalue()
-        if self._plain_cache[0] != s:
-            self._plain_cache = (s, re.sub(r"\x1b\[[0-9;]*m", "", s).split("\n"))
+        pos = self._io.tell()
+        if self._plain_cache[0] != pos:
+            s = self._io.getvalue()
+            self._plain_cache = (pos, re.sub(r"\x1b\[[0-9;]*m", "", s).split("\n"))
         return self._plain_cache[1]
 
     def _norm_sel(self):
