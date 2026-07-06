@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.14
+
+- **Esc/Ctrl-C now actually stops the turn — server-side, not just locally.**
+  Previously Ctrl-C only cancelled the LOCAL asyncio task; the cloud brain kept
+  running the turn server-side regardless (burning tokens/credits and still
+  landing writes) — Esc did nothing while a turn was running. Both keys now
+  also post a cancel to the gateway for the in-flight session (fail-soft: a
+  network hiccup here never blocks the local teardown). The busy toolbar hint
+  now reads "Esc/Ctrl-C to stop".
+
 ## 0.1.13
 
 - **Fixes lag in long sessions.** The scrollable output pane re-read and

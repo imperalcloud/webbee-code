@@ -39,7 +39,7 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
             frags += [("class:tb.dim", " · "), ("class:tb.action", current)]
         frags.append(("class:tb.dim",
                       f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"
-                      f"   ·   Ctrl-C to stop"))
+                      f"   ·   Esc/Ctrl-C to stop"))
         return frags
     return [("class:tb.dim", "  mode: "),
             (f"class:tb.mode.{mode}", mode),
@@ -47,8 +47,31 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
              f"   ·   {_fmt_tokens(tokens)} tok · {credits} credits   ·   Shift + TAB: switch mode")]
 
 
+def _escape_action(sel: dict, is_busy, stop_turn, event) -> None:
+    """Esc key binding (P5g). While a turn is running, ask the server to stop
+    it (`stop_turn` posts the cancel; fail-soft, best-effort) and leave the
+    step-selection untouched — while idle (unchanged), clear the selection."""
+    if is_busy() and stop_turn is not None:
+        event.app.create_background_task(stop_turn())
+        return
+    sel["i"] = None
+    event.app.invalidate()
+
+
+def _interrupt_action(turn: dict, is_busy, stop_turn, event) -> None:
+    """Ctrl-C key binding (P5g). The LOCAL task.cancel() is what actually
+    tears the dock down (unchanged); ALSO ask the server to stop the turn so
+    it doesn't keep running (and spending) after the dock moves on."""
+    t = turn["task"]
+    if t is not None and not t.done():
+        if is_busy() and stop_turn is not None:
+            event.app.create_background_task(stop_turn())
+        t.cancel()                          # cancel the running turn; dock survives
+
+
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
-                      is_busy, consent_pending, resolve_consent, steps_nav=None) -> bool:
+                      is_busy, consent_pending, resolve_consent, steps_nav=None,
+                      stop_turn=None) -> bool:
     """The full-screen dock: `pane` fills the top (scrollable), a bordered input
     box + toolbar are FIXED at the bottom. Enter either resolves a pending
     consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
@@ -103,9 +126,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("c-c")
     def _interrupt(event):
-        t = turn["task"]
-        if t is not None and not t.done():
-            t.cancel()                          # cancel the running turn; dock survives
+        _interrupt_action(turn, is_busy, stop_turn, event)
 
     @kb.add("c-d")
     def _eof(event):
@@ -136,8 +157,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("escape")
     def _step_clear(event):
-        sel["i"] = None
-        event.app.invalidate()
+        _escape_action(sel, is_busy, stop_turn, event)
 
     @kb.add("pageup")
     def _pgup(event):

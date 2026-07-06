@@ -191,3 +191,22 @@ class AgentSession:
     async def _post_result(self, client, session_id: str, out: dict) -> None:
         headers = await self._headers()
         await client.post(f"/v1/agent/sessions/{session_id}/result", json=out, headers=headers)
+
+    async def stop(self) -> None:
+        """P5g: server-side stop for Esc/Ctrl-C. Posts a cancel for the
+        in-flight turn so the kernel tears down server-side (not just the
+        local asyncio task). Fail-soft — the local task.cancel() the dock
+        already does is what actually tears the UI down, so a network error
+        here must never raise into the key-binding handler."""
+        if not self.session_id:
+            return
+        try:
+            import httpx
+
+            headers = await self._headers()
+            async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=10) as client:
+                await client.post(
+                    f"/v1/agent/sessions/{self.session_id}/cancel", headers=headers,
+                )
+        except Exception:
+            pass

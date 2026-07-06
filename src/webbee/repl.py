@@ -198,6 +198,7 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                     "count": lambda: len(getattr(agent, "steps", [])),
                     "expand": lambda i: _handle(f"/steps {i + 1}"),
                 },
+                stop_turn=lambda: agent.stop(),
             )
         except Exception:
             ok = False

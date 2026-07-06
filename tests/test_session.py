@@ -301,3 +301,103 @@ def test_progress_dual_reads_llm_text_over_legacy_text():
     assert _progress_text({"text": "old", "llm_text": "new"}) == "new"
     assert _progress_text({"text": "legacy-only"}) == "legacy-only"
     assert _progress_text({}) == ""
+
+
+# --- P5g: AgentSession.stop() — Esc/Ctrl-C server-side cancel -----------------
+# Previously Ctrl-C only cancelled the LOCAL asyncio task; the cloud brain kept
+# running the turn server-side. stop() posts a cancel for the in-flight
+# session so the kernel actually stops, and must fail soft (a network error
+# here must never raise into the dock's key-binding handler).
+
+class _FakeCfg:
+    api_url = "https://api.example"
+
+
+class _FakeResponse:
+    def raise_for_status(self):
+        pass
+
+
+def test_stop_posts_cancel_to_session_endpoint(monkeypatch):
+    import httpx
+
+    from webbee.session import AgentSession
+
+    posts = []
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, path, headers=None, **kw):
+            posts.append((path, headers))
+            return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    async def token_provider():
+        return "tok"
+
+    sess = AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    sess.session_id = "coding-u-1"
+    asyncio.run(sess.stop())
+
+    assert len(posts) == 1
+    path, headers = posts[0]
+    assert path == "/v1/agent/sessions/coding-u-1/cancel"
+    assert headers == {"Authorization": "Bearer tok"}
+
+
+def test_stop_is_a_noop_without_a_session_id(monkeypatch):
+    import httpx
+
+    from webbee.session import AgentSession
+
+    called = []
+
+    class BoomAsyncClient:
+        def __init__(self, *a, **kw):
+            called.append(1)
+
+    monkeypatch.setattr(httpx, "AsyncClient", BoomAsyncClient)
+
+    async def token_provider():
+        return "tok"
+
+    sess = AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    asyncio.run(sess.stop())  # session_id is "" — no request should be attempted
+    assert called == []
+
+
+def test_stop_swallows_network_errors(monkeypatch):
+    import httpx
+
+    from webbee.session import AgentSession
+
+    class ExplodingAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(httpx, "AsyncClient", ExplodingAsyncClient)
+
+    async def token_provider():
+        return "tok"
+
+    sess = AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    sess.session_id = "coding-u-1"
+    asyncio.run(sess.stop())  # must not raise — fail-soft

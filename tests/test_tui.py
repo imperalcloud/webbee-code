@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 from webbee.tui import next_mode, build_toolbar
@@ -32,7 +33,7 @@ def test_toolbar_busy_state_shows_working_dot_and_stop_hint():
     t = _txt(build_toolbar("default", 1200, 0.0143, busy=True,
                            current="notes·delete_note", elapsed=4, tools=3))
     assert "working" in t and "notes·delete_note" in t
-    assert "Ctrl-C to stop" in t and "4s" in t
+    assert "Esc/Ctrl-C to stop" in t and "4s" in t
     assert not NO_CYRILLIC.search(t)
 
 
@@ -170,3 +171,129 @@ def test_output_pane_no_full_reread_on_unchanged_redraw():
     pane.console.print("a new line")       # content changed -> one refresh is expected
     assert any("a new line" in ln for ln in pane._all_lines())
     assert cio.gv > base
+
+
+# ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
+# Previously Ctrl-C only cancelled the local asyncio task while the cloud
+# brain kept running server-side; Esc did nothing while busy. Both key
+# bindings are wired through `_escape_action`/`_interrupt_action` (pure,
+# dependency-injected — same testing philosophy as next_mode/build_toolbar)
+# so this is exercised without spinning up a real prompt_toolkit Application.
+
+class _FakeApp:
+    def __init__(self):
+        self.background_tasks = []
+        self.invalidated = False
+
+    def create_background_task(self, coro):
+        self.background_tasks.append(coro)
+
+    def invalidate(self):
+        self.invalidated = True
+
+
+class _FakeEvent:
+    def __init__(self):
+        self.app = _FakeApp()
+
+
+def _run_and_drain(coro):
+    """Actually execute a coroutine handed to create_background_task so it
+    doesn't leak an 'never awaited' warning, and to prove the spy fired."""
+    asyncio.run(coro)
+
+
+def test_escape_while_busy_schedules_server_stop_and_leaves_selection():
+    from webbee.tui import _escape_action
+
+    stop_calls = []
+
+    async def stop_turn():
+        stop_calls.append(1)
+
+    event = _FakeEvent()
+    sel = {"i": 2}
+    _escape_action(sel, lambda: True, stop_turn, event)
+
+    assert len(event.app.background_tasks) == 1
+    _run_and_drain(event.app.background_tasks[0])
+    assert stop_calls == [1]
+    # Esc-while-busy interrupts — it does NOT also clear the step-selection
+    # or invalidate the toolbar (that's the idle-path job, tested below).
+    assert sel["i"] == 2
+    assert event.app.invalidated is False
+
+
+def test_escape_while_idle_clears_step_selection_unchanged():
+    from webbee.tui import _escape_action
+
+    stop_calls = []
+
+    async def stop_turn():
+        stop_calls.append(1)
+
+    event = _FakeEvent()
+    sel = {"i": 2}
+    _escape_action(sel, lambda: False, stop_turn, event)
+
+    assert sel["i"] is None
+    assert event.app.invalidated is True
+    assert event.app.background_tasks == []
+    assert stop_calls == []
+
+
+def test_escape_while_busy_with_no_stop_turn_falls_back_to_clearing():
+    # stop_turn=None (e.g. no repl wiring) must never crash Esc — it just
+    # keeps the pre-P5g behavior of clearing the step-selection.
+    from webbee.tui import _escape_action
+
+    event = _FakeEvent()
+    sel = {"i": 1}
+    _escape_action(sel, lambda: True, None, event)
+
+    assert sel["i"] is None
+    assert event.app.invalidated is True
+    assert event.app.background_tasks == []
+
+
+def test_interrupt_while_busy_cancels_local_task_and_schedules_server_stop():
+    from webbee.tui import _interrupt_action
+
+    stop_calls = []
+
+    async def stop_turn():
+        stop_calls.append(1)
+
+    cancelled = []
+
+    class _FakeTask:
+        def done(self):
+            return False
+
+        def cancel(self):
+            cancelled.append(1)
+
+    event = _FakeEvent()
+    turn = {"task": _FakeTask()}
+    _interrupt_action(turn, lambda: True, stop_turn, event)
+
+    assert cancelled == [1]                      # local teardown still happens
+    assert len(event.app.background_tasks) == 1  # AND the server gets asked to stop
+    _run_and_drain(event.app.background_tasks[0])
+    assert stop_calls == [1]
+
+
+def test_interrupt_with_no_running_task_is_a_noop():
+    from webbee.tui import _interrupt_action
+
+    stop_calls = []
+
+    async def stop_turn():
+        stop_calls.append(1)
+
+    event = _FakeEvent()
+    turn = {"task": None}
+    _interrupt_action(turn, lambda: True, stop_turn, event)
+
+    assert event.app.background_tasks == []
+    assert stop_calls == []
