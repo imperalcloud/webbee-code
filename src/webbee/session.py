@@ -1,6 +1,14 @@
 import os
 import subprocess
 
+from webbee.frames import (
+    _first_time,
+    _progress_text,
+    handle_action_frame,
+    handle_step_finished,
+    handle_step_started,
+)
+
 
 def handle_tool_request(frame: dict, executor) -> dict:
     """Run a (kernel-pre-approved) local tool. The kernel gates write/bash
@@ -101,6 +109,18 @@ class AgentSession:
             self.steps = []
 
             seen: dict = {}  # req_id -> already-posted result (at-least-once dedup)
+            # Slice-5 T9: id-sets shared across BOTH vocabularies for EXT tools
+            # (the kernel reuses the SAME tc["id"] as step_id there), so a step
+            # announced by one vocabulary is never re-announced by its
+            # dual-emitted twin. step_labels carries a v2 step_started's label
+            # forward to its later step_finished (which carries no app_id/tool
+            # of its own — facts-only). local_ids tracks LOCAL-tool v2 step_ids,
+            # which use a disjoint id space from the tool_request round trip
+            # (see webbee.frames' module docstring) and are a pure no-op.
+            started: set = set()
+            finished: set = set()
+            step_labels: dict = {}
+            local_ids: set = set()
             headers = await self._headers()
             async with aconnect_sse(
                 client, "GET", f"/v1/agent/sessions/{session_id}/stream", headers=headers,
@@ -111,16 +131,19 @@ class AgentSession:
 
                     if ftype == "tool_request":
                         rid = frame.get("req_id")
+                        sid = str(rid or "")
                         if rid in seen:
                             out = seen[rid]
                         else:
-                            sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
+                            if _first_time(sid, started):
+                                sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
                             out = handle_tool_request(frame, executor)
                             res = out["result"]
-                            sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
-                            self.steps.append({"step_id": str(rid or ""),
-                                               "label": frame.get("tool", ""),
-                                               "ok": bool(res.get("ok"))})
+                            if _first_time(sid, finished):
+                                sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
+                                self.steps.append({"step_id": sid,
+                                                   "label": frame.get("tool", ""),
+                                                   "ok": bool(res.get("ok"))})
                             seen[rid] = out
                         await self._post_result(client, session_id, out)
 
@@ -139,21 +162,16 @@ class AgentSession:
                         sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
 
                     elif ftype == "action":  # R2 — ext-tool call (server-side) surfaced in the feed
-                        _lbl = "·".join(x for x in (frame.get("app_id", ""), frame.get("tool", "")) if x)
-                        if frame.get("phase") == "start":
-                            sink.tool_start(_lbl, {})
-                        else:
-                            _summ = str(frame.get("summary", "") or "")
-                            if _summ in ("None", "none"):  # tool result had no content — clean ✓
-                                _summ = ""
-                            sink.tool_result(_lbl, bool(frame.get("ok")), _summ)
-                        if frame.get("phase") != "start":
-                            self.steps.append({"step_id": str(frame.get("step_id", "") or ""),
-                                               "label": _lbl,
-                                               "ok": bool(frame.get("ok"))})
+                        handle_action_frame(frame, sink, started, finished, self.steps)
 
-                    elif ftype == "progress":  # P2 — server not emitting yet; forward-compatible
-                        sink.progress(frame.get("text", ""))
+                    elif ftype == "step_started":  # v2 (Slice-5 T8 dual-emit)
+                        handle_step_started(frame, sink, started, step_labels, local_ids)
+
+                    elif ftype == "step_finished":  # v2 (Slice-5 T8 dual-emit)
+                        handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
+
+                    elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
+                        sink.progress(_progress_text(frame))
 
                     elif ftype == "usage":  # P2 — cumulative tokens + USD cost
                         sink.usage(
