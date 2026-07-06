@@ -173,10 +173,10 @@ class AgentSession:
                     elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
                         sink.progress(_progress_text(frame))
 
-                    elif ftype == "usage":  # P2 — cumulative tokens + USD cost
+                    elif ftype == "usage":  # P2 — cumulative tokens + credits (Slice C; raw $ stays server-side)
                         sink.usage(
                             int(frame.get("tokens", 0) or 0),
-                            float(frame.get("cost_usd", 0.0) or 0.0),
+                            int(frame.get("credits", 0) or 0),
                         )
 
                     elif ftype == "final":

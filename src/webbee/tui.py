@@ -21,7 +21,7 @@ def next_mode(mode: str) -> str:
         return _MODES[0]
 
 
-def build_toolbar(mode: str, tokens: int, cost: float, *, busy: bool = False,
+def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False) -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
@@ -44,7 +44,7 @@ def build_toolbar(mode: str, tokens: int, cost: float, *, busy: bool = False,
     return [("class:tb.dim", "  mode: "),
             (f"class:tb.mode.{mode}", mode),
             ("class:tb.dim",
-             f"   ·   {_fmt_tokens(tokens)} tok · ${cost:.4f}   ·   Shift + TAB: switch mode")]
+             f"   ·   {_fmt_tokens(tokens)} tok · {credits} credits   ·   Shift + TAB: switch mode")]
 
 
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
@@ -154,7 +154,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         if sel["i"] is not None and steps_nav:
             return [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
         st = status()
-        return build_toolbar(mode_getter(), st["tokens"], st["cost"], busy=st["busy"],
+        return build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
                              current=st["current"], elapsed=st["elapsed"],
                              tools=st["tools"], consent=st["consent"])
 

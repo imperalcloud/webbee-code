@@ -39,7 +39,7 @@ from webbee.commands import CommandContext, dispatch
 def _ctx():
     return CommandContext(mode="default", workspace="/w", version="0.1.9",
                           surface="terminal", logged_in=True,
-                          session_tokens=0, session_cost=0.0, git_branch="-")
+                          session_tokens=0, session_credits=0.0, git_branch="-")
 
 
 def test_slash_steps_lists():

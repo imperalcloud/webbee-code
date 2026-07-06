@@ -19,10 +19,10 @@ def test_next_mode_unknown_resets():
     assert next_mode("weird") == "default"
 
 def test_toolbar_idle_has_mode_tokens_cost_and_hint():
-    t = _txt(build_toolbar("plan", 51000, 0.0664))
+    t = _txt(build_toolbar("plan", 51000, 66))
     assert "plan" in t
     assert "51.0k" in t
-    assert "$0.0664" in t
+    assert "66 credits" in t
     assert "Shift + TAB" in t          # spelled in words, no glyph
     assert "⇧⇥" not in t     # the ⇧⇥ glyph must NOT appear
     assert not NO_CYRILLIC.search(t)

@@ -7,7 +7,7 @@ NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
 
 def _ctx(**kw):
     base = dict(mode="default", workspace="/w", version="0.1.0", surface="terminal",
-                logged_in=True, session_tokens=42, session_cost=0.0, git_branch="main")
+                logged_in=True, session_tokens=42, session_credits=0.0, git_branch="main")
     base.update(kw)
     return CommandContext(**base)
 
@@ -70,19 +70,19 @@ def test_cost_and_usage_alias():
 
 
 def test_cost_shows_tokens():
-    r = dispatch("/cost", _ctx(session_tokens=1500, session_cost=0.012))
+    r = dispatch("/cost", _ctx(session_tokens=1500, session_credits=0.012))
     assert r.action == "cost"
     assert "1500" in r.message and "token" in r.message.lower()
 
 
 def test_cost_shows_session_total():
-    r = dispatch("/cost", _ctx(session_tokens=350, session_cost=0.03))
+    r = dispatch("/cost", _ctx(session_tokens=350, session_credits=0.03))
     assert "350" in r.message and "token" in r.message.lower()
     assert not NO_CYRILLIC.search(r.message)
 
 
 def test_cost_english_tokens():
-    r = dispatch("/cost", _ctx(session_tokens=1500, session_cost=0.012))
+    r = dispatch("/cost", _ctx(session_tokens=1500, session_credits=0.012))
     assert r.action == "cost" and "1500" in r.message and "token" in r.message.lower()
     assert not NO_CYRILLIC.search(r.message)
 

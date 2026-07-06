@@ -56,7 +56,7 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         return CommandContext(mode=state["mode"], workspace=workspace, version=__version__,
                               surface="terminal", logged_in=state["logged_in"],
                               session_tokens=getattr(_sink, "session_tokens", 0),
-                              session_cost=getattr(_sink, "session_cost", 0.0),
+                              session_credits=getattr(_sink, "session_credits", 0),
                               git_branch=_git_branch(workspace))
 
     async def _handle(line: str) -> str:

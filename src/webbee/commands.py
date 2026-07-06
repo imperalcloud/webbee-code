@@ -8,7 +8,7 @@ _HELP = """Commands:
   /logout            sign out and remove local credentials
   /clear             clear the screen + reset session counters
   /mode [default|plan|autopilot]   consent mode (no arg — show current)
-  /cost  (=/usage)   tokens + $ cost this session
+  /cost  (=/usage)   tokens + credits this session
   /status            cwd · git · surface · tokens · version
   /steps [N]         last turn's steps; N expands one (also: Up/Down + Enter)
   /sessions          list active sessions (this + other devices)
@@ -25,7 +25,7 @@ class CommandContext:
     surface: str
     logged_in: bool
     session_tokens: int
-    session_cost: float
+    session_credits: int
     git_branch: str
 
 
@@ -61,13 +61,12 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         return SlashResult(handled=True, action="clear", message="Screen cleared, counters reset.")
     if cmd in ("/cost", "/usage"):
         return SlashResult(handled=True, action="cost",
-                           message=f"This session: {ctx.session_tokens} tokens (~${ctx.session_cost:.4f}). "
-                                   f"LLM turns don't spend credits.")
+                           message=f"This session: {ctx.session_tokens} tokens · {ctx.session_credits} credits.")
     if cmd == "/status":
         auth = "signed in" if ctx.logged_in else "not signed in (/login)"
         msg = (f"surface: {ctx.surface}   mode: {ctx.mode}   {auth}\n"
                f"cwd: {ctx.workspace}   git: {ctx.git_branch}\n"
-               f"tokens: {ctx.session_tokens} (~${ctx.session_cost:.4f})   webbee v{ctx.version}")
+               f"tokens: {ctx.session_tokens} · {ctx.session_credits} credits   webbee v{ctx.version}")
         return SlashResult(handled=True, action="status", message=msg)
     if cmd == "/sessions":
         if args and args[0].lower() == "revoke":

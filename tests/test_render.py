@@ -68,7 +68,7 @@ def test_usage_sets_tokens_and_cost():
     s.usage(1400, 0.0123)
     s.usage(2100, 0.0201)        # cumulative frame — latest wins
     assert s.tokens == 2100
-    assert s.cost_usd == 0.0201
+    assert s.credits == 0.0201
 
 
 def test_status_and_summary_show_tokens_not_credits():
@@ -148,10 +148,10 @@ def test_ext_action_default_icon():
 def test_usage_and_clear_still_work():
     s = _sink()
     s.usage(2100, 0.02)
-    assert s.tokens == 2100 and s.cost_usd == 0.02
+    assert s.tokens == 2100 and s.credits == 0.02
     s._tools = 3
     s.clear()
-    assert s.tokens == 0 and s.cost_usd == 0.0 and s._tools == 0
+    assert s.tokens == 0 and s.credits == 0.0 and s._tools == 0
 
 
 # ---- WEBBEE CODE welcome + account panel + session /cost (Chunk 1 Task 2) --
@@ -184,12 +184,12 @@ def test_welcome_signed_out_minimal():
     assert "i m p e r a l . i o" in out  # letter-spaced brand caption, per Target welcome and "/login" in out
 
 
-def test_session_cost_accumulates_across_turns():
+def test_session_credits_accumulates_across_turns():
     s = _sink()
     s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")
     s.begin_turn(); s.usage(250, 0.02); s.end_turn("b")   # per-turn cumulative frames
     assert s.session_tokens == 350
-    assert abs(s.session_cost - 0.03) < 1e-9
+    assert abs(s.session_credits - 0.03) < 1e-9
 
 
 def test_turn_footer_shows_session_total():
@@ -204,7 +204,7 @@ def test_clear_resets_session_totals():
     s = _sink()
     s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")
     s.clear()
-    assert s.session_tokens == 0 and s.session_cost == 0.0
+    assert s.session_tokens == 0 and s.session_credits == 0.0
 
 
 # ---- P0 de-clutter + hierarchy -------------------------------------------

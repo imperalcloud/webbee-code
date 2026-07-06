@@ -69,9 +69,9 @@ class RichSink:
         self._clock = clock
         self._on_output = on_output      # pane.notify (scroll+redraw) in the dock
         self.tokens = 0
-        self.cost_usd = 0.0
+        self.credits = 0
         self.session_tokens = 0
-        self.session_cost = 0.0
+        self.session_credits = 0
         self._tools = 0
         self._started = None
         self._busy = False
@@ -139,7 +139,7 @@ class RichSink:
         self._current = ""
         self._pending = ("", "")
         self.tokens = 0        # per-turn live counters (usage frames are per-turn cumulative)
-        self.cost_usd = 0.0
+        self.credits = 0
         self._busy = True
         self.console.print()   # breathing room between the user's message and the response
         self._nudge()
@@ -152,7 +152,7 @@ class RichSink:
             self.console.print(Markdown(final_text))
         elapsed = self._elapsed()
         self.session_tokens += self.tokens
-        self.session_cost += self.cost_usd
+        self.session_credits += self.credits
         noun = "action" if self._tools == 1 else "actions"
         self.console.print(Text(
             f"  {elapsed:.1f}s · {self._tools} {noun} · {_fmt_tokens(self.tokens)} tok"
@@ -177,9 +177,9 @@ class RichSink:
         """/clear: wipe the pane/screen + reset the session counters."""
         self.console.clear()
         self.tokens = 0
-        self.cost_usd = 0.0
+        self.credits = 0
         self.session_tokens = 0
-        self.session_cost = 0.0
+        self.session_credits = 0
         self._tools = 0
         self._current = ""
         self._nudge()
@@ -319,10 +319,11 @@ class RichSink:
             ("Press Shift+Tab to switch to default or autopilot to allow it.", "dim")))
         self._nudge()
 
-    def usage(self, tokens: int, cost_usd: float) -> None:
+    def usage(self, tokens: int, credits: int) -> None:
         # Cumulative frame — trust the server's running totals verbatim.
+        # Slice C: CREDITS (not raw $) — the kernel keeps the $ server-side.
         self.tokens = tokens
-        self.cost_usd = cost_usd
+        self.credits = credits
         self._nudge()
 
     # ---- dock bridge (read by tui.run_session's toolbar + Enter binding) ---
@@ -334,7 +335,7 @@ class RichSink:
         return {"busy": self._busy, "current": self._current,
                 "elapsed": self._elapsed(), "tools": self._tools,
                 "tokens": self.session_tokens + (self.tokens if self._busy else 0),
-                "cost": self.session_cost + (self.cost_usd if self._busy else 0.0),
+                "credits": self.session_credits + (self.credits if self._busy else 0),
                 "consent": self.consent_pending()}
 
     def is_busy(self) -> bool:
