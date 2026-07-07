@@ -88,7 +88,6 @@ class AgentSession:
 
     async def run(self, task: str, sink) -> str:
         import httpx
-        from httpx_sse import aconnect_sse
 
         from webbee.tools import LocalToolExecutor
         from imperal_mcp.client import ImperalClient
@@ -108,7 +107,9 @@ class AgentSession:
                 headers=headers,
             )
             resp.raise_for_status()
-            session_id = resp.json()["session_id"]
+            _sess = resp.json()
+            session_id = _sess["session_id"]
+            start_id = _sess.get("last_id", "0-0")
             self.session_id = session_id
             self.steps = []
 
@@ -125,66 +126,64 @@ class AgentSession:
             finished: set = set()
             step_labels: dict = {}
             local_ids: set = set()
-            headers = await self._headers()
-            async with aconnect_sse(
-                client, "GET", f"/v1/agent/sessions/{session_id}/stream", headers=headers,
-            ) as event_source:
-                async for sse in event_source.aiter_sse():
-                    frame = sse.json()
-                    ftype = frame.get("type")
+            from webbee.stream import stream_frames
+            async for frame in stream_frames(
+                client, session_id, self._headers, start_id=start_id,
+            ):
+                ftype = frame.get("type")
 
-                    if ftype == "tool_request":
-                        rid = frame.get("req_id")
-                        sid = str(rid or "")
-                        if rid in seen:
-                            out = seen[rid]
-                        else:
-                            if _first_time(sid, started):
-                                sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
-                            out = handle_tool_request(frame, executor)
-                            res = out["result"]
-                            if _first_time(sid, finished):
-                                sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
-                                self.steps.append({"step_id": sid,
-                                                   "label": frame.get("tool", ""),
-                                                   "ok": bool(res.get("ok"))})
-                            seen[rid] = out
-                        await self._post_result(client, session_id, out)
+                if ftype == "tool_request":
+                    rid = frame.get("req_id")
+                    sid = str(rid or "")
+                    if rid in seen:
+                        out = seen[rid]
+                    else:
+                        if _first_time(sid, started):
+                            sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
+                        out = handle_tool_request(frame, executor)
+                        res = out["result"]
+                        if _first_time(sid, finished):
+                            sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
+                            self.steps.append({"step_id": sid,
+                                               "label": frame.get("tool", ""),
+                                               "ok": bool(res.get("ok"))})
+                        seen[rid] = out
+                    await self._post_result(client, session_id, out)
 
-                    elif ftype == "confirm_request":
-                        rid = frame.get("req_id")
-                        if rid in seen:
-                            out = seen[rid]
-                        else:
-                            if self.mode == "plan":
-                                sink.plan_blocked(frame.get("tool", ""))
-                            out = await handle_confirm_request(frame, self.mode, sink.ask_consent)
-                            seen[rid] = out
-                        await self._post_result(client, session_id, out)
+                elif ftype == "confirm_request":
+                    rid = frame.get("req_id")
+                    if rid in seen:
+                        out = seen[rid]
+                    else:
+                        if self.mode == "plan":
+                            sink.plan_blocked(frame.get("tool", ""))
+                        out = await handle_confirm_request(frame, self.mode, sink.ask_consent)
+                        seen[rid] = out
+                    await self._post_result(client, session_id, out)
 
-                    elif ftype == "panel_release_required":
-                        sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
+                elif ftype == "panel_release_required":
+                    sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
 
-                    elif ftype == "action":  # R2 — ext-tool call (server-side) surfaced in the feed
-                        handle_action_frame(frame, sink, started, finished, self.steps)
+                elif ftype == "action":  # R2 — ext-tool call (server-side) surfaced in the feed
+                    handle_action_frame(frame, sink, started, finished, self.steps)
 
-                    elif ftype == "step_started":  # v2 (Slice-5 T8 dual-emit)
-                        handle_step_started(frame, sink, started, step_labels, local_ids)
+                elif ftype == "step_started":  # v2 (Slice-5 T8 dual-emit)
+                    handle_step_started(frame, sink, started, step_labels, local_ids)
 
-                    elif ftype == "step_finished":  # v2 (Slice-5 T8 dual-emit)
-                        handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
+                elif ftype == "step_finished":  # v2 (Slice-5 T8 dual-emit)
+                    handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
 
-                    elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
-                        sink.progress(_progress_text(frame))
+                elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
+                    sink.progress(_progress_text(frame))
 
-                    elif ftype == "usage":  # P2 — cumulative tokens + credits (Slice C; raw $ stays server-side)
-                        sink.usage(
-                            int(frame.get("tokens", 0) or 0),
-                            int(frame.get("credits", 0) or 0),
-                        )
+                elif ftype == "usage":  # P2 — cumulative tokens + credits (Slice C; raw $ stays server-side)
+                    sink.usage(
+                        int(frame.get("tokens", 0) or 0),
+                        int(frame.get("credits", 0) or 0),
+                    )
 
-                    elif ftype == "final":
-                        return frame.get("text", "")
+                elif ftype == "final":
+                    return frame.get("text", "")
 
         return ""
 
