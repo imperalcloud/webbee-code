@@ -54,7 +54,10 @@ def build_coding_context(workspace_root: str) -> dict:
                 break
         if len(paths) >= 200:
             break
-    return {"cwd": cwd, "git": git, "tree": "\n".join(paths)}
+    from webbee.repo import compute_repo_key, find_repo_root
+    root = find_repo_root(cwd)
+    return {"cwd": cwd, "git": git, "tree": "\n".join(paths),
+            "repo_key": compute_repo_key(root), "repo_root": root}
 
 
 def _summary(result: dict) -> str:
@@ -140,7 +143,7 @@ class AgentSession:
                     else:
                         if _first_time(sid, started):
                             sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
-                        out = handle_tool_request(frame, executor)
+                        out = await asyncio.to_thread(handle_tool_request, frame, executor)
                         res = out["result"]
                         if _first_time(sid, finished):
                             sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))

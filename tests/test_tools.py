@@ -55,3 +55,21 @@ def test_missing_path_is_graceful_not_keyerror(tmp_path):
     assert not r["ok"] and "path" in r["content"].lower() and "KeyError" not in r["content"]
     r2 = ex.run("edit_file", {"path": "nope.txt"})   # no old/new
     assert not r2["ok"]
+
+
+def test_bash_timeout_capped_at_3600(tmp_path, monkeypatch):
+    import webbee.tools as T
+    captured = {}
+
+    def _fake_run(cmd, **kw):
+        captured.update(kw)
+        class _P:  # minimal CompletedProcess stand-in
+            returncode, stdout, stderr = 0, "ok", ""
+        return _P()
+
+    monkeypatch.setattr(T.subprocess, "run", _fake_run)
+    ex = T.LocalToolExecutor(str(tmp_path))
+    ex.run("bash", {"command": "true", "timeout": 99999})
+    assert captured["timeout"] == 3600
+    ex.run("bash", {"command": "true"})
+    assert captured["timeout"] == 120

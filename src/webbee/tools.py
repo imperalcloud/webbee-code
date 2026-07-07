@@ -83,9 +83,10 @@ class LocalToolExecutor:
         return {"ok": True, "content": f"edited {rel}"}
 
     def _t_bash(self, a: dict) -> dict:
+        timeout = min(int(a.get("timeout", 120) or 120), 3600)
         proc = subprocess.run(
             a["command"], shell=True, cwd=self.root,
-            capture_output=True, text=True, timeout=a.get("timeout", 120),
+            capture_output=True, text=True, timeout=timeout,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         return {"ok": proc.returncode == 0, "content": out or f"(exit {proc.returncode})"}
