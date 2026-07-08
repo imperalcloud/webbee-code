@@ -22,6 +22,9 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
+[project.optional-dependencies]
+intel = ["tree-sitter>=0.23", "tree-sitter-python>=0.23", "tree-sitter-typescript>=0.23", "tree-sitter-javascript>=0.23", "watchfiles>=0.24"]
+
 [project.urls]
 Homepage = "https://imperal.io"
 Documentation = "https://docs.imperal.io"
