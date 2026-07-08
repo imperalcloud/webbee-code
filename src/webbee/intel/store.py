@@ -9,9 +9,14 @@ import json
 import os
 from dataclasses import asdict
 
-import numpy as np
-
 from webbee.intel.models import ProjectIndex, FileIndex, Symbol
+
+# numpy is NOT imported at module scope: this module is imported eagerly by
+# service.py, but numpy is declared only in the intel-embed* extras, not the
+# base `intel` extra. save_vectors/load_vectors are the only functions that
+# touch it -- import it locally there so an intel-only install (no embed
+# extra) can still import this whole module (index.json save/load, the
+# graph plane) with no numpy on the system at all.
 
 SCHEMA_VERSION = 2
 
@@ -60,13 +65,14 @@ def _vec_dir(cache_dir: str, repo_key: str) -> str:
 
 
 def save_vectors(cache_dir, repo_key, git_ref, model_id, ids, matrix) -> None:
+    # Data FIRST, manifest LAST: chunks.json is the commit point. A crash
+    # between the two atomic os.replace() calls then always leaves the data
+    # present but the manifest absent/stale -- load_vectors's
+    # len(ids) != mat.shape[0] / schema check already treats that as a clean
+    # miss (re-embed), never a manifest pointing at a missing/corrupt .npy.
+    import numpy as np
     d = _vec_dir(cache_dir, repo_key)
     os.makedirs(d, exist_ok=True)
-    meta = {"schema_version": SCHEMA_VERSION, "git_ref": git_ref, "model_id": model_id, "ids": list(ids)}
-    tmp_j = os.path.join(d, "chunks.json.tmp")
-    with open(tmp_j, "w", encoding="utf-8") as f:
-        json.dump(meta, f)
-    os.replace(tmp_j, os.path.join(d, "chunks.json"))
     tmp_n = os.path.join(d, "embeddings.npy.tmp")
     np.save(tmp_n, np.asarray(matrix, dtype=np.float32))
     # np.save appends ".npy" to a filename that doesn't already end with it --
@@ -75,11 +81,17 @@ def save_vectors(cache_dir, repo_key, git_ref, model_id, ids, matrix) -> None:
     # "embeddings.npy" with no "embeddings.npy.npy" artifact left behind.
     written = tmp_n if tmp_n.endswith(".npy") else tmp_n + ".npy"
     os.replace(written, os.path.join(d, "embeddings.npy"))
+    meta = {"schema_version": SCHEMA_VERSION, "git_ref": git_ref, "model_id": model_id, "ids": list(ids)}
+    tmp_j = os.path.join(d, "chunks.json.tmp")
+    with open(tmp_j, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    os.replace(tmp_j, os.path.join(d, "chunks.json"))
 
 
 def load_vectors(cache_dir, repo_key, git_ref, model_id):
     # Same never-raise contract as load(): any mismatch/corruption/missing
     # file degrades to a cache miss so callers fall back to a fresh embed.
+    import numpy as np
     try:
         d = _vec_dir(cache_dir, repo_key)
         with open(os.path.join(d, "chunks.json"), "r", encoding="utf-8") as f:

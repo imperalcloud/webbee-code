@@ -61,3 +61,25 @@ def test_search_code_falls_back_without_vectors(tmp_path):
     svc.vectors = None; svc.vectors_ready = False       # force the no-vector path
     r = query.search_code(svc, "beta")
     assert r["ok"] and any(i["title"] == "beta" for i in r["data"]["items"])   # lexical still answers
+
+
+def test_chunk_item_resolves_real_symbol_kind(tmp_path):
+    # F4: a vector hit whose chunk sits inside a real symbol must report
+    # that symbol's kind, not a hardcoded "chunk" (which would make it
+    # invisible to any kind= filter).
+    pytest.importorskip("model2vec")
+    svc = _svc(tmp_path)
+    cid = next(i for i in svc.vectors.ids() if i.startswith("b.py#"))
+    item = query._chunk_item(svc, cid, 0.9)
+    assert item["kind"] == "function" and item["title"] == "beta"
+
+
+def test_search_code_kind_filter_does_not_nullify_vector_arm(tmp_path, monkeypatch):
+    # F4 integration: isolate the vector arm (lexical contributes nothing),
+    # then filter by kind="function" -- pre-fix, _chunk_item hardcoded
+    # kind="chunk" so this filter would silently drop every vector hit.
+    pytest.importorskip("model2vec")
+    svc = _svc(tmp_path)
+    monkeypatch.setattr(query, "_lexical_search", lambda *a, **k: [])
+    r = query.search_code(svc, "beta", kind="function")
+    assert r["ok"] and any(i["title"] == "beta" for i in r["data"]["items"])

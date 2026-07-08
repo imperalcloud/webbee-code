@@ -1,4 +1,5 @@
 import json
+import os
 
 import numpy as np
 import pytest
@@ -76,6 +77,27 @@ def test_schema_version_mismatch_is_a_clean_miss(tmp_path):
     data["schema_version"] = 999
     p.write_text(json.dumps(data))
     assert store.load(cache, "rk6", "abc") is None
+
+
+def test_save_vectors_writes_data_before_manifest(tmp_path, monkeypatch):
+    # F3: a crash between the two atomic os.replace() calls must never leave
+    # a manifest (chunks.json) pointing at an absent/stale embeddings.npy.
+    # Writing the data FIRST and the manifest LAST makes chunks.json the
+    # commit point -- a half-write always looks like "data present, manifest
+    # absent/old", which load_vectors already treats as a clean miss.
+    calls = []
+    real_replace = os.replace
+
+    def _tracking_replace(src, dst):
+        calls.append(os.path.basename(dst))
+        return real_replace(src, dst)
+    monkeypatch.setattr(store.os, "replace", _tracking_replace)
+
+    c = str(tmp_path / "c")
+    ids = ["a.py#1-2"]; mat = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)
+    store.save_vectors(c, "rk", "gitA", "model2vec:potion", ids, mat)
+
+    assert calls == ["embeddings.npy", "chunks.json"]
 
 
 def test_vectors_roundtrip_gated(tmp_path):

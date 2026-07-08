@@ -58,10 +58,18 @@ class IntelService:
         # Lazy + cached: the model load is expensive (and may be unavailable
         # entirely), so it happens at most once per service instance. A
         # None result is cached too -- unavailable stays unavailable rather
-        # than retrying the load on every call.
-        if self._backend == "__unset__":
+        # than retrying the load on every call. The import itself is guarded
+        # too: an intel-only install (`webbee[intel]`, no embed extra) has no
+        # numpy/model2vec, so `from webbee.intel import embed` (its
+        # module-level `import numpy`) can raise here -- that must degrade to
+        # "no backend", not crash build() and disable intel entirely.
+        if self._backend != "__unset__":
+            return self._backend
+        try:
             from webbee.intel import embed
             self._backend = embed.load_backend()
+        except Exception:
+            self._backend = None
         return self._backend
 
     @property
@@ -92,12 +100,16 @@ class IntelService:
         # no backend means self.vectors stays None and search_code (F5)
         # falls back to lexical+graph instead of raising.
         from webbee.intel import chunker, store as _store
-        from webbee.intel.vectors import VectorStore
         b = self._get_backend()
         if b is None:
             self.vectors = None
             self.vectors_ready = False
             return
+        # vectors.py has its own module-level numpy -- import it only now
+        # that a backend is confirmed present, not unconditionally at the
+        # top of this function (an intel-only install with no backend must
+        # never need numpy at all).
+        from webbee.intel.vectors import VectorStore
         cached = _store.load_vectors(self.cache_dir, self.repo_key, self.git_ref, b.model_id)
         if cached is not None:
             ids, mat = cached
@@ -146,14 +158,18 @@ class IntelService:
         embed_ready = self.vectors is not None and self._get_backend() is not None
         fresh_ids: list = []
         fresh_vecs = None
+        current_ids: dict[str, set] = {}   # edited rel -> its FULL current chunk-id set
         if embed_ready:
             from webbee.intel import chunker
             b = self._get_backend()
             fresh_chunks = []
             for rel, fi in updates.items():
                 if fi is None:
-                    continue  # deleted -- handled via vs.remove() below
-                for c in chunker.chunk_file(self.root, fi):
+                    continue  # deleted -- current_ids[rel] stays absent, so ALL its
+                              # ids are caught as stale below
+                chunks = chunker.chunk_file(self.root, fi)
+                current_ids[rel] = {c.id for c in chunks}
+                for c in chunks:
                     if self._chunk_hashes.get(c.id) != c.content_hash:
                         fresh_chunks.append(c)
             if fresh_chunks:
@@ -170,10 +186,22 @@ class IntelService:
                     self.index.files[rel] = fi
             self.graph = CodeGraph(self.index)
             if embed_ready:
-                deleted = [rel for rel, fi in updates.items() if fi is None]
-                if deleted:
-                    self.vectors.remove([i for i in self.vectors.ids()
-                                          if any(i.startswith(f"{rel}#") for rel in deleted)])
+                # F1: a touched file's vanished chunk ids -- span-shifted by
+                # the edit, or all of them when the file was deleted -- are
+                # orphans and must be dropped before the fresh ones go in.
+                # Guarding on `not in current_ids` (never a naive "remove
+                # all `{rel}#` then add fresh") keeps the hash-skip
+                # optimization correct: an edit to a LATE symbol must not
+                # drop an EARLIER unchanged (and therefore skipped) chunk
+                # that's still current.
+                stale = [i for i in self.vectors.ids()
+                         if "#" in i
+                         and i.split("#", 1)[0] in updates                          # a touched file
+                         and i not in current_ids.get(i.split("#", 1)[0], set())]   # no longer a current chunk
+                if stale:
+                    self.vectors.remove(stale)
+                    for i in stale:
+                        self._chunk_hashes.pop(i, None)
                 if fresh_ids:
                     self.vectors.add(fresh_ids, fresh_vecs)
 

@@ -111,3 +111,46 @@ def test_apply_changes_incremental_embed(tmp_path):
     svc.apply_changes(["b.py"])
     ids = svc.vectors.ids()
     assert any(i.startswith("b.py#") for i in ids)
+
+
+def test_apply_changes_removes_orphan_vector_on_span_shifting_edit(tmp_path):
+    # F1: editing a file shifts later symbols' line-spans -> new chunk ids.
+    # The OLD id (whose span no longer exists) must be removed, not left
+    # behind to pollute kNN search forever.
+    pytest.importorskip("model2vec")
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk_embed3", cache_dir=str(tmp_path / "c"))
+    svc.build()
+    old_ids = set(svc.vectors.ids())
+    assert old_ids  # sanity: something was embedded
+
+    # Prepend a line -- shifts alpha's span down by one line, changing its
+    # chunk id even though its content (and hash) is unrelated to the diff.
+    (tmp_path / "a.py").write_text("import os\ndef alpha():\n    return 1\n")
+    svc.apply_changes({"a.py"})
+
+    new_ids = set(svc.vectors.ids())
+    assert not (old_ids & new_ids), f"orphan ids survived: {old_ids & new_ids}"
+    assert any(i.startswith("a.py#") for i in new_ids)  # fresh span id present
+
+
+def test_apply_changes_does_not_drop_unrelated_unchanged_chunks(tmp_path):
+    # Guards against the naive "remove all `{rel}#` then add fresh" fix:
+    # since fresh adds are hash-skipped, editing a LATE symbol must not
+    # drop an EARLIER unchanged chunk that's still current.
+    pytest.importorskip("model2vec")
+    src = "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n"
+    (tmp_path / "a.py").write_text(src)
+    svc = IntelService(str(tmp_path), "rk_embed4", cache_dir=str(tmp_path / "c"))
+    svc.build()
+    ids_before = set(svc.vectors.ids())
+    alpha_id = next(i for i in ids_before if i.startswith("a.py#"))
+
+    # Append a new symbol after beta -- alpha's span/id is untouched, so its
+    # chunk should survive (and not merely by re-adding it: it must never
+    # have been removed in the first place).
+    (tmp_path / "a.py").write_text(src + "\n\ndef gamma():\n    return 3\n")
+    svc.apply_changes({"a.py"})
+
+    ids_after = set(svc.vectors.ids())
+    assert alpha_id in ids_after

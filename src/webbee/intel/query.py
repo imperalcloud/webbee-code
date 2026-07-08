@@ -70,8 +70,10 @@ def _lexical_search(svc, q, kind, path_glob, items_by_id: dict) -> list[str]:
 
 def _chunk_item(svc, cid: str, score: float) -> dict | None:
     """Map an embed-chunk id ('<path>#<start>-<end>') back to a search item.
-    Title = the enclosing symbol name when the graph has one covering the
-    chunk's line range, else the bare '<path>:<start>' fallback."""
+    Title/kind = the enclosing symbol's when the graph has one covering the
+    chunk's line range, else the bare '<path>:<start>' / 'chunk' fallback --
+    a hardcoded kind="chunk" would make every vector hit invisible to a
+    kind= filter (F4), since none of them are ever literally "chunk"."""
     if "#" not in cid or "-" not in cid.rpartition("#")[2]:
         return None
     path, _, rng = cid.rpartition("#")
@@ -80,15 +82,15 @@ def _chunk_item(svc, cid: str, score: float) -> dict | None:
         start, end = int(start_s), int(end_s)
     except ValueError:
         return None
-    title = f"{path}:{start}"
+    title, kind = f"{path}:{start}", "chunk"
     idx = getattr(svc.graph, "index", None) if svc.graph is not None else None
     fi = idx.files.get(path) if idx is not None else None
     if fi is not None:
         for s in fi.symbols:
             if s.start_line <= start and s.end_line >= end:
-                title = s.name
+                title, kind = s.name, s.kind
                 break
-    return {"id": cid, "title": title, "kind": "chunk",
+    return {"id": cid, "title": title, "kind": kind,
             "subtitle": f"{path}:{start}", "signature": "",
             "path": path, "start_line": start, "end_line": end, "score": score}
 
