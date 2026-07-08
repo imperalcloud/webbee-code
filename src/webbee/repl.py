@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import subprocess
 import sys
@@ -16,6 +17,27 @@ def _git_branch(workspace: str) -> str:
         return p.stdout.strip() if p.returncode == 0 else "-"
     except (OSError, subprocess.SubprocessError):
         return "-"
+
+
+def _open_dock_stderr_log():
+    """A file to swallow stderr for the full-screen dock's lifetime. The dock is
+    a prompt_toolkit full-screen Application that OWNS the terminal (it diffs the
+    screen); ANY stray write to stderr while it runs — a dependency's tqdm
+    download bar, a library warning, a background watcher-task traceback —
+    desyncs that diff and shows up as overlapping/duplicated text. Routing
+    stderr to ~/.cache/webbee/tui-stderr.log keeps the dock pixel-clean while
+    still preserving errors for debugging. Falls back to os.devnull if the cache
+    dir is unwritable; NEVER raises."""
+    try:
+        d = os.path.expanduser("~/.cache/webbee")
+        os.makedirs(d, exist_ok=True)
+        return open(os.path.join(d, "tui-stderr.log"), "a", buffering=1, encoding="utf-8")
+    except Exception:
+        try:
+            return open(os.devnull, "w")
+        except Exception:
+            import io
+            return io.StringIO()
 
 
 async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
@@ -243,36 +265,47 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
     if use_dock:
         ok = False
         pane = None
+        # Route stderr to a log file for the dock's ENTIRE lifetime (boot's
+        # model-download included) so no stray write can corrupt the full-screen
+        # renderer. Restored the instant the dock exits (the transcript dump
+        # below writes to the REAL stdout).
+        _errlog = _open_dock_stderr_log()
         try:
-            import shutil
+            with contextlib.redirect_stderr(_errlog):
+                import shutil
 
-            from webbee import tui
-            from webbee.render import RichSink
-            width = shutil.get_terminal_size((100, 24)).columns
-            pane = tui.OutputPane(width=width)
-            await _boot(RichSink(console=pane.console, on_output=pane.notify))
+                from webbee import tui
+                from webbee.render import RichSink
+                width = shutil.get_terminal_size((100, 24)).columns
+                pane = tui.OutputPane(width=width)
+                await _boot(RichSink(console=pane.console, on_output=pane.notify))
 
-            async def _on_line(text: str) -> None:
-                if await _handle(text) == "exit":
-                    from prompt_toolkit.application import get_app
-                    get_app().exit()
+                async def _on_line(text: str) -> None:
+                    if await _handle(text) == "exit":
+                        from prompt_toolkit.application import get_app
+                        get_app().exit()
 
-            try:
-                ok = await tui.run_session(
-                    pane=pane, on_line=_on_line, mode_getter=lambda: state["mode"],
-                    on_cycle=_cycle, status=_sink.status, is_busy=_sink.is_busy,
-                    consent_pending=_sink.consent_pending, resolve_consent=_sink.resolve_consent,
-                    steps_nav={
-                        "count": lambda: len(getattr(agent, "steps", [])),
-                        "expand": lambda i: _handle(f"/steps {i + 1}"),
-                    },
-                    stop_turn=lambda: agent.stop(),
-                )
-            finally:
-                if watcher_task is not None:
-                    watcher_task.cancel()
+                try:
+                    ok = await tui.run_session(
+                        pane=pane, on_line=_on_line, mode_getter=lambda: state["mode"],
+                        on_cycle=_cycle, status=_sink.status, is_busy=_sink.is_busy,
+                        consent_pending=_sink.consent_pending, resolve_consent=_sink.resolve_consent,
+                        steps_nav={
+                            "count": lambda: len(getattr(agent, "steps", [])),
+                            "expand": lambda i: _handle(f"/steps {i + 1}"),
+                        },
+                        stop_turn=lambda: agent.stop(),
+                    )
+                finally:
+                    if watcher_task is not None:
+                        watcher_task.cancel()
         except Exception:
             ok = False
+        finally:
+            try:
+                _errlog.close()
+            except Exception:
+                pass
         if ok:
             # the alt screen is gone — reprint the session transcript to real
             # stdout so the conversation stays in the terminal scrollback.
