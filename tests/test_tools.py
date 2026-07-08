@@ -73,3 +73,10 @@ def test_bash_timeout_capped_at_3600(tmp_path, monkeypatch):
     assert captured["timeout"] == 3600
     ex.run("bash", {"command": "true"})
     assert captured["timeout"] == 120
+
+
+def test_cpc_shim_degrades_without_indexer(tmp_path):
+    from webbee.tools import LocalToolExecutor
+    ex = LocalToolExecutor(str(tmp_path))            # indexer=None
+    out = ex.run("graph_slice", {"symbols": ["x"]})
+    assert out["ok"] is False and "intel not available" in out["content"]

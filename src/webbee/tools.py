@@ -116,3 +116,35 @@ class LocalToolExecutor:
         base = os.path.join(self.root, a["pattern"])
         rels = [os.path.relpath(p, self.root) for p in _g.glob(base, recursive=True)]
         return {"ok": True, "content": "\n".join(sorted(rels)) or "(no matches)"}
+
+    def _t_repo_profile(self, a: dict) -> dict:
+        return self._cpc("repo_profile", a)
+
+    def _t_graph_slice(self, a: dict) -> dict:
+        return self._cpc("graph_slice", a)
+
+    def _t_search_code(self, a: dict) -> dict:
+        return self._cpc("search_code", a)
+
+    def _t_impact_of_change(self, a: dict) -> dict:
+        return self._cpc("impact_of_change", a)
+
+    def _t_orient(self, a: dict) -> dict:
+        return self._cpc("orient", a)
+
+    def _cpc(self, verb: str, a: dict) -> dict:
+        if self.indexer is None:
+            return {"ok": False, "content": "intel not available; install webbee[intel]"}
+        from webbee.intel import query
+        if verb == "repo_profile":
+            return query.repo_profile(self.indexer)
+        if verb == "graph_slice":
+            return query.graph_slice(self.indexer, a.get("symbols") or [], int(a.get("depth", 1) or 1))
+        if verb == "search_code":
+            return query.search_code(self.indexer, a.get("query", ""), int(a.get("k", 20) or 20),
+                                      a.get("kind"), a.get("path_glob"))
+        if verb == "impact_of_change":
+            return query.impact_of_change(self.indexer, a.get("symbols") or [])
+        if verb == "orient":
+            return query.orient(self.indexer, a.get("query", ""))
+        return {"ok": False, "content": f"unknown cpc verb: {verb}"}
