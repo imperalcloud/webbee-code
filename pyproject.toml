@@ -24,6 +24,9 @@ classifiers = [
 
 [project.optional-dependencies]
 intel = ["tree-sitter>=0.23", "tree-sitter-python>=0.23", "tree-sitter-typescript>=0.23", "tree-sitter-javascript>=0.23", "watchfiles>=0.24"]
+intel-embed = ["model2vec>=0.8.2", "numpy>=2"]
+intel-embed-onnx = ["fastembed>=0.8.0", "numpy>=2"]
+intel-embed-faiss = ["faiss-cpu>=1.14.3", "numpy>=2"]
 
 [project.urls]
 Homepage = "https://imperal.io"
