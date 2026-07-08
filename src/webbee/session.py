@@ -3,11 +3,13 @@ import os
 import subprocess
 
 from webbee.frames import (
+    _MARATHON_FACT_TYPES,
     _first_time,
     _progress_text,
     handle_action_frame,
     handle_step_finished,
     handle_step_started,
+    marathon_note,
 )
 
 
@@ -69,6 +71,47 @@ def build_coding_context(workspace_root: str, intel=None) -> dict:
     return d
 
 
+def detect_verify_cmd(repo_root: str) -> str:
+    """Best-effort project test command, CLIENT-detected from the repo layout.
+
+    SECURITY-load-bearing: in a marathon the kernel runs ONLY this command as
+    proof-of-done — the cloud brain can never author a shell command. So this
+    is deliberately small + honest: a fixed command per recognised ecosystem,
+    NO guessing beyond these. An empty string means "no known runner" → the
+    kernel falls back to an LLM-judged done-check. Checked in a stable order."""
+    import json as _json
+
+    root = repo_root or "."
+
+    def _has(name: str) -> bool:
+        return os.path.isfile(os.path.join(root, name))
+
+    if _has("pyproject.toml") or _has("setup.cfg") or _has("tox.ini"):
+        return "pytest -q"
+    if _has("package.json"):
+        try:
+            with open(os.path.join(root, "package.json"), encoding="utf-8") as f:
+                pkg = _json.load(f)
+            scripts = pkg.get("scripts") if isinstance(pkg, dict) else None
+            if isinstance(scripts, dict) and scripts.get("test"):
+                return "npm test"
+        except (OSError, ValueError):
+            pass
+    if _has("Cargo.toml"):
+        return "cargo test"
+    if _has("go.mod"):
+        return "go test ./..."
+    if _has("Makefile"):
+        try:
+            import re as _re
+            with open(os.path.join(root, "Makefile"), encoding="utf-8") as f:
+                if _re.search(r"(?m)^test:", f.read()):
+                    return "make test"
+        except OSError:
+            pass
+    return ""
+
+
 def _summary(result: dict) -> str:
     """One-line summary of a tool result for the UI."""
     content = str(result.get("content", ""))
@@ -100,7 +143,7 @@ class AgentSession:
         token = await self.token_provider()
         return {"Authorization": f"Bearer {token}"}
 
-    async def run(self, task: str, sink) -> str:
+    async def run(self, task: str, sink, *, marathon: bool = False, goal: str = "") -> str:
         import httpx
 
         from webbee.tools import LocalToolExecutor
@@ -110,14 +153,25 @@ class AgentSession:
         # subprocess.run(git status, timeout=10) + os.walk; inline on the dock's
         # asyncio loop it froze the whole UI at every turn start.
         coding_context = await asyncio.to_thread(build_coding_context, self.workspace_root, self._intel)
+        if marathon:
+            # verify_cmd is CLIENT-detected here and carried in coding_context —
+            # the trusted proof-of-done the kernel runs (never brain-authored).
+            root = coding_context.get("repo_root") or coding_context.get("cwd") or self.workspace_root
+            verify_cmd = await asyncio.to_thread(detect_verify_cmd, root)
+            coding_context = {**coding_context, "verify_cmd": verify_cmd}
         imperal_id = await ImperalClient(self.cfg, self.token_provider).whoami()
         executor = LocalToolExecutor(self.workspace_root, indexer=self._intel)
+
+        body = {"user_id": imperal_id, "task": task, "coding_context": coding_context}
+        if marathon:
+            body["marathon"] = True
+            body["goal"] = goal
 
         headers = await self._headers()
         async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:
             resp = await client.post(
                 "/v1/agent/sessions",
-                json={"user_id": imperal_id, "task": task, "coding_context": coding_context},
+                json=body,
                 headers=headers,
             )
             resp.raise_for_status()
@@ -204,6 +258,15 @@ class AgentSession:
                         int(frame.get("tokens", 0) or 0),
                         int(frame.get("credits", 0) or 0),
                     )
+
+                elif ftype in _MARATHON_FACT_TYPES:  # U4 — marathon plan/milestone/pause
+                    # Facts-only; render ONE human-readable line. Guarded: a
+                    # minimal sink (no `note`) simply drops the fact rather than
+                    # crashing the turn (the stream reader already tolerates
+                    # unknown frame types by ignoring them).
+                    _note = getattr(sink, "note", None)
+                    if _note is not None:
+                        _note(marathon_note(frame))
 
                 elif ftype == "final":
                     return frame.get("text", "")

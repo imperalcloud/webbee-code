@@ -18,6 +18,46 @@ def _git_branch(workspace: str) -> str:
         return "-"
 
 
+async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
+                       agent_factory=None) -> str:
+    """Launch ONE autonomous marathon toward `goal` and stream it to stdout.
+
+    A marathon reuses the whole coding path — same AgentSession, same reconnecting
+    stream reader — it just flags the request `marathon=True` (routing it to the
+    kernel MarathonWorkflow) and lets AgentSession attach the CLIENT-detected
+    verify_cmd. Non-dock (streams to a plain sink) so a headless / CI launch works;
+    the coding REPL (run_repl) is untouched."""
+    if auth is None:
+        from imperal_mcp import auth as _auth
+        auth = _auth
+    if sink is None:
+        from webbee.render import RichSink
+        sink = RichSink()
+
+    workspace = os.getcwd()
+
+    async def token_provider() -> str:
+        return await auth.ensure_access_token(cfg)
+
+    if agent_factory is None:
+        agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m)  # noqa: E731
+    agent = agent_factory(cfg, token_provider, workspace, mode)
+
+    sink.note(f"🏁 Marathon launched: {goal}")
+    sink.begin_turn()
+    try:
+        text = await agent.run(goal, sink, marathon=True, goal=goal)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        await agent.stop()
+        sink.note("Interrupted.")
+        return ""
+    except Exception as e:  # network/auth/etc — never crash
+        sink.note(f"Error: {type(e).__name__}: {e}")
+        return ""
+    sink.end_turn(text)
+    return text
+
+
 def _default_intel_factory(cfg, workspace: str):
     """Lazy/guarded -- a base install (no tree-sitter/watchfiles extra) must
     never fail to import here; `_boot` wraps the whole intel boot in

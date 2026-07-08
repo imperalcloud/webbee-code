@@ -121,3 +121,37 @@ def handle_action_frame(frame: dict, sink, started: set, finished: set, steps: l
     ok = bool(frame.get("ok"))
     sink.tool_result(lbl, ok, summ)
     steps.append({"step_id": sid, "label": lbl, "ok": ok})
+
+
+# --- U4 marathon FACT frames -------------------------------------------------
+# A marathon (long-horizon autonomous run) streams the SAME frame vocabulary as
+# a coding turn PLUS three progress FACTS. The kernel emits facts; this renderer
+# composes ONE human-readable line per fact (I-FRAMES-FACTS-ONLY). Defensive:
+# unknown / missing fields degrade to a bare label, never crash.
+
+_MARATHON_FACT_TYPES = ("marathon_plan", "milestone", "marathon_paused")
+
+
+def marathon_note(frame: dict) -> str:
+    """One-line note for a marathon FACT frame (marathon_plan / milestone /
+    marathon_paused). Reads common fields with fallbacks so a shape change on
+    the kernel side degrades gracefully instead of raising."""
+    ftype = frame.get("type", "")
+    if ftype == "marathon_plan":
+        n = frame.get("milestone_count")
+        if n is None and isinstance(frame.get("milestones"), list):
+            n = len(frame["milestones"])
+        goal = str(frame.get("goal") or frame.get("summary") or "").strip()
+        head = f"Marathon plan ({n} milestones)" if n is not None else "Marathon plan"
+        return f"🏁 {head}: {goal}".rstrip(": ").rstrip() if goal else f"🏁 {head}"
+    if ftype == "milestone":
+        label = str(frame.get("title") or frame.get("name") or frame.get("text") or "").strip()
+        idx = frame.get("index")
+        head = f"Milestone {idx}" if idx is not None else "Milestone"
+        status = str(frame.get("status") or ("done" if frame.get("done") else "")).strip()
+        tail = f" [{status}]" if status else ""
+        return f"• {head}: {label}{tail}".rstrip() if label else f"• {head}{tail}"
+    if ftype == "marathon_paused":
+        reason = str(frame.get("reason") or frame.get("summary") or "").strip()
+        return f"⏸ Marathon paused: {reason}" if reason else "⏸ Marathon paused"
+    return str(frame.get("type", ""))
