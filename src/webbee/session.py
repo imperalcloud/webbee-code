@@ -33,9 +33,12 @@ async def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
     return {"req_id": req_id, "result": {"consent_reply": raw}}
 
 
-def build_coding_context(workspace_root: str) -> dict:
+def build_coding_context(workspace_root: str, intel=None) -> dict:
     """Snapshot handed to the cloud brain: cwd (realpath), `git status -sb`
-    (empty for non-git/any error), and a bounded newline-joined file tree."""
+    (empty for non-git/any error), a bounded newline-joined file tree, and —
+    when a ready intel service is injected — the precomputed repo_profile.
+    The profile is READ from the already-built index (cheap); indexing never
+    happens inline here."""
     cwd = os.path.realpath(workspace_root)
     try:
         proc = subprocess.run(
@@ -56,8 +59,14 @@ def build_coding_context(workspace_root: str) -> dict:
             break
     from webbee.repo import compute_repo_key, find_repo_root
     root = find_repo_root(cwd)
-    return {"cwd": cwd, "git": git, "tree": "\n".join(paths),
-            "repo_key": compute_repo_key(root), "repo_root": root}
+    d = {"cwd": cwd, "git": git, "tree": "\n".join(paths),
+         "repo_key": compute_repo_key(root), "repo_root": root}
+    if intel is not None and getattr(intel, "ready", False):
+        try:
+            d["repo_profile"] = intel.repo_profile()
+        except Exception:
+            pass
+    return d
 
 
 def _summary(result: dict) -> str:
@@ -100,7 +109,7 @@ class AgentSession:
         # Offload to a worker thread — build_coding_context runs sync
         # subprocess.run(git status, timeout=10) + os.walk; inline on the dock's
         # asyncio loop it froze the whole UI at every turn start.
-        coding_context = await asyncio.to_thread(build_coding_context, self.workspace_root)
+        coding_context = await asyncio.to_thread(build_coding_context, self.workspace_root, self._intel)
         imperal_id = await ImperalClient(self.cfg, self.token_provider).whoami()
         executor = LocalToolExecutor(self.workspace_root, indexer=self._intel)
 

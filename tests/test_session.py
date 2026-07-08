@@ -53,6 +53,23 @@ def test_build_coding_context_shape(tmp_path):
     assert "a.txt" in ctx["tree"]
 
 
+def test_coding_context_includes_repo_profile_when_intel_ready(tmp_path):
+    import webbee.session as S
+
+    class _Svc:
+        ready = True
+        def repo_profile(self): return {"file_count": 3, "languages": {"python": 3}}
+
+    ctx = S.build_coding_context(str(tmp_path), intel=_Svc())
+    assert ctx["repo_profile"]["file_count"] == 3
+
+
+def test_coding_context_no_profile_without_intel(tmp_path):
+    import webbee.session as S
+    ctx = S.build_coding_context(str(tmp_path), intel=None)
+    assert "repo_profile" not in ctx
+
+
 def test_run_offloads_blocking_context_build_off_event_loop(monkeypatch):
     # Regression (freeze bug): build_coding_context does sync subprocess.run(git
     # status, timeout=10) + os.walk. Called inline on the dock's asyncio loop it
@@ -68,7 +85,7 @@ def test_run_offloads_blocking_context_build_off_event_loop(monkeypatch):
     class _Sentinel(Exception):
         pass
 
-    def _spy(root):
+    def _spy(root, intel=None):
         captured["thread"] = threading.current_thread()
         raise _Sentinel  # short-circuit run() before any network I/O
 
@@ -94,7 +111,7 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
     import webbee.stream as ST
     import webbee.tools as T
 
-    monkeypatch.setattr(S, "build_coding_context", lambda root: {
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
         "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
     })
 
