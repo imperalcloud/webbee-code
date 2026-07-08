@@ -16,8 +16,16 @@ from webbee.frames import (
 def handle_tool_request(frame: dict, executor) -> dict:
     """Run a (kernel-pre-approved) local tool. The kernel gates write/bash
     consent via confirm_request BEFORE dispatching, so a tool_request here is
-    always cleared to run."""
-    return {"req_id": frame["req_id"], "result": executor.run(frame["tool"], frame.get("args", {}))}
+    always cleared to run. NEVER raises: a tool that errored (or a bug in the
+    executor) must STILL return a result so the caller posts it back and the
+    kernel's dispatch unblocks — an unposted result hangs the turn and freezes
+    the whole dock."""
+    rid = frame.get("req_id")
+    try:
+        result = executor.run(frame.get("tool", ""), frame.get("args", {}))
+    except Exception as e:
+        result = {"ok": False, "content": f"local tool crashed: {type(e).__name__}: {e}"}
+    return {"req_id": rid, "result": result}
 
 
 async def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
@@ -31,7 +39,12 @@ async def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
         return {"req_id": req_id, "result": {"approved": True}}
     if mode == "plan":
         return {"req_id": req_id, "result": {"approved": False, "reason": "plan_mode"}}
-    raw = await ask_consent(frame.get("app_id", ""), frame.get("tool", ""), frame.get("args", {}))
+    try:
+        raw = await ask_consent(frame.get("app_id", ""), frame.get("tool", ""), frame.get("args", {}))
+    except Exception:
+        # Consent UI failed -> decline (safe-by-default). NEVER leave the kernel
+        # hanging on an unanswered confirm — an unposted result froze the dock.
+        return {"req_id": req_id, "result": {"approved": False, "reason": "consent_error"}}
     return {"req_id": req_id, "result": {"consent_reply": raw}}
 
 
@@ -215,15 +228,24 @@ class AgentSession:
                     if rid in seen:
                         out = seen[rid]
                     else:
+                        # UI rendering is guarded so it can never block the
+                        # result POST below (an unposted result hangs the kernel
+                        # dispatch and freezes the dock).
                         if _first_time(sid, started):
-                            sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
+                            try:
+                                sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
+                            except Exception:
+                                pass
                         out = await asyncio.to_thread(handle_tool_request, frame, executor)
                         res = out["result"]
                         if _first_time(sid, finished):
-                            sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
-                            self.steps.append({"step_id": sid,
-                                               "label": frame.get("tool", ""),
-                                               "ok": bool(res.get("ok"))})
+                            try:
+                                sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
+                                self.steps.append({"step_id": sid,
+                                                   "label": frame.get("tool", ""),
+                                                   "ok": bool(res.get("ok"))})
+                            except Exception:
+                                pass
                         seen[rid] = out
                     await self._post_result(client, session_id, out)
 
@@ -274,8 +296,14 @@ class AgentSession:
         return ""
 
     async def _post_result(self, client, session_id: str, out: dict) -> None:
-        headers = await self._headers()
-        await client.post(f"/v1/agent/sessions/{session_id}/result", json=out, headers=headers)
+        # Best-effort: a result POST must NEVER raise into the stream loop — that
+        # would abort the turn and leave the kernel's dispatch hanging (frozen
+        # dock). On a transient failure the kernel's tool-wait timeout recovers.
+        try:
+            headers = await self._headers()
+            await client.post(f"/v1/agent/sessions/{session_id}/result", json=out, headers=headers)
+        except Exception:
+            pass
 
     async def stop(self) -> None:
         """P5g: server-side stop for Esc/Ctrl-C. Posts a cancel for the

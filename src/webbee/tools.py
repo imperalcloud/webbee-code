@@ -33,8 +33,13 @@ class LocalToolExecutor:
             if fn is None:
                 return {"ok": False, "content": f"unknown tool: {tool}"}
             return fn(args)
-        except OutsideWorkspaceError:
-            raise
+        except OutsideWorkspaceError as e:
+            # Return it as a normal tool result (NEVER re-raise): a re-raise
+            # escaped run(), the reverse-channel handler never posted a result,
+            # and the kernel hung waiting -> the whole turn/dock froze. The brain
+            # sees the message and adapts (e.g. stays inside the workspace).
+            return {"ok": False, "content":
+                    f"path is outside the workspace and cannot be accessed: {e}"}
         except Exception as e:  # surface tool errors to the brain, don't crash
             return {"ok": False, "content": f"{type(e).__name__}: {e}"}
 

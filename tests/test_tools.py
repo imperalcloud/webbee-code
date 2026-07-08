@@ -29,9 +29,14 @@ def test_grep(tmp_path):
     assert r["ok"] and "a.py" in r["content"]
 
 def test_outside_workspace_denied(tmp_path):
+    # run() must DENY an out-of-workspace path but return a graceful result —
+    # NOT raise. A re-raise escaped run(), the reverse-channel handler never
+    # posted a result, and the kernel hung waiting (frozen dock). See
+    # test_freeze_fix.py.
     ex = _ex(tmp_path)
-    with pytest.raises(OutsideWorkspaceError):
-        ex.run("read_file", {"path": "../../etc/passwd"})
+    r = ex.run("read_file", {"path": "../../etc/passwd"})
+    assert r["ok"] is False
+    assert "outside the workspace" in r["content"].lower()
 
 def test_unknown_tool(tmp_path):
     r = _ex(tmp_path).run("nope", {})
