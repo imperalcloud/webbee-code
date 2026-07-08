@@ -48,3 +48,16 @@ def test_graph_slice_and_impact_of_change_coerce_bare_string_symbols(tmp_path):
     assert r["ok"] and any(i["title"] == "beta" for i in r["data"]["items"])
     r2 = query.impact_of_change(svc, "beta")
     assert r2["ok"] and any(i["id"].startswith("a.py") for i in r2["data"]["items"])
+
+
+def test_rrf_fusion_pure():
+    from webbee.intel.query import _fuse_rrf
+    fused = _fuse_rrf([["a", "b", "c"], ["b", "d"]], k=60)  # b appears in both -> top
+    assert fused[0] == "b"
+
+
+def test_search_code_falls_back_without_vectors(tmp_path):
+    svc = _svc(tmp_path)
+    svc.vectors = None; svc.vectors_ready = False       # force the no-vector path
+    r = query.search_code(svc, "beta")
+    assert r["ok"] and any(i["title"] == "beta" for i in r["data"]["items"])   # lexical still answers
