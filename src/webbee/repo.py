@@ -1,7 +1,9 @@
 """Repo identity (CORTEX U0, spec §2.2): repo_key = 12-hex sha256 of the git
 remote URL (origin) or, for remoteless/non-git dirs, the repo-root realpath.
 The root is found by walking UP to the nearest .git so a subdirectory launch
-maps to the SAME key (fragmented memory otherwise)."""
+maps to the SAME key (fragmented memory otherwise). `.git` is a FILE (not a
+dir) in a linked worktree or submodule -- os.path.exists (not isdir) so
+those resolve to the correct root too."""
 import hashlib
 import os
 import subprocess
@@ -10,7 +12,7 @@ import subprocess
 def find_repo_root(start: str) -> str:
     cur = os.path.realpath(start)
     while True:
-        if os.path.isdir(os.path.join(cur, ".git")):
+        if os.path.exists(os.path.join(cur, ".git")):
             return cur
         parent = os.path.dirname(cur)
         if parent == cur:

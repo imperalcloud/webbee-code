@@ -84,6 +84,7 @@ class AgentSession:
         self.mode = mode
         self.session_id: str = ""
         self.steps: list = []
+        self._task_id: str = ""
 
     async def _headers(self) -> dict:
         token = await self.token_provider()
@@ -114,6 +115,7 @@ class AgentSession:
             session_id = _sess["session_id"]
             start_id = _sess.get("last_id", "0-0")
             self.session_id = session_id
+            self._task_id = _sess.get("task_id", "")
             self.steps = []
 
             seen: dict = {}  # req_id -> already-posted result (at-least-once dedup)
@@ -134,6 +136,14 @@ class AgentSession:
                 client, session_id, self._headers, start_id=start_id,
             ):
                 ftype = frame.get("type")
+
+                _ftid = frame.get("task_id", "")
+                # Ignore actionable frames from a DIFFERENT turn on the shared
+                # persistent stream (task_id absent on legacy kernels -> not filtered).
+                if _ftid and self._task_id and _ftid != self._task_id and ftype in (
+                        "tool_request", "confirm_request", "final",
+                        "panel_release_required"):
+                    continue
 
                 if ftype == "tool_request":
                     rid = frame.get("req_id")

@@ -82,6 +82,93 @@ def test_run_offloads_blocking_context_build_off_event_loop(monkeypatch):
     assert captured["thread"] is not main, "context build ran ON the event-loop thread (blocks UI)"
 
 
+def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatch):
+    # C7: the gateway stamps every turn frame with task_id and the CLI POSTs
+    # once per turn onto a SHARED persistent stream. A reconnecting client can
+    # therefore see a PRIOR turn's frames -- it must ignore their actionable
+    # frames (never dispatch a foreign tool_request to the executor) and
+    # terminate ONLY on its own final, not a stale one.
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+    import webbee.tools as T
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    executor_calls = []
+
+    class _RecExecutor:
+        def __init__(self, root):
+            pass
+
+        def run(self, tool, args):
+            executor_calls.append((tool, args))
+            return {"ok": True, "content": "ran"}
+
+    monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+        # A foreign turn's tool_request and final (must be ignored), THEN
+        # this turn's own final (must be honored).
+        yield {"type": "tool_request", "task_id": "OTHER", "req_id": "r1",
+               "tool": "read_file", "args": {}}
+        yield {"type": "final", "task_id": "OTHER", "text": "wrong turn"}
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    class _SessResp:
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class _ResultResp:
+        def raise_for_status(self): pass
+        def json(self): return {}
+
+    posts = []
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, **kw):
+            posts.append(path)
+            return _SessResp() if path == "/v1/agent/sessions" else _ResultResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    class RecSink:
+        def tool_start(self, *a): ...
+        def tool_result(self, *a): ...
+        def ask_consent(self, *a): return "y"
+        def panel_release(self, *a): ...
+        def progress(self, *a): ...
+        def usage(self, *a): ...
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    result = asyncio.run(sess.run("do it", RecSink()))
+
+    assert result == "done"                # ended on OUR final, not the foreign one
+    assert executor_calls == []            # foreign tool_request never dispatched
+    assert posts == ["/v1/agent/sessions"]  # no /result POST for the ignored frames
+
+
 def test_action_frame_maps_to_feed():
     class Rec:
         def __init__(self): self.starts=[]; self.results=[]

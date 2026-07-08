@@ -34,3 +34,12 @@ def test_repo_key_falls_back_to_path_for_non_git(tmp_path):
     d.mkdir()
     k = compute_repo_key(find_repo_root(str(d)))
     assert len(k) == 12
+
+
+def test_find_repo_root_detects_git_file_worktree(tmp_path):
+    # In a linked git worktree (or submodule) .git is a FILE containing
+    # "gitdir: <path>", not a directory -- os.path.isdir would miss it.
+    root = tmp_path / "worktree"
+    (root / "src").mkdir(parents=True)
+    (root / ".git").write_text("gitdir: /some/other/path/.git/worktrees/wt\n")
+    assert find_repo_root(str(root / "src")) == os.path.realpath(str(root))
