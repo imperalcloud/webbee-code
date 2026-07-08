@@ -21,6 +21,8 @@ def repo_profile(svc) -> dict:
 def graph_slice(svc, symbols, depth: int = 1) -> dict:
     if svc is None or svc.graph is None:
         return {"ok": False, "content": "index not ready"}
+    if isinstance(symbols, str):
+        symbols = [symbols]
     g, items = svc.graph, []
     for name in (symbols or []):
         for s in g.symbol_table.get(name, []):
@@ -50,6 +52,8 @@ def search_code(svc, q, k: int = 20, kind=None, path_glob=None) -> dict:
 def impact_of_change(svc, symbols) -> dict:
     if svc is None or svc.graph is None:
         return {"ok": False, "content": "index not ready"}
+    if isinstance(symbols, str):
+        symbols = [symbols]
     files = svc.graph.dependents_of(list(symbols or []), depth=3)
     items = [{"id": f, "title": f, "kind": "file"} for f in sorted(files)]
     return _env(items)

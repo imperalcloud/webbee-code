@@ -132,6 +132,28 @@ class LocalToolExecutor:
     def _t_orient(self, a: dict) -> dict:
         return self._cpc("orient", a)
 
+    @staticmethod
+    def _as_str_list(v):
+        """Coerce `symbols` into a list[str]. An "any LLM" surface may emit a
+        bare string ("beta") or a stringified JSON array ('["beta"]') instead
+        of a real list -- fed straight to query.graph_slice/impact_of_change,
+        `for name in symbols` iterates characters and silently returns
+        total:0 (a false negative the brain reads as "no callers")."""
+        import json as _j
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("["):
+                try:
+                    p = _j.loads(s)
+                    if isinstance(p, list):
+                        return [str(x) for x in p]
+                except Exception:
+                    pass
+            return [s] if s else []
+        return []
+
     def _cpc(self, verb: str, a: dict) -> dict:
         if self.indexer is None:
             return {"ok": False, "content": "intel not available; install webbee[intel]"}
@@ -139,12 +161,12 @@ class LocalToolExecutor:
         if verb == "repo_profile":
             return query.repo_profile(self.indexer)
         if verb == "graph_slice":
-            return query.graph_slice(self.indexer, a.get("symbols") or [], int(a.get("depth", 1) or 1))
+            return query.graph_slice(self.indexer, self._as_str_list(a.get("symbols")), int(a.get("depth", 1) or 1))
         if verb == "search_code":
             return query.search_code(self.indexer, a.get("query", ""), int(a.get("k", 20) or 20),
                                       a.get("kind"), a.get("path_glob"))
         if verb == "impact_of_change":
-            return query.impact_of_change(self.indexer, a.get("symbols") or [])
+            return query.impact_of_change(self.indexer, self._as_str_list(a.get("symbols")))
         if verb == "orient":
             return query.orient(self.indexer, a.get("query", ""))
         return {"ok": False, "content": f"unknown cpc verb: {verb}"}

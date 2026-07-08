@@ -85,6 +85,7 @@ class _NoopIntel:
     (slow, non-hermetic, and it writes into the developer's real
     ~/.cache/webbee/intel). Tests that care about the intel wiring itself
     inject their own `intel_factory` and bypass this default."""
+    root = "/noop-root"  # real IntelService always has .root; the watcher is keyed to it (F1)
     def build(self): ...
     def apply_changes(self, paths): ...
 
@@ -317,6 +318,7 @@ class _SpyAgent:
 class _FakeIntelService:
     def __init__(self):
         self.built = False
+        self.root = "/fake-root"  # real IntelService always has .root (watcher keyed to it, F1)
 
     def build(self):
         self.built = True
@@ -383,3 +385,41 @@ def test_boot_skips_intel_when_disabled_in_config(monkeypatch):
     ))
     assert called == []                    # intel_factory never invoked
     assert _SpyAgent.last_intel is None
+
+
+def test_watcher_started_at_intel_root_not_workspace(monkeypatch, tmp_path):
+    """F1: IntelService.root is the discovered repo root, which can differ
+    from the raw cwd (e.g. the REPL launched from a subdir). The watcher must
+    observe intel.root -- otherwise apply_changes' relpath-against-root
+    mis-keys the index (e.g. pops 'foo.py' instead of 'pkg/foo.py') and
+    sibling/parent files are never watched at all."""
+    import os
+    monkeypatch.setattr("webbee.repl.AgentSession", _SpyAgent)
+    captured = {}
+
+    class _RootedIntel:
+        def __init__(self):
+            self.root = str(tmp_path)  # deliberately distinct from os.getcwd()
+
+        def build(self): ...
+        def apply_changes(self, paths): ...
+
+    async def _dummy(): ...
+
+    def _fake_watch(root, on_change):
+        captured["root"] = root
+        return _dummy()
+
+    from webbee.intel import watch
+    monkeypatch.setattr(watch, "watch_workspace", _fake_watch)
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+    asyncio.run(run_repl(
+        cfg, "default", sink=FakeSink(), read_line=_lines("/exit"),
+        agent_factory=None, intel_factory=lambda cfg, ws: _RootedIntel(),
+        auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+        sessions_client=FakeSessions(),
+    ))
+    assert captured.get("root") == str(tmp_path)
+    assert captured.get("root") != os.getcwd()

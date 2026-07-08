@@ -80,3 +80,26 @@ def test_cpc_shim_degrades_without_indexer(tmp_path):
     ex = LocalToolExecutor(str(tmp_path))            # indexer=None
     out = ex.run("graph_slice", {"symbols": ["x"]})
     assert out["ok"] is False and "intel not available" in out["content"]
+
+
+def test_cpc_graph_slice_coerces_stringified_symbols(tmp_path):
+    # An "any LLM" surface may emit symbols as a bare string or a stringified
+    # JSON array instead of a real list. Without coercion, query.graph_slice
+    # iterates the string char-by-char and silently returns total:0 -- a
+    # false negative the brain reads as "no callers".
+    pytest.importorskip("tree_sitter")
+    from webbee.intel.service import IntelService
+    (tmp_path / "a.py").write_text("def alpha():\n    return beta()\n")
+    (tmp_path / "b.py").write_text("def beta():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    svc.build()
+    ex = LocalToolExecutor(str(tmp_path), indexer=svc)
+
+    r1 = ex.run("graph_slice", {"symbols": "beta"})
+    assert r1["ok"] and any(i["title"] == "beta" for i in r1["data"]["items"])
+
+    r2 = ex.run("graph_slice", {"symbols": '["beta"]'})
+    assert r2["ok"] and any(i["title"] == "beta" for i in r2["data"]["items"])
+
+    r3 = ex.run("impact_of_change", {"symbols": "beta"})
+    assert r3["ok"] and any(i["id"].startswith("a.py") for i in r3["data"]["items"])

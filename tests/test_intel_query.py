@@ -38,3 +38,13 @@ def test_repo_profile_envelope(tmp_path):
 def test_orient_bundle(tmp_path):
     r = query.orient(_svc(tmp_path), "beta")
     assert r["ok"] and r["data"]["items"]  # profile + slices + hits merged
+
+
+def test_graph_slice_and_impact_of_change_coerce_bare_string_symbols(tmp_path):
+    # Belt-and-suspenders: even called directly with a bare string (not via
+    # the tools.py _cpc coercion), these must not char-iterate the string.
+    svc = _svc(tmp_path)
+    r = query.graph_slice(svc, "beta")
+    assert r["ok"] and any(i["title"] == "beta" for i in r["data"]["items"])
+    r2 = query.impact_of_change(svc, "beta")
+    assert r2["ok"] and any(i["id"].startswith("a.py") for i in r2["data"]["items"])

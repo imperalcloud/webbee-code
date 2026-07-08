@@ -11,6 +11,8 @@ from dataclasses import asdict
 
 from webbee.intel.models import ProjectIndex, FileIndex, Symbol
 
+SCHEMA_VERSION = 1
+
 
 def _path(cache_dir: str, repo_key: str) -> str:
     return os.path.join(cache_dir, repo_key, "index.json")
@@ -19,7 +21,7 @@ def _path(cache_dir: str, repo_key: str) -> str:
 def save(cache_dir: str, repo_key: str, index: ProjectIndex) -> None:
     p = _path(cache_dir, repo_key)
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    data = {"git_ref": index.git_ref,
+    data = {"schema_version": SCHEMA_VERSION, "git_ref": index.git_ref,
             "files": {k: {"path": v.path, "lang": v.lang, "imports": v.imports, "refs": v.refs,
                           "symbols": [asdict(s) for s in v.symbols]} for k, v in index.files.items()}}
     tmp = p + ".tmp"
@@ -29,16 +31,23 @@ def save(cache_dir: str, repo_key: str, index: ProjectIndex) -> None:
 
 
 def load(cache_dir: str, repo_key: str, git_ref: str) -> ProjectIndex | None:
+    # The WHOLE body (not just json.load) is guarded: a structurally-valid
+    # but wrong-shape cache (missing/renamed field, unreadable dict) must
+    # degrade to a cache miss, never raise -- raising here would propagate
+    # out of build() and disable intel for the whole session instead of
+    # falling through to a fresh re-index.
     try:
         with open(_path(cache_dir, repo_key), "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError):
-        return None  # miss or corrupt -- never raise into the caller
-    if data.get("git_ref") != git_ref:
-        return None  # stale cache -- the caller falls back to a full re-index
-    idx = ProjectIndex(git_ref=data.get("git_ref", ""))
-    for k, v in (data.get("files") or {}).items():
-        idx.files[k] = FileIndex(path=v["path"], lang=v["lang"],
-                                 imports=v.get("imports", []), refs=v.get("refs", []),
-                                 symbols=[Symbol(**s) for s in v.get("symbols", [])])
-    return idx
+        if data.get("git_ref") != git_ref:
+            return None  # stale cache -- the caller falls back to a full re-index
+        if data.get("schema_version") != SCHEMA_VERSION:
+            return None  # unknown/old on-disk shape -- clean miss, re-index
+        idx = ProjectIndex(git_ref=data.get("git_ref", ""))
+        for k, v in (data.get("files") or {}).items():
+            idx.files[k] = FileIndex(path=v["path"], lang=v["lang"],
+                                     imports=v.get("imports", []), refs=v.get("refs", []),
+                                     symbols=[Symbol(**s) for s in v.get("symbols", [])])
+        return idx
+    except Exception:
+        return None  # miss, corrupt, or wrong-shape -- never raise into the caller

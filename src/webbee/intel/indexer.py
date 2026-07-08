@@ -76,13 +76,28 @@ def parse_file(path: str, text: str) -> FileIndex | None:
             node = stack.pop()
             kind = defmap.get(node.type)
             if kind:
+                # A def/class node's own name-identifier must NOT be walked
+                # as a generic child -- otherwise it lands in `refs` too,
+                # making the defining file its own "caller"/"dependent".
+                # Nested defs (methods, inner functions) are still reached:
+                # every other child is still pushed onto the stack.
+                # NOTE: tree-sitter Node objects are re-wrapped on each
+                # access, so `is`/`is not` identity checks don't hold across
+                # two separate child_by_field_name/children calls -- compare
+                # by (start_byte, end_byte) span instead.
+                name_node = node.child_by_field_name("name")
+                name_span = (name_node.start_byte, name_node.end_byte) if name_node is not None else None
                 nm = _name_of(node, src)
                 if nm:
                     sig = src[node.start_byte:min(node.end_byte, node.start_byte + 200)].decode("utf-8", "replace").split("\n", 1)[0]
                     fi.symbols.append(Symbol(name=nm, kind=kind, path=path,
                                              start_line=node.start_point[0] + 1,
                                              end_line=node.end_point[0] + 1, signature=sig))
-            elif node.type in ("identifier", "call", "call_expression"):
+                for ch in node.children:
+                    if name_span is None or (ch.start_byte, ch.end_byte) != name_span:
+                        stack.append(ch)
+                continue
+            if node.type in ("identifier", "call", "call_expression"):
                 fi.refs.append(src[node.start_byte:node.end_byte].decode("utf-8", "replace").split("(")[0].strip())
             stack.extend(node.children)
     except Exception:

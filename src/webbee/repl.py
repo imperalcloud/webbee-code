@@ -194,7 +194,7 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                 await asyncio.to_thread(svc.build)
                 intel = svc
                 from webbee.intel import watch
-                watcher_task = asyncio.ensure_future(watch.watch_workspace(workspace, intel.apply_changes))
+                watcher_task = asyncio.ensure_future(watch.watch_workspace(intel.root, intel.apply_changes))
             except Exception:
                 intel = None
                 watcher_task = None

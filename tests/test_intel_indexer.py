@@ -31,3 +31,23 @@ def test_build_index(tmp_path):
     assert isinstance(idx, ProjectIndex)
     assert set(idx.files) == {"a.py", "b.py"}
     assert any(s.name == "a" for s in idx.files["a.py"].symbols)
+
+
+def test_def_own_name_is_not_recorded_as_a_ref():
+    # A def's own name-identifier must not land in fi.refs -- otherwise the
+    # defining file counts itself as a "caller"/"dependent" of its own
+    # symbol, inflating callers_of/impact_of_change with a false positive.
+    src = "def alpha():\n    return 1\n"
+    fi = indexer.parse_file("m.py", src)
+    assert "alpha" not in fi.refs
+
+
+def test_nested_def_inside_class_still_discovered_after_name_exclusion():
+    # The name-node exclusion must not break traversal into a def's body --
+    # nested/inner defs (e.g. methods) still need to be found.
+    src = "class Gamma:\n    def method(self):\n        return other()\n"
+    fi = indexer.parse_file("m.py", src)
+    names = {s.name for s in fi.symbols}
+    assert {"Gamma", "method"} <= names
+    assert "other" in fi.refs        # the call inside the method body is still a ref
+    assert "method" not in fi.refs   # but the method's own name is not
