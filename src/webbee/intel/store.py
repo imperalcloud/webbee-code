@@ -9,9 +9,11 @@ import json
 import os
 from dataclasses import asdict
 
+import numpy as np
+
 from webbee.intel.models import ProjectIndex, FileIndex, Symbol
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _path(cache_dir: str, repo_key: str) -> str:
@@ -51,3 +53,44 @@ def load(cache_dir: str, repo_key: str, git_ref: str) -> ProjectIndex | None:
         return idx
     except Exception:
         return None  # miss, corrupt, or wrong-shape -- never raise into the caller
+
+
+def _vec_dir(cache_dir: str, repo_key: str) -> str:
+    return os.path.join(cache_dir, repo_key)
+
+
+def save_vectors(cache_dir, repo_key, git_ref, model_id, ids, matrix) -> None:
+    d = _vec_dir(cache_dir, repo_key)
+    os.makedirs(d, exist_ok=True)
+    meta = {"schema_version": SCHEMA_VERSION, "git_ref": git_ref, "model_id": model_id, "ids": list(ids)}
+    tmp_j = os.path.join(d, "chunks.json.tmp")
+    with open(tmp_j, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    os.replace(tmp_j, os.path.join(d, "chunks.json"))
+    tmp_n = os.path.join(d, "embeddings.npy.tmp")
+    np.save(tmp_n, np.asarray(matrix, dtype=np.float32))
+    # np.save appends ".npy" to a filename that doesn't already end with it --
+    # tmp_n ends in ".tmp" so the file actually written is tmp_n + ".npy".
+    # Replace from that real path so the final file lands as exactly
+    # "embeddings.npy" with no "embeddings.npy.npy" artifact left behind.
+    written = tmp_n if tmp_n.endswith(".npy") else tmp_n + ".npy"
+    os.replace(written, os.path.join(d, "embeddings.npy"))
+
+
+def load_vectors(cache_dir, repo_key, git_ref, model_id):
+    # Same never-raise contract as load(): any mismatch/corruption/missing
+    # file degrades to a cache miss so callers fall back to a fresh embed.
+    try:
+        d = _vec_dir(cache_dir, repo_key)
+        with open(os.path.join(d, "chunks.json"), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if (meta.get("schema_version") != SCHEMA_VERSION or meta.get("git_ref") != git_ref
+                or meta.get("model_id") != model_id):
+            return None
+        mat = np.load(os.path.join(d, "embeddings.npy"))
+        ids = meta.get("ids") or []
+        if len(ids) != mat.shape[0]:
+            return None
+        return ids, mat.astype(np.float32)
+    except Exception:
+        return None

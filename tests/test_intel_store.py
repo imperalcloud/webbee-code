@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pytest
 pytest.importorskip("tree_sitter")
 from webbee.intel import store, indexer
@@ -75,3 +76,16 @@ def test_schema_version_mismatch_is_a_clean_miss(tmp_path):
     data["schema_version"] = 999
     p.write_text(json.dumps(data))
     assert store.load(cache, "rk6", "abc") is None
+
+
+def test_vectors_roundtrip_gated(tmp_path):
+    c = str(tmp_path / "c")
+    ids = ["a.py#1-2"]; mat = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)
+    store.save_vectors(c, "rk", "gitA", "model2vec:potion", ids, mat)
+    npy = tmp_path / "c" / "rk" / "embeddings.npy"
+    assert npy.exists() and not (tmp_path / "c" / "rk" / "embeddings.npy.npy").exists()
+    got = store.load_vectors(c, "rk", "gitA", "model2vec:potion")
+    assert got is not None and got[0] == ids and got[1].shape == (1, 3)
+    assert store.load_vectors(c, "rk", "gitB", "model2vec:potion") is None   # git mismatch
+    assert store.load_vectors(c, "rk", "gitA", "other-model") is None        # model mismatch
+    assert store.load_vectors(c, "rk_absent", "gitA", "model2vec:potion") is None
