@@ -89,3 +89,25 @@ def test_repo_profile_survives_concurrent_apply_changes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service_mod, "Counter", spliced_counter)
     svc.repo_profile()  # must not raise RuntimeError: dictionary changed size during iteration
+
+
+def test_build_populates_vectors_and_profile(tmp_path):
+    pytest.importorskip("model2vec")
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk_embed1", cache_dir=str(tmp_path / "c"))
+    svc.build()
+    assert svc.vectors is not None and svc.vectors_ready
+    assert len(svc.vectors.ids()) >= 1
+    prof = svc.repo_profile()
+    assert prof["vectors_ready"] is True and prof["embedded_chunks"] >= 1
+
+
+def test_apply_changes_incremental_embed(tmp_path):
+    pytest.importorskip("model2vec")
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk_embed2", cache_dir=str(tmp_path / "c"))
+    svc.build()
+    (tmp_path / "b.py").write_text("def beta():\n    return 2\n")
+    svc.apply_changes(["b.py"])
+    ids = svc.vectors.ids()
+    assert any(i.startswith("b.py#") for i in ids)
