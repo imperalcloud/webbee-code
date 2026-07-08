@@ -18,9 +18,20 @@ def _git_branch(workspace: str) -> str:
         return "-"
 
 
+def _default_intel_factory(cfg, workspace: str):
+    """Lazy/guarded -- a base install (no tree-sitter/watchfiles extra) must
+    never fail to import here; `_boot` wraps the whole intel boot in
+    try/except so any error (missing extra, indexing failure) degrades to
+    `intel=None` rather than crashing the REPL."""
+    from webbee.intel.service import IntelService
+    from webbee.repo import compute_repo_key, find_repo_root
+    root = find_repo_root(workspace)
+    return IntelService(root, compute_repo_key(root), cache_dir=cfg.cache_dir)
+
+
 async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                    agent_factory=None, auth=None, account_fetcher=None,
-                   sessions_client=None) -> None:
+                   sessions_client=None, intel_factory=None) -> None:
     """Interactive coding REPL. Production (a real tty, no injected sink) runs
     the persistent prompt_toolkit dock (`tui.run_session`): the bordered input
     box is pinned at the bottom, turn output scrolls above it (patch_stdout →
@@ -30,7 +41,7 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         from imperal_mcp import auth as _auth
         auth = _auth
     if agent_factory is None:
-        agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m)  # noqa: E731
+        agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m, intel=intel)  # noqa: E731
     if account_fetcher is None:
         from webbee.account import fetch_account as account_fetcher
     if sessions_client is None:
@@ -45,8 +56,10 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
     # inject sink/read_line and take the plain fallback loop.
     use_dock = sink is None and read_line is input and sys.stdin.isatty()
     state = {"mode": mode, "logged_in": False}
-    _sink = None      # assigned by _boot
-    agent = None      # assigned by _boot
+    _sink = None         # assigned by _boot
+    agent = None         # assigned by _boot
+    intel = None         # assigned by _boot -- IntelService, or None (off/base-install/boot failure)
+    watcher_task = None  # assigned by _boot -- background watchfiles task, cancelled on exit
 
     def _cycle() -> None:
         state["mode"] = next_mode(state["mode"])
@@ -163,7 +176,7 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         return "continue"
 
     async def _boot(s) -> None:
-        nonlocal _sink, agent
+        nonlocal _sink, agent, intel, watcher_task
         _sink = s
         # Cache git branch OFF the event loop (subprocess.run blocks it). Only
         # /status reads it; recomputing it per input line froze the dock.
@@ -171,6 +184,20 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         account = await account_fetcher(cfg, token_provider)
         state["logged_in"] = account.signed_in
         _sink.welcome(account, workspace, "terminal")
+        if cfg.intel_enabled:
+            # Off-loop build (indexing does sync file I/O + subprocess). Any
+            # failure here (missing extra, bad repo, etc.) must degrade to
+            # intel=None, never crash the boot -- coding still works, just
+            # without repo intelligence.
+            try:
+                svc = (intel_factory or _default_intel_factory)(cfg, workspace)
+                await asyncio.to_thread(svc.build)
+                intel = svc
+                from webbee.intel import watch
+                watcher_task = asyncio.ensure_future(watch.watch_workspace(workspace, intel.apply_changes))
+            except Exception:
+                intel = None
+                watcher_task = None
         agent = agent_factory(cfg, token_provider, workspace, state["mode"])
 
     if use_dock:
@@ -190,16 +217,20 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
                     from prompt_toolkit.application import get_app
                     get_app().exit()
 
-            ok = await tui.run_session(
-                pane=pane, on_line=_on_line, mode_getter=lambda: state["mode"],
-                on_cycle=_cycle, status=_sink.status, is_busy=_sink.is_busy,
-                consent_pending=_sink.consent_pending, resolve_consent=_sink.resolve_consent,
-                steps_nav={
-                    "count": lambda: len(getattr(agent, "steps", [])),
-                    "expand": lambda i: _handle(f"/steps {i + 1}"),
-                },
-                stop_turn=lambda: agent.stop(),
-            )
+            try:
+                ok = await tui.run_session(
+                    pane=pane, on_line=_on_line, mode_getter=lambda: state["mode"],
+                    on_cycle=_cycle, status=_sink.status, is_busy=_sink.is_busy,
+                    consent_pending=_sink.consent_pending, resolve_consent=_sink.resolve_consent,
+                    steps_nav={
+                        "count": lambda: len(getattr(agent, "steps", [])),
+                        "expand": lambda i: _handle(f"/steps {i + 1}"),
+                    },
+                    stop_turn=lambda: agent.stop(),
+                )
+            finally:
+                if watcher_task is not None:
+                    watcher_task.cancel()
         except Exception:
             ok = False
         if ok:
@@ -217,12 +248,16 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
             from webbee.render import RichSink
             sink = RichSink()
         await _boot(sink)
-    while True:
-        try:
-            line = read_line("❯ ")
-        except (EOFError, KeyboardInterrupt):
-            return
-        if line is None:
-            return
-        if await _handle(line) == "exit":
-            return
+    try:
+        while True:
+            try:
+                line = read_line("❯ ")
+            except (EOFError, KeyboardInterrupt):
+                return
+            if line is None:
+                return
+            if await _handle(line) == "exit":
+                return
+    finally:
+        if watcher_task is not None:
+            watcher_task.cancel()

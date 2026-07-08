@@ -77,7 +77,7 @@ class AgentSession:
     P1: one POST per turn (server reloads the shared webbee-terminal thread,
     so context carries across turns). Persistent signal-based sessions are P3."""
 
-    def __init__(self, cfg, token_provider, workspace_root: str, mode: str = "default") -> None:
+    def __init__(self, cfg, token_provider, workspace_root: str, mode: str = "default", intel=None) -> None:
         self.cfg = cfg
         self.token_provider = token_provider
         self.workspace_root = workspace_root
@@ -85,6 +85,7 @@ class AgentSession:
         self.session_id: str = ""
         self.steps: list = []
         self._task_id: str = ""
+        self._intel = intel  # IntelService, or None (base install / boot failure)
 
     async def _headers(self) -> dict:
         token = await self.token_provider()
@@ -101,7 +102,7 @@ class AgentSession:
         # asyncio loop it froze the whole UI at every turn start.
         coding_context = await asyncio.to_thread(build_coding_context, self.workspace_root)
         imperal_id = await ImperalClient(self.cfg, self.token_provider).whoami()
-        executor = LocalToolExecutor(self.workspace_root)
+        executor = LocalToolExecutor(self.workspace_root, indexer=self._intel)
 
         headers = await self._headers()
         async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:

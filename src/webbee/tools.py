@@ -8,8 +8,9 @@ class OutsideWorkspaceError(Exception):
 
 
 class LocalToolExecutor:
-    def __init__(self, workspace_root: str) -> None:
+    def __init__(self, workspace_root: str, indexer=None) -> None:
         self.root = os.path.realpath(workspace_root)
+        self.indexer = indexer  # IntelService (or None on a base install) -- Task 5's _t_<verb> shims read this
 
     def resolve_in_workspace(self, path: str) -> str:
         full = os.path.realpath(os.path.join(self.root, path))

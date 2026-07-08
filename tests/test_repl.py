@@ -78,6 +78,17 @@ async def _fake_account_fetcher(cfg, token_provider):
     return Account(signed_in=True, email="u@imperal.io")
 
 
+class _NoopIntel:
+    """Default test double for the intel boot -- `_boot` runs it regardless
+    of which agent_factory is in play, so without this every test in this
+    file would build a REAL IntelService against the actual repo checkout
+    (slow, non-hermetic, and it writes into the developer's real
+    ~/.cache/webbee/intel). Tests that care about the intel wiring itself
+    inject their own `intel_factory` and bypass this default."""
+    def build(self): ...
+    def apply_changes(self, paths): ...
+
+
 def _run(**kw):
     from webbee.config import Config
     cfg = Config(api_url="http://x", panel_url="http://p")
@@ -86,7 +97,8 @@ def _run(**kw):
     asyncio.run(run_repl(cfg, "default", sink=sink, agent_factory=lambda c, tp, ws, m: agent,
                          read_line=kw.pop("read_line"), auth=kw.pop("auth", FakeAuth()),
                          account_fetcher=kw.pop("account_fetcher", _fake_account_fetcher),
-                         sessions_client=kw.pop("sessions_client", FakeSessions())))
+                         sessions_client=kw.pop("sessions_client", FakeSessions()),
+                         intel_factory=kw.pop("intel_factory", lambda cfg, ws: _NoopIntel())))
     return sink, agent
 
 
@@ -278,3 +290,96 @@ def test_slash_steps_detail_unavailable_notes_when_fetch_empty(monkeypatch):
 
     sink, agent = _run(read_line=_lines("/steps 1", "/exit"), agent=agent)
     assert any("unavailable" in n.lower() for n in sink.notes)
+
+
+# ── CORTEX U1 Task 4: repl-scope IntelService injection wiring ───────────────
+# `_boot` builds an IntelService (or an injected fake) off-loop and threads it
+# into the DEFAULT agent_factory (custom agent_factory, as used by every test
+# above, deliberately ignores it -- unaffected). A base install with no
+# tree-sitter/watchfiles extra must still boot cleanly with intel=None.
+
+class _SpyAgent:
+    """Stands in for AgentSession -- captures the `intel` kwarg the default
+    agent_factory closes over, without needing a real IntelService/network."""
+    last_intel = "unset"
+
+    def __init__(self, cfg, tp, ws, mode, intel=None):
+        type(self).last_intel = intel
+        self.mode = mode
+        self.steps = []
+
+    async def run(self, task, sink):
+        return f"answer:{task}"
+
+    async def stop(self): ...
+
+
+class _FakeIntelService:
+    def __init__(self):
+        self.built = False
+
+    def build(self):
+        self.built = True
+
+    def apply_changes(self, paths): ...
+
+
+def test_boot_injects_intel_service_into_agent(monkeypatch):
+    monkeypatch.setattr("webbee.repl.AgentSession", _SpyAgent)
+    fake = _FakeIntelService()
+
+    def intel_factory(cfg, workspace):
+        return fake
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+    asyncio.run(run_repl(
+        cfg, "default", sink=FakeSink(), read_line=_lines("/exit"),
+        agent_factory=None, intel_factory=intel_factory,
+        auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+        sessions_client=FakeSessions(),
+    ))
+    assert _SpyAgent.last_intel is fake
+    assert fake.built is True
+
+
+def test_boot_survives_intel_import_failure_base_install(monkeypatch):
+    # Simulates a base install (no tree-sitter/watchfiles extra): the intel
+    # factory raising must never crash the REPL boot -- the agent still gets
+    # constructed, just with intel=None.
+    monkeypatch.setattr("webbee.repl.AgentSession", _SpyAgent)
+
+    def broken_intel_factory(cfg, workspace):
+        raise ImportError("no tree_sitter")
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+    sink = FakeSink()
+    asyncio.run(run_repl(
+        cfg, "default", sink=sink, read_line=_lines("/exit"),
+        agent_factory=None, intel_factory=broken_intel_factory,
+        auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+        sessions_client=FakeSessions(),
+    ))
+    assert _SpyAgent.last_intel is None
+    assert sink.turns == []  # boot completed cleanly, no crash mid-boot
+
+
+def test_boot_skips_intel_when_disabled_in_config(monkeypatch):
+    monkeypatch.setattr("webbee.repl.AgentSession", _SpyAgent)
+    called = []
+
+    def intel_factory(cfg, workspace):
+        called.append(1)
+        return _FakeIntelService()
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p", intel_enabled=False)
+    asyncio.run(run_repl(
+        cfg, "default", sink=FakeSink(), read_line=_lines("/exit"),
+        agent_factory=None, intel_factory=intel_factory,
+        auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+        sessions_client=FakeSessions(),
+    ))
+    assert called == []                    # intel_factory never invoked
+    assert _SpyAgent.last_intel is None
