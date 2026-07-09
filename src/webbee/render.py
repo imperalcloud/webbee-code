@@ -3,10 +3,22 @@ import time
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.text import Text
 
 from webbee.banner_art import WEBBEE_CODE
+
+_GUTTER = 2   # left margin (cols) — the single consistent transcript gutter.
+              # Chrome lines prefix a 2-space string ("  "); block renderables
+              # (Markdown answer, Panels, Table) are wrapped in _pad() to match,
+              # so NOTHING renders flush against the screen edge.
+
+
+def _pad(renderable):
+    """Indent a block renderable by the transcript gutter so its left edge
+    lines up with the 2-space chrome ('  🐝 Webbee', '  13.9s · …', the ❯ bar)."""
+    return Padding(renderable, (0, 0, 0, _GUTTER))
 
 _ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "✎",
          "edit_file": "🔧", "bash": "⚡"}
@@ -149,7 +161,7 @@ class RichSink:
         if final_text:
             self.console.print()   # separation before the focus block
             self.console.print(Text("  🐝 Webbee", style=f"bold {_BEE}"))
-            self.console.print(Markdown(final_text))
+            self.console.print(_pad(Markdown(final_text)))   # body aligns to the same 2-col gutter as the header
         elapsed = self._elapsed()
         self.session_tokens += self.tokens
         self.session_credits += self.credits
@@ -246,7 +258,7 @@ class RichSink:
             (f"  {panel_url}\n", f"bold {_ACCENT}"),
             ("Then ask again — you weren't charged.", "dim"),
         )
-        self.console.print(Panel(body, title="💳 This costs money", border_style="magenta"))
+        self.console.print(_pad(Panel(body, title="💳 This costs money", border_style="magenta")))
         self._nudge()
 
     def login_prompt(self, user_code: str, url: str) -> None:
@@ -261,7 +273,7 @@ class RichSink:
             (f"  {user_code}\n\n", f"bold {_BEE}"),
             ("Waiting for you to authorize…", "dim"),
         )
-        self.console.print(Panel(body, title="🐝 Connect this terminal", border_style=_BEE))
+        self.console.print(_pad(Panel(body, title="🐝 Connect this terminal", border_style=_BEE)))
         self._nudge()
 
     def sessions_table(self, sessions) -> None:
@@ -285,7 +297,7 @@ class RichSink:
             seen = str(s.get("last_seen_at") or "")[:16].replace("T", " ")
             here = Text("this device", style=f"bold {_BEE}") if s.get("current") else Text("")
             t.add_row(str(i), label, ip, seen, here)
-        self.console.print(t)
+        self.console.print(_pad(t))
         self.console.print(Text("  /sessions revoke <#>  ·  /logout-others", style="dim"))
         self._nudge()
 
@@ -302,7 +314,7 @@ class RichSink:
                 f"{(detail.get('duration_ms', 0) or 0) / 1000:.1f}s  "
                 f"trace {detail.get('trace_id', '')}")
         body = f"{head}\n\nargs:\n{_prev(detail.get('args'))}\n\nresult:\n{_prev(detail.get('result'))}"
-        self.console.print(Panel(body, border_style="dim", title="step detail", title_align="left"))
+        self.console.print(_pad(Panel(body, border_style="dim", title="step detail", title_align="left")))
         self._nudge()
 
     def progress(self, text: str) -> None:
