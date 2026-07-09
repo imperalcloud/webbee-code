@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1
+
+- **Fixes a marathon that could hang on "working" and quietly burn credits.** A
+  marathon works through milestones and streams a result at each one; the
+  terminal used to stop at the first milestone, abandoning the rest of the run —
+  the agent kept going server-side with nobody to run its tools, spinning until
+  your balance drained. The terminal now follows a marathon to the end: it keeps
+  working across milestones and stops only when the whole goal is done, it
+  pauses (low credits / awaiting approval), or you stop it. Requires the current
+  cloud; older milestones are unaffected.
+
 ## 0.2.0
 
 - **Marathon is now the default.** A task you type runs to completion on its own

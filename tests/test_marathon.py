@@ -85,9 +85,9 @@ def test_parser_marathon_defaults_none():
     assert build_parser().parse_args([]).marathon is None
 
 
-def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X"):
-    """Drive AgentSession.run(marathon=True) with everything network-side faked;
-    return the JSON body POSTed to /v1/agent/sessions."""
+def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X", frames=None, marathon=True):
+    """Drive AgentSession.run() with everything network-side faked; return the
+    JSON body POSTed to /v1/agent/sessions, the run() result, and the sink."""
     import httpx
     import imperal_mcp.client as ic
     import webbee.session as S
@@ -113,11 +113,18 @@ def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X"):
 
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
 
+    # Default protocol (U4 semantics): a marathon_plan FACT + a per-milestone
+    # `final` (NON-terminal) + the terminal marathon_complete. Tests override
+    # `frames` to exercise the terminal taxonomy.
+    _frames = frames if frames is not None else [
+        {"type": "marathon_plan", "task_id": "OURS", "milestone_count": 2, "goal": goal},
+        {"type": "final", "task_id": "OURS", "text": "milestone 1"},
+        {"type": "marathon_complete", "task_id": "OURS", "text": "done"},
+    ]
+
     async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
-        # Include a marathon FACT frame to exercise the render branch.
-        yield {"type": "marathon_plan", "task_id": "OURS", "milestone_count": 2,
-               "goal": goal}
-        yield {"type": "final", "task_id": "OURS", "text": "done"}
+        for _fr in _frames:
+            yield _fr
 
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
 
@@ -161,7 +168,7 @@ def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X"):
 
     sink = NoteSink()
     sess = S.AgentSession(cfg=_Cfg(), token_provider=token_provider, workspace_root=str(tmp_path))
-    result = asyncio.run(sess.run(goal, sink, marathon=True, goal=goal))
+    result = asyncio.run(sess.run(goal, sink, marathon=marathon, goal=(goal if marathon else "")))
     return posted, result, sink
 
 
@@ -174,6 +181,49 @@ def test_marathon_run_sets_marathon_and_goal_and_verify_cmd(monkeypatch, tmp_pat
     assert result == "done"
     # marathon_plan FACT rendered as a one-line note (did not crash the turn).
     assert any("Marathon plan" in n for n in sink.notes)
+
+
+def test_marathon_final_is_not_terminal_keeps_streaming(monkeypatch, tmp_path):
+    # A per-milestone `final` must NOT end a marathon run: with no terminal frame
+    # the stream simply exhausts and run() returns "" (it kept streaming past the
+    # milestone final, never bailed early — the phantom-hang root cause).
+    _, result, _ = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "marathon_plan", "task_id": "OURS", "goal": "g"},
+        {"type": "final", "task_id": "OURS", "text": "milestone 1 done"},
+    ])
+    assert result == ""
+
+
+def test_marathon_complete_is_terminal(monkeypatch, tmp_path):
+    _, result, _ = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "final", "task_id": "OURS", "text": "milestone 1"},
+        {"type": "marathon_complete", "task_id": "OURS", "text": "goal done"},
+    ])
+    assert result == "goal done"
+
+
+def test_marathon_paused_is_terminal_and_noted(monkeypatch, tmp_path):
+    _, result, sink = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "marathon_paused", "task_id": "OURS", "reason": "out of credits"},
+    ])
+    assert result == ""
+    assert any("paused" in n.lower() for n in sink.notes)
+
+
+def test_marathon_user_stop_final_is_terminal(monkeypatch, tmp_path):
+    # A user-stop (stopped=true) `final` ends the marathon immediately.
+    _, result, _ = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "final", "task_id": "OURS", "text": "partial", "stopped": True},
+    ])
+    assert result == "partial"
+
+
+def test_non_marathon_final_is_terminal(monkeypatch, tmp_path):
+    # Coding (non-marathon): a `final` is terminal (unchanged) -> returns its text.
+    _, result, _ = _run_marathon_capture_post(monkeypatch, tmp_path, marathon=False, frames=[
+        {"type": "final", "task_id": "OURS", "text": "answer"},
+    ])
+    assert result == "answer"
 
 
 def test_normal_run_omits_marathon_fields(monkeypatch, tmp_path):

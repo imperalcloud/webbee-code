@@ -219,7 +219,7 @@ class AgentSession:
                 # persistent stream (task_id absent on legacy kernels -> not filtered).
                 if _ftid and self._task_id and _ftid != self._task_id and ftype in (
                         "tool_request", "confirm_request", "final",
-                        "panel_release_required"):
+                        "marathon_complete", "panel_release_required"):
                     continue
 
                 if ftype == "tool_request":
@@ -281,6 +281,9 @@ class AgentSession:
                         int(frame.get("credits", 0) or 0),
                     )
 
+                elif ftype == "marathon_complete":  # U4 — the whole GOAL is done: terminal
+                    return frame.get("text", "")
+
                 elif ftype in _MARATHON_FACT_TYPES:  # U4 — marathon plan/milestone/pause
                     # Facts-only; render ONE human-readable line. Guarded: a
                     # minimal sink (no `note`) simply drops the fact rather than
@@ -289,8 +292,19 @@ class AgentSession:
                     _note = getattr(sink, "note", None)
                     if _note is not None:
                         _note(marathon_note(frame))
+                    if ftype == "marathon_paused":
+                        # Parked (out-of-credits / consent / runaway) -> end the
+                        # turn so the dock leaves "working"; the note shows why, and
+                        # the run resumes on the user's next reply.
+                        return ""
 
                 elif ftype == "final":
+                    # In a MARATHON a `final` is a PER-MILESTONE result, NOT the end
+                    # of the run -> keep streaming (the goal ends on marathon_complete
+                    # / marathon_paused, or a user-stop `final` with stopped=true). A
+                    # non-marathon coding turn's `final` is terminal (unchanged).
+                    if marathon and not frame.get("stopped"):
+                        continue
                     return frame.get("text", "")
 
         return ""
