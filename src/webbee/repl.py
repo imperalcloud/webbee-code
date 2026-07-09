@@ -91,7 +91,7 @@ def _default_intel_factory(cfg, workspace: str):
     return IntelService(root, compute_repo_key(root), cache_dir=cfg.cache_dir)
 
 
-async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
+async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None, read_line=input,
                    agent_factory=None, auth=None, account_fetcher=None,
                    sessions_client=None, intel_factory=None) -> None:
     """Interactive coding REPL. Production (a real tty, no injected sink) runs
@@ -226,7 +226,7 @@ async def run_repl(cfg, mode: str = "default", *, sink=None, read_line=input,
         _sink.user_echo(line)
         _sink.begin_turn()
         try:
-            text = await agent.run(line, _sink)
+            text = await agent.run(line, _sink, marathon=not once, goal=(line if not once else ""))
         except (KeyboardInterrupt, asyncio.CancelledError):
             _sink.abort()
             _sink.note("Interrupted.")

@@ -15,6 +15,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Launch a long-horizon marathon toward GOAL (runs autonomously "
              "until the goal is met, verified by the project's own test command).",
     )
+    p.add_argument(
+        "--once", "--no-marathon", dest="once", action="store_true",
+        help="Run a single bounded coding turn (stops at the step limit) instead "
+             "of the default self-driving marathon.",
+    )
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("login", help="Log in to your Imperal account in the browser")
     sub.add_parser("logout", help="Log out and remove local credentials")
@@ -63,7 +68,7 @@ def main(argv=None) -> None:
     from webbee.repl import run_repl
     try:
         _maybe_print_update_notice()
-        asyncio.run(run_repl(cfg, args.mode))
+        asyncio.run(run_repl(cfg, args.mode, once=args.once))
     except KeyboardInterrupt:
         # Ctrl-C during the update-check fetch, or at the read_line() prompt,
         # unwinds here — exit clean, no traceback. (repl.py itself now cancels

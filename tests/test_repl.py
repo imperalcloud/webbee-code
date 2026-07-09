@@ -30,9 +30,10 @@ class FakeSink:
 
 
 class FakeAgent:
-    def __init__(self): self.tasks = []; self.mode = "default"
-    async def run(self, task, sink):
+    def __init__(self): self.tasks = []; self.mode = "default"; self.runs = []
+    async def run(self, task, sink, *, marathon=False, goal=""):
         self.tasks.append(task)
+        self.runs.append({"task": task, "marathon": marathon, "goal": goal})
         return f"answer:{task}"
 
 
@@ -95,7 +96,8 @@ def _run(**kw):
     cfg = Config(api_url="http://x", panel_url="http://p")
     sink = kw.pop("sink", FakeSink())
     agent = kw.pop("agent", FakeAgent())
-    asyncio.run(run_repl(cfg, "default", sink=sink, agent_factory=lambda c, tp, ws, m: agent,
+    once = kw.pop("once", False)
+    asyncio.run(run_repl(cfg, "default", once=once, sink=sink, agent_factory=lambda c, tp, ws, m: agent,
                          read_line=kw.pop("read_line"), auth=kw.pop("auth", FakeAuth()),
                          account_fetcher=kw.pop("account_fetcher", _fake_account_fetcher),
                          sessions_client=kw.pop("sessions_client", FakeSessions()),
@@ -107,6 +109,20 @@ def test_task_is_sent_to_agent_and_answer_rendered():
     sink, agent = _run(read_line=_lines("исправь баг", "/exit"))
     assert agent.tasks == ["исправь баг"]
     assert sink.turns == ["answer:исправь баг"]
+
+
+def test_interactive_default_is_marathon():
+    # Marathon is the default: a typed task self-drives (marathon=True) with the
+    # task carried as the goal.
+    sink, agent = _run(read_line=_lines("build a thing", "/exit"))
+    assert agent.runs and agent.runs[0]["marathon"] is True
+    assert agent.runs[0]["goal"] == "build a thing"
+
+
+def test_once_flag_uses_bounded_coding():
+    # --once opts back into the bounded, non-marathon coding turn.
+    sink, agent = _run(read_line=_lines("build a thing", "/exit"), once=True)
+    assert agent.runs and agent.runs[0]["marathon"] is False
 
 
 def test_exit_command_stops_loop():
@@ -133,7 +149,7 @@ def test_logout_command_calls_auth():
 
 def test_agent_error_is_swallowed_and_loop_continues():
     class RaisingAgent(FakeAgent):
-        async def run(self, task, sink):
+        async def run(self, task, sink, *, marathon=False, goal=""):
             self.tasks.append(task)
             raise RuntimeError("boom")
 
@@ -204,7 +220,7 @@ def test_clear_command_clears_sink():
 
 def test_ctrl_c_mid_turn_aborts_and_returns_to_prompt():
     class InterruptingAgent(FakeAgent):
-        async def run(self, task, sink):
+        async def run(self, task, sink, *, marathon=False, goal=""):
             self.tasks.append(task)
             raise KeyboardInterrupt
 
@@ -309,7 +325,7 @@ class _SpyAgent:
         self.mode = mode
         self.steps = []
 
-    async def run(self, task, sink):
+    async def run(self, task, sink, *, marathon=False, goal=""):
         return f"answer:{task}"
 
     async def stop(self): ...

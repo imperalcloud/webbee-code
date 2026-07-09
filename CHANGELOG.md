@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- **Marathon is now the default.** A task you type runs to completion on its own
+  — it plans, edits, runs, and verifies across as many steps as it needs, and
+  only stops when the goal is done, you stop it, or your credits run low (it
+  pauses, it doesn't fail — top up and it resumes). No more fixed per-run step
+  limit on the default path.
+- **`--once` (alias `--no-marathon`)** runs a single bounded coding turn instead,
+  for a quick one-shot.
+
 ## 0.1.14
 
 - **Esc/Ctrl-C now actually stops the turn — server-side, not just locally.**

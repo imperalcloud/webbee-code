@@ -140,6 +140,9 @@ class RichSink:
         for label, value in rows:
             self.console.print(Text.assemble((pad + label.ljust(14), "dim"), (value, "white")))
         self.console.print()
+        tip = "Type a task and Webbee runs it to completion · pauses if credits run low · --once = single turn"
+        self.console.print(Text(tip.center(w), style="dim"))
+        self.console.print()
         self.console.print(Text("/help · Ctrl-D to exit".center(w), style="dim"))
         self.console.print()
         self._nudge()
