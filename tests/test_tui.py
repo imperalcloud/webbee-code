@@ -62,115 +62,112 @@ def test_toolbar_mode_colored_per_mode():
     assert _mode_style("default") == "class:tb.mode.default"
 
 
-def test_output_pane_captures_colored_text():
-    # The pane's Rich Console renders into a buffer as ANSI (colours preserved
-    # for the FormattedTextControl to show); construction works headlessly.
-    from webbee.tui import OutputPane
-    pane = OutputPane(width=80)
-    pane.console.print("[bold red]Error[/] ok")
-    out = pane.dump()
-    assert "Error" in out and "ok" in out
-    assert "\x1b[" in out          # ANSI colour escapes preserved for the pane
+# ── inline renderer: no alternate screen, no mouse capture ────────────────────
+# The renderer is a PromptSession under patch_stdout — finalized output goes to
+# the terminal's NATIVE scrollback, so the terminal owns selection/copy/scroll.
+# There must be NO full-screen Application anywhere in the module.
+
+def test_no_full_screen_application_in_tui_source():
+    import inspect
+
+    from webbee import tui
+    src = inspect.getsource(tui)
+    assert "full_screen" not in src        # never take the alternate screen
+    assert "Application(" not in src       # never build a full-screen Application
+    assert "mouse_support=True" not in src  # never capture the mouse
 
 
-# ── copy-on-select (drag → OSC 52) ────────────────────────────────────────────
-
-def test_selected_text_single_line():
-    from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
-    pane = OutputPane(width=80)
-    pane.console.print("hello world")
-    assert pane._selected_text(Point(6, 0), Point(10, 0)) == "world"
-
-
-def test_selected_text_multi_line_strips_ansi():
-    from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
-    pane = OutputPane(width=80)
-    pane.console.print("abcdef")
-    pane.console.print("[bold]ghijkl[/]")   # coloured — must be stripped
-    pane.console.print("mnopqr")
-    assert pane._selected_text(Point(3, 0), Point(2, 2)) == "def\nghijkl\nmno"
+def test_richsink_prints_to_real_stdout(capsys):
+    # RichSink's default Console writes to the REAL stdout (not a StringIO pane),
+    # so under patch_stdout it commits into the native scrollback.
+    from webbee.render import RichSink
+    s = RichSink()
+    s.note("hello inline")
+    out = capsys.readouterr().out
+    assert "hello inline" in out
 
 
-def test_selected_text_reversed_order_normalizes():
-    from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
-    pane = OutputPane(width=80)
-    pane.console.print("hello")
-    assert pane._selected_text(Point(4, 0), Point(0, 0)) == "hello"
+# ── Enter-dispatch decision logic (pure) — mirrors the old dock Enter binding ──
+
+def _decide(text, *, consent=False, busy=False, sel_i=None, steps=True):
+    from webbee.tui import _decide_enter
+    return _decide_enter(text, consent_pending=lambda: consent,
+                         is_busy=lambda: busy, sel={"i": sel_i},
+                         has_steps_nav=steps)
 
 
-def test_copy_flash_expires():
-    from webbee.tui import OutputPane
-    pane = OutputPane(width=80)
-    pane.copy_flash = "✓ copied 5 chars"
-    pane._flash_until = 0.0            # already in the past
-    assert pane.flash() == ""
+def test_decide_enter_consent_pending_relays_reply():
+    assert _decide("yes please", consent=True) == ("consent", "yes please")
 
 
-# ── virtualization: render only the visible slice, follow the tail ────────────
-
-def test_pane_follows_tail_on_notify():
-    from webbee.tui import OutputPane
-    pane = OutputPane(width=80)
-    pane._view_h = 10
-    pane._io.write("\n".join(f"line{i}" for i in range(50)))   # 50 lines
-    pane.notify()
-    assert pane._offset == len(pane._all_lines()) - 10          # pinned to the bottom
+def test_decide_enter_consent_wins_even_when_busy():
+    # A consent reply can arrive mid-turn (busy) — consent takes priority.
+    assert _decide("n", consent=True, busy=True) == ("consent", "n")
 
 
-def test_pane_scroll_up_pauses_follow_then_rearms():
-    from webbee.tui import OutputPane
-    pane = OutputPane(width=80)
-    pane._view_h = 10
-    pane._io.write("\n".join(f"line{i}" for i in range(50)))
-    pane.notify()                      # offset=40, following
-    pane.scroll(-5)
-    assert pane._offset == 35 and pane._follow is False
-    pane.scroll(100)                   # clamp back to bottom
-    assert pane._offset == 40 and pane._follow is True
+def test_decide_enter_empty_with_selection_expands_step():
+    assert _decide("  ", sel_i=2) == ("expand", 2)
 
 
-def test_selected_text_respects_scroll_offset():
-    from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
-    pane = OutputPane(width=80)
-    pane._io.write("aaa\nbbb\nccc\nddd\n")
-    pane._offset = 2                   # viewport top = content line 2 ("ccc")
-    assert pane._selected_text(Point(0, 0), Point(2, 0)) == "ccc"
+def test_decide_enter_empty_selection_ignored_when_busy():
+    # Busy blocks step-expand (the selection nav is idle-only).
+    assert _decide("", sel_i=2, busy=True) == ("ignore", None)
 
 
-def test_output_pane_no_full_reread_on_unchanged_redraw():
-    # Perf regression (long-session lag): _all_lines re-read the ENTIRE buffer
-    # (getvalue O(n) + full string compare O(n)) on EVERY redraw. Every keystroke
-    # / ticker tick / scroll in a big session cost O(session). With NO new output,
-    # a redraw must not re-read the whole buffer.
-    import io
+def test_decide_enter_busy_ignores_text():
+    assert _decide("do a thing", busy=True) == ("ignore", None)
 
-    from webbee.output_pane import OutputPane
 
-    class CountingIO(io.StringIO):
-        def __init__(self):
-            super().__init__()
-            self.gv = 0
+def test_decide_enter_empty_ignored():
+    assert _decide("   ", sel_i=None) == ("ignore", None)
 
-        def getvalue(self):
-            self.gv += 1
-            return super().getvalue()
 
-    pane = OutputPane(width=80)
-    cio = CountingIO()
-    pane._io = cio
-    pane.console.file = cio
-    pane.console.print("some output line")
-    pane._all_lines()                      # warm the cache
-    base = cio.gv
-    pane._all_lines(); pane._all_lines(); pane._all_lines()   # no new writes since
-    assert cio.gv == base, "re-read the whole buffer on unchanged redraws (O(session)/frame)"
-    pane.console.print("a new line")       # content changed -> one refresh is expected
-    assert any("a new line" in ln for ln in pane._all_lines())
-    assert cio.gv > base
+def test_decide_enter_text_starts_turn():
+    assert _decide("fix the bug") == ("turn", "fix the bug")
+
+
+def test_decide_enter_expand_needs_steps_nav():
+    # Empty line + a selection but NO steps_nav wiring → not an expand.
+    assert _decide("", sel_i=1, steps=False) == ("ignore", None)
+
+
+# ── inline run_session builds a PromptSession, not a full-screen Application ───
+
+def test_run_session_builds_inline_promptsession(monkeypatch):
+    import contextlib
+
+    import prompt_toolkit
+    import prompt_toolkit.patch_stdout as _ps
+    from webbee import tui
+
+    captured = {}
+
+    class _FakePromptSession:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        async def prompt_async(self, *a, **k):
+            raise EOFError            # break the loop immediately → clean exit
+
+    monkeypatch.setattr(prompt_toolkit, "PromptSession", _FakePromptSession)
+    monkeypatch.setattr(_ps, "patch_stdout", lambda *a, **k: contextlib.nullcontext())
+
+    status = {"busy": False, "current": "", "elapsed": 0.0, "tools": 0,
+              "tokens": 0, "credits": 0, "consent": False}
+
+    async def _noop_line(_):
+        return None
+
+    ok = asyncio.run(tui.run_session(
+        on_line=_noop_line, mode_getter=lambda: "default", on_cycle=lambda: None,
+        status=lambda: status, is_busy=lambda: False,
+        consent_pending=lambda: False, resolve_consent=lambda r: None))
+
+    assert ok is True
+    assert captured["mouse_support"] is False          # never hijack native selection
+    assert captured["refresh_interval"] == 0           # ticker invalidates, not auto-repaint
+    assert callable(captured["bottom_toolbar"])        # status line is a callable
+    assert "auto_suggest" in captured and "history" in captured
 
 
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
