@@ -23,9 +23,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _quiet_downloads() -> None:
     """Silence dependency download-progress bars + telemetry BEFORE anything
-    imports them (model2vec / huggingface_hub / tokenizers). The inline renderer
-    tolerates stray stderr (it lands in native scrollback), but a tqdm / HF
-    progress bar still spams the transcript — keep it quiet. `setdefault` so an
+    imports them (model2vec / huggingface_hub / tokenizers). A stray tqdm or HF
+    progress bar written to stderr corrupts the full-screen prompt_toolkit dock
+    — it shows up as overlapping/duplicated text (the dock owns the terminal and
+    diffs the screen; any external write desyncs the diff). `setdefault` so an
     explicit user override still wins."""
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")

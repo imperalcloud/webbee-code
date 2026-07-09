@@ -37,9 +37,8 @@ def _salient_arg(args: dict) -> str:
 
 
 def _invalidate() -> None:
-    """Redraw the running prompt_toolkit prompt (its bottom_toolbar) if one is
-    active, so the status line reflects the latest sink state between ticker
-    ticks. No-op when none is active (tests / non-tty fallback)."""
+    """Redraw the running prompt_toolkit app if any. No-op when none is active
+    (tests / non-tty fallback) — the fallback when no output pane is wired."""
     try:
         from prompt_toolkit.application import get_app_or_none
         app = get_app_or_none()
@@ -50,26 +49,25 @@ def _invalidate() -> None:
 
 
 class RichSink:
-    """Rich implementation of TurnSink for the INLINE terminal. Turn output
-    (action feed, 🐝 answer, footer, progress, streaming) is printed by a real
-    Rich Console straight to stdout; under the inline PromptSession loop the
-    prompt_toolkit patch_stdout() proxy commits each print into the terminal's
-    NATIVE scrollback ABOVE the prompt (so selection / copy / scrollback / tmux
-    all belong to the terminal, not to us). The live status (busy/elapsed/
-    tokens) is the PromptSession's bottom_toolbar, fed by status(); after each
-    render this sink calls _nudge() to refresh it. Consent runs through the
-    prompt via an asyncio.Future (resolve_consent), with a sync input fallback
-    for non-tty.
+    """Rich implementation of TurnSink. Turn output (action feed, 🐝 answer,
+    footer) is rendered by the Rich Console. In the full-screen dock the Console
+    writes ANSI into the OutputPane's buffer (repl passes console=pane.console +
+    on_output=pane.notify) and the pane shows it in a scrollable region above
+    the fixed input; after each render this sink calls on_output() so the pane
+    follows the tail. The live status (busy/elapsed/tokens) is the dock toolbar,
+    fed by status(). Consent runs through the dock via an asyncio.Future
+    (resolve_consent), with a sync input fallback for non-tty.
 
-    Tests pass live_enabled=False + inject input_fn/clock; then _nudge() is a
-    harmless no-op and consent uses the injected input_fn."""
+    Tests pass live_enabled=False + inject input_fn/clock and no on_output; then
+    _nudge() is a harmless no-op and consent uses the injected input_fn."""
 
     def __init__(self, console=None, *, live_enabled=True, input_fn=input,
-                 clock=time.monotonic):
+                 clock=time.monotonic, on_output=None):
         self.console = console or Console()
         self._live_enabled = live_enabled
         self._input = input_fn
         self._clock = clock
+        self._on_output = on_output      # pane.notify (scroll+redraw) in the dock
         self.tokens = 0
         self.credits = 0
         self.session_tokens = 0
@@ -83,17 +81,20 @@ class RichSink:
         self._consent_summary = ""
 
     def _nudge(self) -> None:
-        """After output/state changes: refresh the bottom_toolbar (if a prompt
-        is live). Inline output is already committed to scrollback by print."""
-        _invalidate()
+        """After output/state changes: let the pane follow the tail + redraw."""
+        if self._on_output is not None:
+            self._on_output()
+        else:
+            _invalidate()
 
     # ---- welcome ------------------------------------------------------------
     def welcome(self, account, cwd: str, surface: str) -> None:
         """One-time launch splash: a centered WEBBEE CODE logo + imperal.io + an
-        honest account panel (who/plan/tier/member-since). Prints to stdout
-        normally (inline model) — runs BEFORE the prompt loop, so it lands in
-        the native scrollback. NEVER clears the screen (the terminal owns its
-        scrollback)."""
+        honest account panel (who/plan/tier/member-since). Runs BEFORE the dock
+        starts. Clears the screen ONLY in the non-pane path (the full-screen
+        dock owns its own alternate screen — clearing there would corrupt it)."""
+        if self._on_output is None:
+            self.console.clear()
         w = self.console.width
 
         def _center_block(text: str) -> str:
@@ -173,10 +174,8 @@ class RichSink:
         self._nudge()
 
     def clear(self) -> None:
-        """/clear: reset the session counters. Inline model — NEVER wipes the
-        native scrollback (the terminal owns it); prints a light separator so
-        the eye registers a fresh start instead."""
-        self.console.print(Text("  ──────── cleared ────────", style="dim"))
+        """/clear: wipe the pane/screen + reset the session counters."""
+        self.console.clear()
         self.tokens = 0
         self.credits = 0
         self.session_tokens = 0
@@ -219,10 +218,10 @@ class RichSink:
 
     async def ask_consent(self, app_id: str, tool: str, args: dict) -> str:
         """Ask for consent and return the user's RAW reply (trimmed only) —
-        NEVER interpret (the kernel decides, ICNLI). When the prompt loop is
-        running the reply comes through the next accepted line via an
-        asyncio.Future (no blocking input on the event loop); otherwise fall
-        back to the injected sync reader (tests / non-tty)."""
+        NEVER interpret (the kernel decides, ICNLI). When the dock is running
+        the reply comes through the pinned box via an asyncio.Future (no
+        blocking input on the event loop); otherwise fall back to the injected
+        sync reader (tests / non-tty)."""
         label = f"{app_id}·{tool}" if app_id else tool
         sal = _salient_arg(args)
         self.console.print(Text.assemble(("  ? approve ", "yellow"), (label, "dim"),
@@ -327,9 +326,9 @@ class RichSink:
         self.credits = credits
         self._nudge()
 
-    # ---- prompt bridge (read by tui.run_session's bottom_toolbar + dispatch) ---
+    # ---- dock bridge (read by tui.run_session's toolbar + Enter binding) ---
     def status(self) -> dict:
-        """Live state for the prompt's bottom_toolbar. The counter shows SESSION
+        """Live state for the dock toolbar. The bottom counter shows the SESSION
         TOTAL (not per-turn): the running session total, plus the in-flight
         turn's spend while busy (so it grows live), with no double-count at idle
         (end_turn has already folded the finished turn into the session)."""
@@ -346,16 +345,15 @@ class RichSink:
         return self._consent is not None and not self._consent.done()
 
     def resolve_consent(self, raw: str) -> None:
-        """Called by the prompt loop when an accepted line answers a pending
-        consent — hands the RAW reply verbatim to the awaiting ask_consent
-        (ICNLI)."""
+        """Called by the dock's Enter binding when a consent reply is awaited —
+        hands the RAW reply verbatim to the awaiting ask_consent (ICNLI)."""
         if self.consent_pending():
             self._consent.set_result(raw)
 
     # ---- internals ------------------------------------------------------
     def _arm_consent(self, label: str, summary: str):
-        """Create the consent Future iff a prompt app is running; else None
-        (caller falls back to sync input)."""
+        """Create the consent Future iff a dock is running; else None (caller
+        falls back to sync input)."""
         try:
             from prompt_toolkit.application import get_app_or_none
             if get_app_or_none() is None:

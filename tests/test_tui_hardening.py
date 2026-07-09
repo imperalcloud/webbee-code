@@ -1,12 +1,15 @@
-"""TUI robustness: keep dependency download bars quiet at the entry point.
+"""TUI robustness: no stray write can corrupt the full-screen dock.
 
-The inline renderer (PromptSession under patch_stdout) tolerates stray stderr —
-it just lands in the terminal's native scrollback and can't corrupt an
-alternate-screen diff (there is none anymore). We still silence the model /
-huggingface download progress bars so they don't spam the transcript."""
+Root cause of the observed 'overlapping/duplicated input field': the dock is a
+prompt_toolkit full-screen Application that OWNS the terminal (diffs the screen),
+so any external stderr write — a model-download tqdm bar, a library warning, a
+background-task traceback — desyncs the diff. Two guards: (1) disable the
+download progress bars at the entry point; (2) route stderr to a log file for
+the dock's whole lifetime."""
 import os
 
 from webbee.cli import _quiet_downloads
+from webbee.repl import _open_dock_stderr_log
 
 
 def test_quiet_downloads_sets_env(monkeypatch):
@@ -23,3 +26,21 @@ def test_quiet_downloads_respects_user_override(monkeypatch):
     monkeypatch.setenv("HF_HUB_DISABLE_PROGRESS_BARS", "0")
     _quiet_downloads()
     assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "0"
+
+
+def test_dock_stderr_log_is_writable():
+    f = _open_dock_stderr_log()
+    try:
+        f.write("boot noise\n")
+        f.flush()
+    finally:
+        f.close()
+
+
+def test_dock_stderr_log_never_raises_on_bad_cache_dir(monkeypatch):
+    def _boom(*a, **k):
+        raise OSError("cache dir unwritable")
+    monkeypatch.setattr(os, "makedirs", _boom)
+    f = _open_dock_stderr_log()   # must fall back (devnull/StringIO), never raise
+    f.write("x")
+    f.close()

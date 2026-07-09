@@ -1,21 +1,13 @@
-"""Inline REPL renderer (like Claude Code's classic renderer, but sturdier).
-
-`run_session` drives a `prompt_toolkit.PromptSession` loop wrapped in
-`patch_stdout()`: finalized output (assistant replies, tool results, progress,
-streaming tokens) is printed to the REAL stdout by the Rich Console and
-patch_stdout commits it ABOVE the prompt into the terminal's NATIVE scrollback.
-There is NO alternate screen and NO mouse capture — the terminal itself owns
-selection / copy / scroll / find / tmux. A persistent `bottom_toolbar` shows
-status + an animated spinner (ticked by a manual 0.25s invalidate loop, since
-`refresh_interval` doesn't repaint toolbar content — prompt_toolkit #751).
-
-Turns run as background asyncio tasks so the prompt keeps accepting input while
-output streams above it — this is also what lets a consent reply arrive as the
-next accepted line. Pure helpers (next_mode/build_toolbar/_decide_enter) and the
-key-binding actions (_escape_action/_interrupt_action) are unit-tested without
-spinning up a real Application. Grounded in prompt_toolkit 3.0.52."""
+"""Full-screen dock: a scrollable, colored output pane (Rich → ANSI, see
+output_pane.py) fills the top; a bordered input box + toolbar are pinned at
+the very bottom and never move while the output scrolls (mouse wheel /
+PageUp). `run_session` also drives step-navigation (Up/Down + Enter) over the
+pinned box when the input is empty and no turn is running. Pure helpers
+(next_mode/build_toolbar) are unit-tested; the Application is TTY/headless-
+smoke verified. Grounded in prompt_toolkit 3.0.52."""
 import asyncio
 
+from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.render import _fmt_tokens
 
 _MODES = ("default", "plan", "autopilot")
@@ -32,12 +24,12 @@ def next_mode(mode: str) -> str:
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False) -> list:
-    """The status line under the prompt, as prompt_toolkit formatted text
-    (per-segment styled). Three states: consent (awaiting a reply), busy (a turn
-    is running — an ANIMATED coloured spinner + the current action in accent, so
-    it pops, not grey), and idle (mode value coloured PER MODE — default cyan /
-    plan purple / autopilot yellow — + SESSION spend + the Shift + TAB hint).
-    Style classes are defined in run_session's Style."""
+    """The status line under the pinned input box, as prompt_toolkit formatted
+    text (per-segment styled). Three states: consent (awaiting a reply), busy
+    (a turn is running — an ANIMATED coloured spinner + the current action in
+    accent, so it pops, not grey), and idle (mode value coloured PER MODE —
+    default cyan / plan purple / autopilot yellow — + SESSION spend + the
+    Shift + TAB hint). Style classes are defined in run_session's Style."""
     if consent:
         return [("class:tb.consent", "  approve? type y / n / a reply · Enter to send")]
     if busy:
@@ -67,78 +59,65 @@ def _escape_action(sel: dict, is_busy, stop_turn, event) -> None:
 
 
 def _interrupt_action(turn: dict, is_busy, stop_turn, event) -> None:
-    """Ctrl-C key binding (P5g). The LOCAL task.cancel() is what actually tears
-    the running turn down; ALSO ask the server to stop the turn so it doesn't
-    keep running (and spending) after the client moves on."""
+    """Ctrl-C key binding (P5g). The LOCAL task.cancel() is what actually
+    tears the dock down (unchanged); ALSO ask the server to stop the turn so
+    it doesn't keep running (and spending) after the dock moves on."""
     t = turn["task"]
     if t is not None and not t.done():
         if is_busy() and stop_turn is not None:
             event.app.create_background_task(stop_turn())
-        t.cancel()                          # cancel the running turn; the loop survives
+        t.cancel()                          # cancel the running turn; dock survives
 
 
-def _decide_enter(text: str, *, consent_pending, is_busy, sel: dict,
-                  has_steps_nav: bool):
-    """PURE decision for one accepted input line — mirrors the old dock's Enter
-    binding EXACTLY. Returns (action, payload):
-      ("consent", text)  a consent reply is pending → relay the raw reply
-      ("expand", idx)    empty line + a step is selected + idle → drill into it
-      ("ignore", None)   busy, or an empty line with nothing selected → drop it
-      ("turn", text)     otherwise → start a turn with this text
-    Consent takes priority over everything (it can arrive mid-turn)."""
-    if consent_pending():
-        return ("consent", text)
-    if not text.strip() and sel.get("i") is not None and has_steps_nav and not is_busy():
-        return ("expand", sel["i"])
-    if is_busy() or not text.strip():
-        return ("ignore", None)
-    return ("turn", text)
-
-
-async def run_session(*, on_line, mode_getter, on_cycle, status, is_busy,
-                      consent_pending, resolve_consent, steps_nav=None,
+async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
+                      is_busy, consent_pending, resolve_consent, steps_nav=None,
                       stop_turn=None) -> bool:
-    """The inline REPL: a PromptSession loop under patch_stdout. Each accepted
-    line either resolves a pending consent (ICNLI: raw verbatim), expands a
-    selected step, or starts a turn as a BACKGROUND task (the loop keeps
-    prompting so output streams above + the next consent reply can be typed).
-    When `steps_nav` is given and the input is empty and no turn is running,
-    Up/Down move a step selection (toolbar shows `step k/N`) and Enter expands
-    it via `steps_nav["expand"]`; Esc clears it. Returns True on clean exit;
-    False if prompt_toolkit is unavailable (caller uses the plain fallback)."""
+    """The full-screen dock: `pane` fills the top (scrollable), a bordered input
+    box + toolbar are FIXED at the bottom. Enter either resolves a pending
+    consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
+    (the box stays fixed during it). When `steps_nav` is given and the input is
+    empty and no turn is running, Up/Down move a step selection (toolbar shows
+    `step k/N`) and Enter expands it via `steps_nav["expand"]`; Esc clears it.
+    Returns True on clean exit; False if prompt_toolkit is unavailable (caller
+    uses the plain fallback loop)."""
     try:
-        import os
-
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.application import get_app_or_none
-        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-        from prompt_toolkit.filters import Condition
-        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.application import Application, get_app
+        from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.patch_stdout import patch_stdout
+        from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+        from prompt_toolkit.layout.processors import BeforeInput
         from prompt_toolkit.styles import Style
+        from prompt_toolkit.widgets import Frame
     except Exception:
         return False
 
+    buf = Buffer(multiline=False)
     turn = {"task": None}
-    sel = {"i": None}   # None = no selection; else 0-based step index
 
     async def _run_turn(text):
         try:
             await on_line(text)
         finally:
             turn["task"] = None
-            app = get_app_or_none()
-            if app is not None:
-                app.invalidate()
-
-    def _nav_count() -> int:
-        try:
-            return int(steps_nav["count"]()) if steps_nav else 0
-        except Exception:
-            return 0
+            get_app().invalidate()
 
     kb = KeyBindings()
+
+    @kb.add("enter")
+    def _enter(event):
+        text = buf.text
+        buf.reset()
+        if consent_pending():
+            resolve_consent(text)              # ICNLI: relay the raw reply verbatim
+            return
+        if not text.strip() and sel["i"] is not None and steps_nav and not is_busy():
+            idx, sel["i"] = sel["i"], None
+            event.app.create_background_task(steps_nav["expand"](idx))
+            return
+        if is_busy() or not text.strip():
+            return
+        turn["task"] = event.app.create_background_task(_run_turn(text))
 
     @kb.add("s-tab")
     def _cycle(event):
@@ -151,46 +130,73 @@ async def run_session(*, on_line, mode_getter, on_cycle, status, is_busy,
 
     @kb.add("c-d")
     def _eof(event):
-        # Exit only when idle — never abandon a running turn.
         if not is_busy():
-            event.app.exit(exception=EOFError)
+            event.app.exit()
 
-    @kb.add("escape", eager=True)
-    def _esc(event):
-        _escape_action(sel, is_busy, stop_turn, event)
+    sel = {"i": None}   # None = no selection; else 0-based step index
 
-    @Condition
-    def _steps_nav_active() -> bool:
-        # Up/Down drive step-navigation ONLY on an empty, idle prompt with steps
-        # to show; otherwise they fall through to their default (history) role.
-        app = get_app_or_none()
-        if app is None:
-            return False
-        return (not app.current_buffer.text) and (not is_busy()) and _nav_count() > 0
+    def _nav_count() -> int:
+        try:
+            return int(steps_nav["count"]()) if steps_nav else 0
+        except Exception:
+            return 0
 
-    @kb.add("up", filter=_steps_nav_active)
+    @kb.add("up")
     def _step_up(event):
         n = _nav_count()
-        sel["i"] = (n - 1) if sel["i"] is None else max(0, sel["i"] - 1)
-        event.app.invalidate()
+        if n and not buf.text and not is_busy():
+            sel["i"] = (n - 1) if sel["i"] is None else max(0, sel["i"] - 1)
+            event.app.invalidate()
 
-    @kb.add("down", filter=_steps_nav_active)
+    @kb.add("down")
     def _step_down(event):
         n = _nav_count()
-        sel["i"] = 0 if sel["i"] is None else min(n - 1, sel["i"] + 1)
-        event.app.invalidate()
+        if n and not buf.text and not is_busy():
+            sel["i"] = 0 if sel["i"] is None else min(n - 1, sel["i"] + 1)
+            event.app.invalidate()
+
+    @kb.add("escape")
+    def _step_clear(event):
+        _escape_action(sel, is_busy, stop_turn, event)
+
+    @kb.add("pageup")
+    def _pgup(event):
+        pane.scroll(-(max(1, pane._view_h) - 2))
+
+    @kb.add("pagedown")
+    def _pgdn(event):
+        pane.scroll(max(1, pane._view_h) - 2)
 
     def _toolbar():
+        f = pane.flash()
+        if f:
+            return [("class:tb.working", "  " + f)]   # transient copy confirmation
         if sel["i"] is not None and steps_nav:
-            return [("class:tb.dim",
-                     f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
+            return [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
         st = status()
         return build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
                              current=st["current"], elapsed=st["elapsed"],
                              tools=st["tools"], consent=st["consent"])
 
+    # Dynamic height: EXACTLY the rows the wrapped input needs (1→10), so the box
+    # grows as you type and shrinks back — never a fixed huge block. Enter still
+    # submits (multiline=False); the pane above absorbs all remaining space.
+    def _input_height():
+        import shutil
+        text = buf.text
+        cols = max(10, shutil.get_terminal_size((100, 24)).columns - 4)  # frame + "❯ "
+        if not text:
+            return 1
+        rows = sum(max(1, -(-len(ln) // cols)) for ln in text.split("\n"))
+        return min(10, max(1, rows))
+
+    input_win = Window(
+        BufferControl(buffer=buf, input_processors=[BeforeInput("❯ ", style="class:prompt")]),
+        height=_input_height, wrap_lines=True)
+    toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
+    root = HSplit([pane.window, Frame(input_win), toolbar])
     style = Style.from_dict({
-        "bottom-toolbar": "noreverse",       # a calm status line, not the default reverse bar
+        "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
         "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
         "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
         "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
@@ -201,59 +207,19 @@ async def run_session(*, on_line, mode_getter, on_cycle, status, is_busy,
         "tb.mode.plan": "#af87ff",           # plan — purple
         "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
     })
-
-    # Persistent history + suggestions — UX wins the full-screen dock lacked.
-    history = None
-    try:
-        d = os.path.expanduser("~/.cache/webbee")
-        os.makedirs(d, exist_ok=True)
-        history = FileHistory(os.path.join(d, "history"))
-    except Exception:
-        history = None
-
-    session = PromptSession(
-        history=history,
-        auto_suggest=AutoSuggestFromHistory(),
-        key_bindings=kb,
-        bottom_toolbar=_toolbar,
-        style=style,
-        mouse_support=False,     # never hijack the terminal's native selection
-        refresh_interval=0,      # no auto-repaint — the ticker below invalidates
-        erase_when_done=True,    # the typed line is re-committed by sink.user_echo
-    )
+    app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
+                      full_screen=True, mouse_support=True, style=style)
 
     async def _ticker():
-        # Animate the spinner + tick the elapsed clock while a turn runs.
+        # animate the spinner + tick the elapsed clock while a turn runs
         while True:
             await asyncio.sleep(0.25)
-            if is_busy():
-                app = get_app_or_none()
-                if app is not None:
-                    app.invalidate()
+            if is_busy() or pane.flash():
+                app.invalidate()
 
-    message = [("class:prompt", "❯ ")]
     tick = asyncio.ensure_future(_ticker())
     try:
-        with patch_stdout(raw=True):
-            while True:
-                try:
-                    text = await session.prompt_async(message)
-                except (EOFError, KeyboardInterrupt):
-                    break
-                action, payload = _decide_enter(
-                    text, consent_pending=consent_pending, is_busy=is_busy,
-                    sel=sel, has_steps_nav=steps_nav is not None)
-                if action == "consent":
-                    resolve_consent(payload)              # ICNLI: relay the raw reply verbatim
-                elif action == "expand":
-                    sel["i"] = None
-                    # ensure_future (not the prompt app's background task): a new
-                    # PromptSession app is created per iteration, so a task tied
-                    # to the app would be torn down the instant we loop.
-                    asyncio.ensure_future(steps_nav["expand"](payload))
-                elif action == "turn":
-                    turn["task"] = asyncio.ensure_future(_run_turn(payload))
-                # "ignore" → just loop and prompt again
+        await app.run_async()
     finally:
         tick.cancel()
     return True
