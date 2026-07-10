@@ -272,6 +272,9 @@ class AgentSession:
                 elif ftype == "step_finished":  # v2 (Slice-5 T8 dual-emit)
                     handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
 
+                elif ftype == "thinking":  # system-driven reasoning -> the 💭 block
+                    (getattr(sink, "thinking", None) or sink.progress)(_progress_text(frame))
+
                 elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
                     sink.progress(_progress_text(frame))
 

@@ -154,6 +154,7 @@ def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X", frames=Non
     class NoteSink:
         def __init__(self): self.notes = []
         def note(self, msg): self.notes.append(msg)
+        def thinking(self, msg): self.thinks = getattr(self, "thinks", []) + [msg]
         def tool_start(self, *a): ...
         def tool_result(self, *a): ...
         def ask_consent(self, *a): return "y"
@@ -200,6 +201,16 @@ def test_marathon_complete_is_terminal(monkeypatch, tmp_path):
         {"type": "marathon_complete", "task_id": "OURS", "text": "goal done"},
     ])
     assert result == "goal done"
+
+
+def test_thinking_frame_renders_as_distinct_channel(monkeypatch, tmp_path):
+    # A `thinking` frame routes to the distinct 💭 reasoning channel
+    # (sink.thinking), NOT the plain progress/note lines.
+    _, _, sink = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "thinking", "task_id": "OURS", "text": "assessing the repo before editing"},
+        {"type": "marathon_complete", "task_id": "OURS", "text": "done"},
+    ])
+    assert getattr(sink, "thinks", []) == ["assessing the repo before editing"]
 
 
 def test_marathon_paused_is_terminal_and_noted(monkeypatch, tmp_path):

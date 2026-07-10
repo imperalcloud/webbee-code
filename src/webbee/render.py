@@ -325,6 +325,13 @@ class RichSink:
             self.console.print(Text("  " + text, style="dim italic"))
             self._nudge()
 
+    def thinking(self, text: str) -> None:
+        # System-driven reasoning as a distinct 💭 block — visually apart from the
+        # dim `progress` line (which stays reserved for status like low-balance).
+        if text:
+            self.console.print(Text("  💭 " + text, style="italic medium_purple3"))
+            self._nudge()
+
     def plan_blocked(self, tool: str) -> None:
         """Plan mode auto-declines writes/destructive. Tell the user WHY and how
         to allow it (Shift+Tab). Autopilot and default never reach this."""

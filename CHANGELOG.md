@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- **See Webbee's reasoning as a distinct 💭 block.** Before each step, Webbee now
+  shows a genuine line of thinking — what it's weighing and why — rendered as its
+  own 💭 block, separate from status lines. Works on every model.
+- **SSH steps are visible.** When Webbee runs a command on one of your connected
+  servers, the terminal now shows that step (command + result), like any other.
+
 ## 0.2.1
 
 - **Fixes a marathon that could hang on "working" and quietly burn credits.** A
