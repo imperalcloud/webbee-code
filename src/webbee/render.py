@@ -27,8 +27,20 @@ _ACCENT = "cyan"      # interactive chrome ONLY — live caret / mode / panel ur
 
 
 def _fmt_tokens(n: int) -> str:
-    """Compact token count: 2100 -> '2.1k', 900 -> '900'."""
-    return f"{n / 1000:.1f}k" if n >= 1000 else str(int(n))
+    """Compact count for the live toolbar: 900 -> '900', 2_100 -> '2.1k',
+    1_500_000 -> '1.5M', 2_000_000 -> '2M', 3_200_000_000 -> '3.2B'. Used for
+    both token counts and (integer) credits so big numbers stay readable."""
+    try:
+        n = int(n or 0)
+    except (TypeError, ValueError):
+        return "0"
+    a = abs(n)
+    if a < 1000:
+        return str(n)
+    for div, suf in ((1_000_000_000, "B"), (1_000_000, "M"), (1000, "k")):
+        if a >= div:
+            return f"{n / div:.1f}".rstrip("0").rstrip(".") + suf
+    return str(n)
 
 
 def _salient_arg(args: dict) -> str:

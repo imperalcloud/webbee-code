@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+- **Readable big numbers.** Token and credit counts in the toolbar now scale
+  (`1.5M tok`, `2M credits`) instead of an awkward `1500.0k`.
+- **Esc really stops a turn now.** Previously only Ctrl-C worked; Esc now cancels
+  the running turn too, matching the "Esc/Ctrl-C to stop" hint.
+- **The `❯` prompt takes your mode's colour** — cyan (default), purple (plan),
+  yellow (autopilot) — so the current mode is obvious from the input line.
+
 ## 0.2.2
 
 - **See Webbee's reasoning as a distinct 💭 block.** Before each step, Webbee now

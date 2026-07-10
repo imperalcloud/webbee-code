@@ -44,15 +44,19 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     return [("class:tb.dim", "  mode: "),
             (f"class:tb.mode.{mode}", mode),
             ("class:tb.dim",
-             f"   ·   {_fmt_tokens(tokens)} tok · {credits} credits   ·   Shift + TAB: switch mode")]
+             f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits   ·   Shift + TAB: switch mode")]
 
 
-def _escape_action(sel: dict, is_busy, stop_turn, event) -> None:
-    """Esc key binding (P5g). While a turn is running, ask the server to stop
-    it (`stop_turn` posts the cancel; fail-soft, best-effort) and leave the
-    step-selection untouched — while idle (unchanged), clear the selection."""
-    if is_busy() and stop_turn is not None:
-        event.app.create_background_task(stop_turn())
+def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event) -> None:
+    """Esc key binding (P5g). While a turn is running, STOP it — cancel the LOCAL
+    turn task (what actually tears the turn down, same as Ctrl-C) AND ask the
+    server to stop (so it stops spending). While idle, clear the step-selection."""
+    if is_busy():
+        t = turn.get("task")
+        if t is not None and not t.done():
+            if stop_turn is not None:
+                event.app.create_background_task(stop_turn())
+            t.cancel()                       # cancel the running turn; dock survives
         return
     sel["i"] = None
     event.app.invalidate()
@@ -157,7 +161,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("escape")
     def _step_clear(event):
-        _escape_action(sel, is_busy, stop_turn, event)
+        _escape_action(sel, turn, is_busy, stop_turn, event)
 
     @kb.add("pageup")
     def _pgup(event):
@@ -190,8 +194,13 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         rows = sum(max(1, -(-len(ln) // cols)) for ln in text.split("\n"))
         return min(10, max(1, rows))
 
+    def _prompt_fragments():
+        # The ❯ takes the CURRENT mode's colour (same classes the toolbar uses)
+        # so the mode is obvious from the input line itself, not just the toolbar.
+        return [(f"class:tb.mode.{mode_getter()}", "❯ ")]
+
     input_win = Window(
-        BufferControl(buffer=buf, input_processors=[BeforeInput("❯ ", style="class:prompt")]),
+        BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)]),
         height=_input_height, wrap_lines=True)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
     root = HSplit([pane.window, Frame(input_win), toolbar])

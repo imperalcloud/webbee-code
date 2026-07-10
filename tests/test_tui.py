@@ -22,11 +22,28 @@ def test_next_mode_unknown_resets():
 def test_toolbar_idle_has_mode_tokens_cost_and_hint():
     t = _txt(build_toolbar("plan", 51000, 66))
     assert "plan" in t
-    assert "51.0k" in t
+    assert "51k" in t
     assert "66 credits" in t
     assert "Shift + TAB" in t          # spelled in words, no glyph
     assert "⇧⇥" not in t     # the ⇧⇥ glyph must NOT appear
     assert not NO_CYRILLIC.search(t)
+
+
+def test_toolbar_humanizes_millions_and_credits():
+    # Big numbers stay readable: tokens + credits both scale to k/M/B.
+    t = _txt(build_toolbar("default", 1_500_000, 2_000_000))
+    assert "1.5M tok" in t
+    assert "2M credits" in t
+
+
+def test_fmt_tokens_scales_k_m_b():
+    from webbee.render import _fmt_tokens
+    assert _fmt_tokens(900) == "900"
+    assert _fmt_tokens(2100) == "2.1k"
+    assert _fmt_tokens(51000) == "51k"
+    assert _fmt_tokens(1_500_000) == "1.5M"
+    assert _fmt_tokens(2_000_000) == "2M"
+    assert _fmt_tokens(3_200_000_000) == "3.2B"
 
 
 def test_toolbar_busy_state_shows_working_dot_and_stop_hint():
@@ -203,7 +220,15 @@ def _run_and_drain(coro):
     asyncio.run(coro)
 
 
-def test_escape_while_busy_schedules_server_stop_and_leaves_selection():
+class _FakeTask:
+    def __init__(self): self.cancelled = []
+    def done(self): return False
+    def cancel(self): self.cancelled.append(1)
+
+
+def test_escape_while_busy_cancels_turn_and_schedules_server_stop():
+    # Esc now REALLY stops a running turn: cancel the local turn task (what tears
+    # it down) AND ask the server to stop — matching the "Esc/Ctrl-C" hint.
     from webbee.tui import _escape_action
 
     stop_calls = []
@@ -213,13 +238,15 @@ def test_escape_while_busy_schedules_server_stop_and_leaves_selection():
 
     event = _FakeEvent()
     sel = {"i": 2}
-    _escape_action(sel, lambda: True, stop_turn, event)
+    task = _FakeTask()
+    turn = {"task": task}
+    _escape_action(sel, turn, lambda: True, stop_turn, event)
 
+    assert task.cancelled == [1]                  # the local turn is actually cancelled
     assert len(event.app.background_tasks) == 1
     _run_and_drain(event.app.background_tasks[0])
-    assert stop_calls == [1]
-    # Esc-while-busy interrupts — it does NOT also clear the step-selection
-    # or invalidate the toolbar (that's the idle-path job, tested below).
+    assert stop_calls == [1]                       # AND the server is asked to stop
+    # Busy-path stops the turn — it does NOT also clear the step-selection.
     assert sel["i"] == 2
     assert event.app.invalidated is False
 
@@ -234,7 +261,8 @@ def test_escape_while_idle_clears_step_selection_unchanged():
 
     event = _FakeEvent()
     sel = {"i": 2}
-    _escape_action(sel, lambda: False, stop_turn, event)
+    turn = {"task": None}
+    _escape_action(sel, turn, lambda: False, stop_turn, event)
 
     assert sel["i"] is None
     assert event.app.invalidated is True
@@ -242,18 +270,20 @@ def test_escape_while_idle_clears_step_selection_unchanged():
     assert stop_calls == []
 
 
-def test_escape_while_busy_with_no_stop_turn_falls_back_to_clearing():
-    # stop_turn=None (e.g. no repl wiring) must never crash Esc — it just
-    # keeps the pre-P5g behavior of clearing the step-selection.
+def test_escape_while_busy_with_no_stop_turn_still_cancels_locally():
+    # stop_turn=None (e.g. no repl wiring) must never crash Esc — it still cancels
+    # the local turn task, so Esc reliably stops even without the server hook.
     from webbee.tui import _escape_action
 
     event = _FakeEvent()
     sel = {"i": 1}
-    _escape_action(sel, lambda: True, None, event)
+    task = _FakeTask()
+    turn = {"task": task}
+    _escape_action(sel, turn, lambda: True, None, event)
 
-    assert sel["i"] is None
-    assert event.app.invalidated is True
-    assert event.app.background_tasks == []
+    assert task.cancelled == [1]                  # local teardown happens regardless
+    assert event.app.background_tasks == []        # no stop_turn -> nothing scheduled
+    assert sel["i"] == 1                            # busy-path leaves the selection
 
 
 def test_interrupt_while_busy_cancels_local_task_and_schedules_server_stop():
