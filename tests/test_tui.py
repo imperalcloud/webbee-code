@@ -327,3 +327,88 @@ def test_interrupt_with_no_running_task_is_a_noop():
 
     assert event.app.background_tasks == []
     assert stop_calls == []
+
+
+# ---- mouse-report flood hardening (0.3.3) ----------------------------------
+# Linux (occasionally macOS) terminals under prompt_toolkit's default
+# mouse_support=True run ANY-EVENT tracking (?1003): every bare mouse move
+# fires an SGR report. Under that flood the vt100 parser splits sequences at
+# read-chunk boundaries — the ESC arrives as a phantom Escape KEY (which used
+# to stop the running turn!) and the tail ("35;6;42M…") lands in the input
+# buffer as literal text.
+
+_GARBAGE = "roo35;6;42M<35;35;46M5;49;46M3M35;71;37M29M5;94;19M5;101;14M4M"
+
+
+def test_scrub_mouse_residue_removes_leaked_reports():
+    from webbee.tui import scrub_mouse_residue
+    out = scrub_mouse_residue(_GARBAGE)
+    assert "42M" not in out and "<35" not in out
+    assert out.startswith("roo")            # non-residue text survives
+
+
+def test_scrub_mouse_residue_keeps_normal_text():
+    from webbee.tui import scrub_mouse_residue
+    for s in ("fix the tests", "a;b;c", "35;6", "надо дочинить endpoint'ы", ""):
+        assert scrub_mouse_residue(s) == s
+
+
+class _FakeOutput:
+    def __init__(self):
+        self.raw = []
+
+    def write_raw(self, s):
+        self.raw.append(s)
+
+
+def test_configure_mouse_modes_button_event_not_any_event():
+    from webbee.tui import configure_mouse_modes
+    out = _FakeOutput()
+    configure_mouse_modes(out)
+    out.enable_mouse_support()
+    joined = "".join(out.raw)
+    assert "\x1b[?1002h" in joined           # drag/wheel/click tracking
+    assert "\x1b[?1003h" not in joined       # NEVER any-event (bare-move flood)
+    out.raw.clear()
+    out.disable_mouse_support()
+    joined = "".join(out.raw)
+    assert "\x1b[?1002l" in joined and "\x1b[?1003l" in joined  # belt & braces
+
+
+def test_configure_mouse_modes_skips_outputs_without_write_raw():
+    from webbee.tui import configure_mouse_modes
+    class _Plain:
+        pass
+    p = _Plain()
+    configure_mouse_modes(p)                 # must not raise, must not add attrs
+    assert not hasattr(p, "enable_mouse_support")
+
+
+class _FakeBuf:
+    def __init__(self, text=""):
+        self.text = text
+
+
+def test_phantom_escape_with_residue_cleans_buffer_not_the_turn():
+    # A mouse-report flood in the input buffer means this Escape is almost
+    # certainly a SPLIT SEQUENCE, not the user — never kill the turn on it.
+    from webbee.tui import _escape_action
+
+    event = _FakeEvent()
+    task = _FakeTask()
+    turn = {"task": task}
+    buf = _FakeBuf("draft " + _GARBAGE)
+    _escape_action({"i": None}, turn, lambda: True, None, event, buf=buf)
+    assert task.cancelled == []              # the turn SURVIVES
+    assert "42M" not in buf.text             # the residue is cleaned
+    assert buf.text.startswith("draft roo")
+
+
+def test_real_escape_with_clean_buffer_still_stops_the_turn():
+    from webbee.tui import _escape_action
+
+    event = _FakeEvent()
+    task = _FakeTask()
+    turn = {"task": task}
+    _escape_action({"i": None}, turn, lambda: True, None, event, buf=_FakeBuf("draft reply"))
+    assert task.cancelled == [1]             # normal Esc behavior unchanged

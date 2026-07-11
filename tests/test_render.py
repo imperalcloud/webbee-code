@@ -340,3 +340,45 @@ def test_user_echo_wraps_with_gutter():
     s.user_echo("please migrate the whole extension to the new backend path "
                 "and make sure nothing regresses while you are at it")
     _assert_gutter(s.console.export_text())
+
+
+# ---- control-byte sanitization of untrusted content (0.3.3) -----------------
+# Tool output / kernel-relayed text must never carry raw ESC sequences into the
+# terminal — \x1b[?1003h in a printed summary would silently flip the user's
+# terminal into any-event mouse tracking (the mouse-garbage bug's evil twin).
+
+_INJ = "ok\x1b[?1003h\x1b]0;pwned\x07 done"
+
+
+def test_note_strips_escape_sequences():
+    s = _sink()
+    s.note(_INJ)
+    out = s.console.export_text()
+    assert "\x1b[?1003h" not in out and "pwned" not in out
+    assert "ok" in out and "done" in out
+
+
+def test_tool_result_strips_escape_sequences():
+    s = _sink()
+    s.tool_start("bash", {"command": "cat file"})
+    s.tool_result("bash", True, _INJ)
+    out = s.console.export_text()
+    assert "\x1b[?1003h" not in out
+    assert "ok" in out
+
+
+def test_end_turn_strips_escape_sequences_keeps_newlines():
+    s = _sink()
+    s.begin_turn()
+    s.end_turn("line one\x1b[?1003h\n\nline two")
+    out = s.console.export_text()
+    assert "\x1b[?1003h" not in out
+    assert "line one" in out and "line two" in out
+
+
+def test_progress_and_thinking_strip_escapes():
+    s = _sink()
+    s.progress(_INJ)
+    s.thinking(_INJ)
+    out = s.console.export_text()
+    assert "\x1b[?1003h" not in out and "pwned" not in out

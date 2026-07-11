@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 
 from rich.console import Console
@@ -19,6 +20,24 @@ def _pad(renderable):
     """Indent a block renderable by the transcript gutter so its left edge
     lines up with the 2-space chrome ('  🐝 Webbee', '  13.9s · …', the ❯ bar)."""
     return Padding(renderable, (0, 0, 0, _GUTTER))
+
+
+# Untrusted content (tool output, kernel-relayed text) must never carry raw
+# escape/control bytes into the terminal: a \x1b[?1003h inside a printed tool
+# summary silently flips the terminal into any-event mouse tracking (the
+# mouse-garbage bug's evil twin); OSC can retitle/exfiltrate. Rich's Text
+# passes raw \x1b through untouched, so we strip at the sink: CSI and OSC
+# sequences whole, then every remaining C0 control byte except \n and \t.
+_CTRL = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"            # CSI (incl. private modes)
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"   # OSC (BEL/ST or unterminated)
+    r"|[\x00-\x08\x0b-\x1f\x7f]"             # other C0 + DEL (keeps \t \n)
+)
+
+
+def _clean(s) -> str:
+    """Strip escape sequences + control bytes from untrusted display text."""
+    return _CTRL.sub("", str(s or ""))
 
 _ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "✎",
          "edit_file": "🔧", "bash": "⚡"}
@@ -173,6 +192,7 @@ class RichSink:
 
     def end_turn(self, final_text: str) -> None:
         self._busy = False
+        final_text = _clean(final_text)
         if final_text:
             self.console.print()   # separation before the focus block
             self.console.print(Text("  🐝 Webbee", style=f"bold {_BEE}"))
@@ -192,14 +212,14 @@ class RichSink:
         # _pad (not a "  " prefix) so a wrapped line keeps the gutter — a bare
         # prefix indents only the first visual line and continuations hug the
         # screen edge.
-        self.console.print(_pad(Text(message, style=_BEE)))
+        self.console.print(_pad(Text(_clean(message), style=_BEE)))
         self._nudge()
 
     def user_echo(self, text: str) -> None:
         """Commit the just-sent user message as its own clearly-readable line
         with a background bar (NOT boxed like the live input) so it stands out
         as 'what I sent' in the scrollback."""
-        self.console.print(_pad(Text(" ❯ " + text + " ", style="bold white on grey30")))
+        self.console.print(_pad(Text(" ❯ " + _clean(text) + " ", style="bold white on grey30")))
         self._nudge()
 
     def clear(self) -> None:
@@ -236,11 +256,11 @@ class RichSink:
         mark = "✓" if ok else "✗"
         self.console.print(Text.assemble(
             ("  " + icon + " ", "dim"),
-            (_tool, "dim"),
-            (("  " + arg[:40]) if arg else "", "dim"),
+            (_clean(_tool), "dim"),
+            (("  " + _clean(arg)[:40]) if arg else "", "dim"),
             ("   ", ""),
             (mark + " ", "green" if ok else "red"),
-            (str(summary)[:50], "dim"),
+            (_clean(summary)[:50], "dim"),
         ))
         self._pending = ("", "")
         self._nudge()
@@ -251,8 +271,8 @@ class RichSink:
         the reply comes through the pinned box via an asyncio.Future (no
         blocking input on the event loop); otherwise fall back to the injected
         sync reader (tests / non-tty)."""
-        label = f"{app_id}·{tool}" if app_id else tool
-        sal = _salient_arg(args)
+        label = _clean(f"{app_id}·{tool}" if app_id else tool)
+        sal = _clean(_salient_arg(args))
         self.console.print(Text.assemble(("  ? approve ", "yellow"), (label, "dim"),
                                           (("  " + sal[:60]) if sal else "", "dim")))
         fut = self._arm_consent(label, sal)
@@ -324,7 +344,7 @@ class RichSink:
         def _prev(p):
             p = p or {}
             note = f"  (truncated, {p.get('total_bytes', 0)} bytes total)" if p.get("truncated") else ""
-            return (str(p.get("preview", "") or "")[:2000]) + note
+            return (_clean(p.get("preview", ""))[:2000]) + note
 
         mark = "✓" if detail.get("ok") else "✗"
         head = (f"{mark} {detail.get('app_id', '')}·{detail.get('tool', '')}  "
@@ -336,14 +356,14 @@ class RichSink:
 
     def progress(self, text: str) -> None:
         if text:
-            self.console.print(_pad(Text(text, style="dim italic")))
+            self.console.print(_pad(Text(_clean(text), style="dim italic")))
             self._nudge()
 
     def thinking(self, text: str) -> None:
         # System-driven reasoning as a distinct 💭 block — visually apart from the
         # dim `progress` line (which stays reserved for status like low-balance).
         if text:
-            self.console.print(_pad(Text("💭 " + text, style="italic medium_purple3")))
+            self.console.print(_pad(Text("💭 " + _clean(text), style="italic medium_purple3")))
             self._nudge()
 
     def plan_blocked(self, tool: str) -> None:

@@ -6,12 +6,53 @@ pinned box when the input is empty and no turn is running. Pure helpers
 (next_mode/build_toolbar) are unit-tested; the Application is TTY/headless-
 smoke verified. Grounded in prompt_toolkit 3.0.52."""
 import asyncio
+import re
 
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.render import _fmt_tokens
 
 _MODES = ("default", "plan", "autopilot")
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # braille frames — animated while a turn runs
+
+# Leaked SGR mouse-report fragments ("<35;6;42M" / "35;6;42M"): under a
+# mouse-move flood the vt100 parser splits sequences at read-chunk boundaries
+# and the printable tail lands in the input buffer as literal text (live on
+# Linux + occasionally macOS, 2026-07-12). Requires the full x;y;btn+M shape —
+# ordinary "a;b;c" text never matches (a literal "35;6;42M" the user typed
+# would be dropped too; accepted, it IS the residue shape).
+_MOUSE_RESIDUE = re.compile(r"(?:\x1b\[)?<?\d{1,4};\d{1,4};\d{1,4}[Mm]")
+
+
+def scrub_mouse_residue(text: str) -> str:
+    """PURE. Drop leaked mouse-report fragments; everything else unchanged."""
+    return _MOUSE_RESIDUE.sub("", text or "")
+
+
+def configure_mouse_modes(output) -> None:
+    """Replace prompt_toolkit's ANY-EVENT mouse tracking (?1003 — every bare
+    mouse move fires a report) with BUTTON-EVENT tracking (?1002 — reports only
+    while a button is held). Wheel scroll, clicks and drag-select all still
+    work; the bare-move flood that desyncs the parser (phantom Escape + report
+    tails typed into the input) disappears at the source. No-op for outputs
+    without write_raw (non-vt100)."""
+    if not hasattr(output, "write_raw"):
+        return
+
+    def _enable():
+        output.write_raw("\x1b[?1000h")   # clicks + wheel
+        output.write_raw("\x1b[?1002h")   # motion ONLY while a button is held
+        output.write_raw("\x1b[?1015h")   # urxvt encoding
+        output.write_raw("\x1b[?1006h")   # SGR encoding
+
+    def _disable():
+        output.write_raw("\x1b[?1002l")
+        output.write_raw("\x1b[?1003l")   # belt & braces: clear any-event too
+        output.write_raw("\x1b[?1000l")
+        output.write_raw("\x1b[?1015l")
+        output.write_raw("\x1b[?1006l")
+
+    output.enable_mouse_support = _enable
+    output.disable_mouse_support = _disable
 
 
 def next_mode(mode: str) -> str:
@@ -47,11 +88,19 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
              f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits   ·   Shift + TAB: switch mode")]
 
 
-def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event) -> None:
+def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event, buf=None) -> None:
     """Esc key binding (P5g). While a turn is running, STOP it — cancel the LOCAL
     turn task (what actually tears the turn down, same as Ctrl-C) AND ask the
-    server to stop (so it stops spending). While idle, clear the step-selection."""
+    server to stop (so it stops spending). While idle, clear the step-selection.
+
+    Phantom-Esc guard (2026-07-12): a mouse-report flood splits sequences —
+    the ESC arrives as a lone Escape KEY and the tail lands in the input
+    buffer. Residue in the buffer ⇒ this Escape is almost certainly a split
+    report, not the user: clean the buffer and KEEP the turn running."""
     if is_busy():
+        if buf is not None and _MOUSE_RESIDUE.search(buf.text or ""):
+            buf.text = scrub_mouse_residue(buf.text)
+            return
         t = turn.get("task")
         if t is not None and not t.done():
             if stop_turn is not None:
@@ -110,7 +159,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("enter")
     def _enter(event):
-        text = buf.text
+        text = scrub_mouse_residue(buf.text)   # never send leaked mouse reports
         buf.reset()
         if consent_pending():
             resolve_consent(text)              # ICNLI: relay the raw reply verbatim
@@ -161,7 +210,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("escape")
     def _step_clear(event):
-        _escape_action(sel, turn, is_busy, stop_turn, event)
+        _escape_action(sel, turn, is_busy, stop_turn, event, buf=buf)
 
     @kb.add("pageup")
     def _pgup(event):
@@ -218,6 +267,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     })
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)
+    configure_mouse_modes(app.output)   # ?1002 button-event, never ?1003 any-event
 
     async def _ticker():
         # animate the spinner + tick the elapsed clock while a turn runs

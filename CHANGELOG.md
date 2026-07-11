@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.3
+
+- Mouse-garbage / dead-keyboard fix (Linux, occasionally macOS): the dock now
+  uses button-event mouse tracking instead of any-event — bare mouse movement
+  no longer floods the terminal with reports that desynced the input parser,
+  typed `35;6;42M…` fragments into the input box and fired phantom Escape
+  presses that silently stopped the running turn. Scroll, click and
+  drag-to-copy work as before. Leftover report fragments are scrubbed from
+  the input, and a phantom Escape during a flood cleans the input instead of
+  killing the turn.
+- Untrusted text (tool output, relayed notes/summaries) is stripped of raw
+  escape/control bytes before rendering, so it can never flip terminal modes.
+
 ## 0.3.2
 
 - Wrapped lines keep their left gutter: a long note / progress / thinking /
