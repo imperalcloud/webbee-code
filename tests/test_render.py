@@ -295,3 +295,48 @@ def test_plan_blocked_prints_english_hint():
     assert "notes.delete_note" in out
     assert "shift+tab" in out.lower()
     assert not NO_CYRILLIC.search(out)
+
+
+# ---- hanging indent on wrapped chrome lines (0.3.2) ------------------------
+# A long one-line note/progress/thinking/user-echo used to wrap flush against
+# the left screen edge (the 2-space gutter lived only in the first line's
+# prefix string). Every visual line must start at the same 2-col gutter.
+
+def _narrow_sink(width=40):
+    return RichSink(console=Console(record=True, width=width, force_terminal=False),
+                    live_enabled=False, input_fn=lambda p: "", clock=lambda: 0.0)
+
+
+def _assert_gutter(out: str):
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert lines, "nothing rendered"
+    for ln in lines:
+        assert ln.startswith("  "), f"line lost the gutter: {ln!r}"
+
+
+def test_note_wraps_with_gutter():
+    s = _narrow_sink()
+    s.note("Right now we need to move the Matomo extension onto the new "
+           "backend path cleanly and rerun the whole test suite afterwards")
+    _assert_gutter(s.console.export_text())
+
+
+def test_progress_wraps_with_gutter():
+    s = _narrow_sink()
+    s.progress("switching every old analytics call over to the new prefix "
+               "without touching any business logic at all")
+    _assert_gutter(s.console.export_text())
+
+
+def test_thinking_wraps_with_gutter():
+    s = _narrow_sink()
+    s.thinking("bulk replace failed on repeated lines so a scripted targeted "
+               "replacement across the tree is faster and safer here")
+    _assert_gutter(s.console.export_text())
+
+
+def test_user_echo_wraps_with_gutter():
+    s = _narrow_sink()
+    s.user_echo("please migrate the whole extension to the new backend path "
+                "and make sure nothing regresses while you are at it")
+    _assert_gutter(s.console.export_text())

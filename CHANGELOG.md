@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Wrapped lines keep their left gutter: a long note / progress / thinking /
+  echoed-message line used to continue flush against the screen edge; every
+  visual line now aligns to the same 2-column transcript gutter.
+
 ## 0.3.1
 
 - Auto-checkpointing no longer disables itself after a single transient

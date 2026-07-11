@@ -189,15 +189,17 @@ class RichSink:
         self._nudge()
 
     def note(self, message: str) -> None:
-        self.console.print(Text("  " + message, style=_BEE))
+        # _pad (not a "  " prefix) so a wrapped line keeps the gutter — a bare
+        # prefix indents only the first visual line and continuations hug the
+        # screen edge.
+        self.console.print(_pad(Text(message, style=_BEE)))
         self._nudge()
 
     def user_echo(self, text: str) -> None:
         """Commit the just-sent user message as its own clearly-readable line
         with a background bar (NOT boxed like the live input) so it stands out
         as 'what I sent' in the scrollback."""
-        self.console.print(Text.assemble(
-            ("  ", ""), (" ❯ " + text + " ", "bold white on grey30")))
+        self.console.print(_pad(Text(" ❯ " + text + " ", style="bold white on grey30")))
         self._nudge()
 
     def clear(self) -> None:
@@ -334,14 +336,14 @@ class RichSink:
 
     def progress(self, text: str) -> None:
         if text:
-            self.console.print(Text("  " + text, style="dim italic"))
+            self.console.print(_pad(Text(text, style="dim italic")))
             self._nudge()
 
     def thinking(self, text: str) -> None:
         # System-driven reasoning as a distinct 💭 block — visually apart from the
         # dim `progress` line (which stays reserved for status like low-balance).
         if text:
-            self.console.print(Text("  💭 " + text, style="italic medium_purple3"))
+            self.console.print(_pad(Text("💭 " + text, style="italic medium_purple3")))
             self._nudge()
 
     def plan_blocked(self, tool: str) -> None:
