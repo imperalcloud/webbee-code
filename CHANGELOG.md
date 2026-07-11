@@ -1,9 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+- **The agent plans in the open.** A live todo checklist (📋) rendered from the
+  kernel's todo facts — you see what Webbee intends and how far it's got.
+- **Precise editing.** `edit_file` requires a unique match (or an explicit
+  `replace_all`), and a new atomic `multi_edit` applies coordinated changes
+  across files all-or-nothing.
+- **The time machine.** Every change auto-checkpoints into a shadow git — your
+  own `.git` is never touched; `/checkpoints` lists them and `/rollback`
+  restores, and the agent can checkpoint/diff/rollback too. A wrong step is
+  now undoable.
+
 ## 0.2.3
 
-- Live todo checklist line (📋) rendered from the kernel's todo facts; precise edit_file (unique match + replace_all) and atomic multi_edit executors.
-- The time machine: every change auto-checkpoints into a shadow git (your own .git is never touched); /checkpoints lists them, /rollback restores — and the agent can checkpoint/diff/rollback too. A wrong step is now undoable.
 - **Readable big numbers.** Token and credit counts in the toolbar now scale
   (`1.5M tok`, `2M credits`) instead of an awkward `1500.0k`.
 - **Esc really stops a turn now.** Previously only Ctrl-C worked; Esc now cancels
