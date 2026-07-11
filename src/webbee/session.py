@@ -142,7 +142,8 @@ class AgentSession:
     P1: one POST per turn (server reloads the shared webbee-terminal thread,
     so context carries across turns). Persistent signal-based sessions are P3."""
 
-    def __init__(self, cfg, token_provider, workspace_root: str, mode: str = "default", intel=None) -> None:
+    def __init__(self, cfg, token_provider, workspace_root: str, mode: str = "default", intel=None,
+                 shadow=None) -> None:
         self.cfg = cfg
         self.token_provider = token_provider
         self.workspace_root = workspace_root
@@ -151,6 +152,7 @@ class AgentSession:
         self.steps: list = []
         self._task_id: str = ""
         self._intel = intel  # IntelService, or None (base install / boot failure)
+        self._shadow = shadow  # ShadowGit, or None (git unavailable / boot failure)
 
     async def _headers(self) -> dict:
         token = await self.token_provider()
@@ -173,7 +175,8 @@ class AgentSession:
             verify_cmd = await asyncio.to_thread(detect_verify_cmd, root)
             coding_context = {**coding_context, "verify_cmd": verify_cmd}
         imperal_id = await ImperalClient(self.cfg, self.token_provider).whoami()
-        executor = LocalToolExecutor(self.workspace_root, indexer=self._intel)
+        executor = LocalToolExecutor(self.workspace_root, indexer=self._intel,
+                                     shadow=self._shadow)
 
         body = {"user_id": imperal_id, "task": task, "coding_context": coding_context}
         if marathon:

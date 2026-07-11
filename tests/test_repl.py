@@ -320,7 +320,7 @@ class _SpyAgent:
     agent_factory closes over, without needing a real IntelService/network."""
     last_intel = "unset"
 
-    def __init__(self, cfg, tp, ws, mode, intel=None):
+    def __init__(self, cfg, tp, ws, mode, intel=None, shadow=None):
         type(self).last_intel = intel
         self.mode = mode
         self.steps = []

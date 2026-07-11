@@ -11,6 +11,8 @@ _HELP = """Commands:
   /cost  (=/usage)   tokens + credits this session
   /status            cwd · git · surface · tokens · version
   /steps [N]         last turn's steps; N expands one (also: Up/Down + Enter)
+  /checkpoints       the reversibility time machine — list workspace checkpoints
+  /rollback <ref>    restore the workspace to a checkpoint (id, cp-N or N)
   /sessions          list active sessions (this + other devices)
   /sessions revoke <#>   revoke a session by its number
   /logout-others     sign out every session except this one
@@ -79,6 +81,10 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         if args:
             return SlashResult(handled=True, action="step_detail", arg=args[0])
         return SlashResult(handled=True, action="steps")
+    if cmd == "/checkpoints":
+        return SlashResult(handled=True, action="checkpoints")
+    if cmd == "/rollback":
+        return SlashResult(handled=True, action="rollback", arg=" ".join(args))
     if cmd == "/mode":
         if not args:
             return SlashResult(handled=True, action="mode", new_mode=None,

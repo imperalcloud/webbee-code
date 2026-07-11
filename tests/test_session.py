@@ -127,7 +127,7 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
     executor_calls = []
 
     class _RecExecutor:
-        def __init__(self, root, indexer=None):
+        def __init__(self, root, indexer=None, shadow=None):
             pass
 
         def run(self, tool, args):

@@ -115,3 +115,28 @@ def test_mode_and_unknown_english():
     assert not NO_CYRILLIC.search(dispatch("/mode", _ctx()).message)
     assert not NO_CYRILLIC.search(dispatch("/mode turbo", _ctx()).message)
     assert not NO_CYRILLIC.search(dispatch("/frobnicate", _ctx()).message)
+
+
+def _anyctx():
+    from webbee.commands import CommandContext
+    return CommandContext(mode="default", workspace="/w", version="x", surface="terminal",
+                          logged_in=True, session_tokens=0, session_credits=0,
+                          git_branch="main")
+
+
+def test_checkpoints_command_dispatches():
+    from webbee.commands import dispatch
+    res = dispatch("/checkpoints", _anyctx())
+    assert res.handled and res.action == "checkpoints"
+
+
+def test_rollback_command_carries_ref():
+    from webbee.commands import dispatch
+    res = dispatch("/rollback cp-3", _anyctx())
+    assert res.handled and res.action == "rollback" and res.arg == "cp-3"
+
+
+def test_help_mentions_the_time_machine():
+    from webbee.commands import dispatch
+    res = dispatch("/help", _anyctx())
+    assert "/checkpoints" in res.message and "/rollback" in res.message

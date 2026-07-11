@@ -108,7 +108,7 @@ def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X", frames=Non
     monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
 
     class _RecExecutor:
-        def __init__(self, root, indexer=None): ...
+        def __init__(self, root, indexer=None, shadow=None): ...
         def run(self, tool, args): return {"ok": True, "content": "ran"}
 
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
@@ -256,7 +256,7 @@ def test_normal_run_omits_marathon_fields(monkeypatch, tmp_path):
     monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
 
     class _RecExecutor:
-        def __init__(self, root, indexer=None): ...
+        def __init__(self, root, indexer=None, shadow=None): ...
         def run(self, tool, args): return {"ok": True, "content": "ran"}
 
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)

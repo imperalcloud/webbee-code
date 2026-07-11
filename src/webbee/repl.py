@@ -80,6 +80,17 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
     return text
 
 
+def _default_shadow_factory(cfg, workspace: str):
+    """The reversibility shadow git. Guarded like intel: any failure (no git
+    binary, cache not writable) degrades to None -- coding still works, just
+    without the time machine."""
+    from webbee.checkpoints import ShadowGit
+    from webbee.repo import compute_repo_key, find_repo_root
+    root = find_repo_root(workspace)
+    sg = ShadowGit(root, compute_repo_key(root), cache_dir=cfg.cache_dir)
+    return sg if sg.ensure() else None
+
+
 def _default_intel_factory(cfg, workspace: str):
     """Lazy/guarded -- a base install (no tree-sitter/watchfiles extra) must
     never fail to import here; `_boot` wraps the whole intel boot in
@@ -103,7 +114,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         from imperal_mcp import auth as _auth
         auth = _auth
     if agent_factory is None:
-        agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m, intel=intel)  # noqa: E731
+        agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m, intel=intel, shadow=shadow)  # noqa: E731
     if account_fetcher is None:
         from webbee.account import fetch_account as account_fetcher
     if sessions_client is None:
@@ -121,6 +132,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     _sink = None         # assigned by _boot
     agent = None         # assigned by _boot
     intel = None         # assigned by _boot -- IntelService, or None (off/base-install/boot failure)
+    shadow = None        # assigned by _boot -- ShadowGit, or None (git unavailable / boot failure)
     watcher_task = None  # assigned by _boot -- background watchfiles task, cancelled on exit
 
     def _cycle() -> None:
@@ -211,6 +223,19 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 else:
                     _sink.note("Detail unavailable (expired or not recorded).")
                 return "continue"
+            if res.action == "checkpoints":
+                _sink.note(shadow.describe() if shadow else
+                           "Reversibility is off (git unavailable).")
+                return "continue"
+            if res.action == "rollback":
+                if shadow is None:
+                    _sink.note("Reversibility is off (git unavailable).")
+                elif not res.arg:
+                    _sink.note("Usage: /rollback <id|cp-N|N>  (see /checkpoints)")
+                else:
+                    _r = await asyncio.to_thread(shadow.rollback, res.arg)
+                    _sink.note(str(_r.get("content", "")))
+                return "continue"
             if res.action == "clear":
                 _sink.clear()
                 _sink.note(res.message)
@@ -238,7 +263,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         return "continue"
 
     async def _boot(s) -> None:
-        nonlocal _sink, agent, intel, watcher_task
+        nonlocal _sink, agent, intel, watcher_task, shadow
         _sink = s
         # Cache git branch OFF the event loop (subprocess.run blocks it). Only
         # /status reads it; recomputing it per input line froze the dock.
@@ -260,6 +285,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             except Exception:
                 intel = None
                 watcher_task = None
+        # Whole-mind P4: the reversibility shadow (never the user's VCS);
+        # guarded -- boot must not fail over the time machine.
+        try:
+            shadow = await asyncio.to_thread(_default_shadow_factory, cfg, workspace)
+        except Exception:
+            shadow = None
         agent = agent_factory(cfg, token_provider, workspace, state["mode"])
 
     if use_dock:
