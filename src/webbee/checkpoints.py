@@ -16,6 +16,26 @@ _GIT_CFG = ["-c", "user.name=webbee", "-c", "user.email=webbee@imperal.io",
             "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
 
 
+def shadow_key(workspace_root: str) -> str:
+    """Shadow identity is the WORKTREE, never the remote: clones and linked
+    git-worktrees of one origin must each get their OWN time machine
+    (final-review F3 -- a shared shadow rolls checkout B onto checkout A's
+    snapshot). sha256 of the realpath, 12 hex chars (intel keeps its own
+    content-addressed repo_key; this one is deliberately different)."""
+    import hashlib
+    real = os.path.realpath(workspace_root)
+    return hashlib.sha256(real.encode("utf-8")).hexdigest()[:12]
+
+
+def _scrubbed_env() -> dict:
+    """A GIT_*-free copy of the environment (final-review F2): git exports
+    GIT_INDEX_FILE / GIT_DIR / GIT_OBJECT_DIRECTORY / GIT_COMMON_DIR into hook
+    and rebase contexts -- inherited, they silently redirect SHADOW operations
+    into the USER's repository. Explicit --git-dir/--work-tree flags override
+    only two of them; scrub them all."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 class ShadowGit:
     _DIFF_CAP = 20000
 
@@ -24,19 +44,31 @@ class ShadowGit:
         base = cache_dir or os.path.expanduser("~/.cache/webbee")
         self.git_dir = os.path.join(base, "shadow", repo_key)
         self.available = False
+        self.auto_ok = True   # latched False after a failed AUTO snapshot (F8)
 
     def _git(self, *args: str) -> "subprocess.CompletedProcess":
         cmd = (["git", "--git-dir", self.git_dir, "--work-tree", self.root]
                + _GIT_CFG + list(args))
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                              env=_scrubbed_env())
 
     def ensure(self) -> bool:
-        """Create/open the shadow. Returns availability; never raises."""
+        """Create/open the shadow. Returns availability; never raises.
+        Refuses a workspace that IS a bare git repository (final-review F9:
+        tracking its refs/objects and resetting them would rewind the USER's
+        VCS -- the one thing the shadow must never do)."""
         try:
-            os.makedirs(self.git_dir, exist_ok=True)
+            if (os.path.exists(os.path.join(self.root, "HEAD"))
+                    and os.path.isdir(os.path.join(self.root, "objects"))
+                    and os.path.isdir(os.path.join(self.root, "refs"))):
+                self.available = False
+                return False
+            os.makedirs(self.git_dir, mode=0o700, exist_ok=True)
+            os.chmod(self.git_dir, 0o700)
             if not os.path.exists(os.path.join(self.git_dir, "HEAD")):
-                r = subprocess.run(["git", "init", "--bare", self.git_dir],
-                                   capture_output=True, text=True, timeout=60)
+                r = subprocess.run(["git"] + _GIT_CFG + ["init", "--bare", self.git_dir],
+                                   capture_output=True, text=True, timeout=60,
+                                   env=_scrubbed_env())
                 if r.returncode != 0:
                     self.available = False
                     return False
@@ -81,7 +113,8 @@ class ShadowGit:
         if not self.available:
             return None
         try:
-            self._git("add", "-A")
+            if self._git("add", "-A").returncode != 0:
+                return None          # a partial add must never masquerade as a snapshot
             dirty = self._git("status", "--porcelain").stdout.strip()
             head = self._git("rev-parse", "--short", "HEAD")
             if not dirty and head.returncode == 0 and not force:
@@ -152,6 +185,14 @@ class ShadowGit:
                     f"unknown checkpoint '{to}' -- use an id, cp-N or N "
                     f"(see the checkpoint list)"}
         undo = self.checkpoint("pre-rollback", force=True)
+        if not undo:
+            # The safety snapshot is MANDATORY: without it a reset would
+            # destroy the current state unrecoverably (final-review F1).
+            return {"ok": False, "content":
+                    "rollback refused: the pre-rollback safety snapshot could not "
+                    "be created (shadow git error), so rolling back would destroy "
+                    "the current state unrecoverably. Fix the shadow (disk space / "
+                    "permissions) or copy your changes out first."}
         r = self._git("reset", "--hard", target)
         if r.returncode != 0:
             return {"ok": False, "content": f"rollback failed: {r.stderr.strip()[:500]}"}

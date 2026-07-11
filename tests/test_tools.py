@@ -201,6 +201,7 @@ class _FakeShadow:
     def __init__(self):
         self.labels = []
         self.rolled = []
+        self.auto_ok = True
     def checkpoint(self, label=""):
         self.labels.append(label)
         return {"id": "abc1234", "n": len(self.labels), "label": label, "changed": True}
@@ -262,3 +263,23 @@ def test_reversibility_tools_honest_without_shadow(tmp_path):
     for tool, args in (("checkpoint", {}), ("diff", {}), ("rollback", {"checkpoint": "1"})):
         r = ex.run(tool, args)
         assert not r["ok"] and "unavailable" in r["content"]
+
+
+def test_auto_checkpoint_latches_off_after_failure(tmp_path):
+    from webbee.tools import LocalToolExecutor
+
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+            self.auto_ok = True
+        def checkpoint(self, label=""):
+            self.calls += 1
+            return None                      # simulated add/commit failure
+
+    sh = _Flaky()
+    ex = LocalToolExecutor(str(tmp_path), shadow=sh)
+    ex.run("write_file", {"path": "a.txt", "content": "1"})
+    ex.run("write_file", {"path": "b.txt", "content": "2"})
+    ex.run("write_file", {"path": "c.txt", "content": "3"})
+    assert sh.calls == 1                     # latched after the first failure
+    assert sh.auto_ok is False

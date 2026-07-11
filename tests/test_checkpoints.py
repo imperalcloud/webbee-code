@@ -185,3 +185,67 @@ def test_acceptance_wrecked_project_recovers_in_one_rollback(tmp_path):
     # And the rollback itself is undoable -- nothing was destroyed.
     rows = sg.list_checkpoints()
     assert rows[0]["label"] == "pre-rollback"
+
+
+def test_rollback_refuses_without_safety_snapshot(tmp_path, monkeypatch):
+    sg, root = _sg(tmp_path)
+    _write(root, "a.txt", "v1")
+    cp = sg.checkpoint("v1")
+    _write(root, "a.txt", "v2-PRECIOUS-UNCOMMITTED")
+    monkeypatch.setattr(sg, "checkpoint", lambda label="", force=False: None)
+    r = sg.rollback(str(cp["n"]))
+    assert not r["ok"] and "refused" in r["content"]
+    assert (root / "a.txt").read_text(encoding="utf-8") == "v2-PRECIOUS-UNCOMMITTED"
+
+
+def test_git_env_leakage_is_scrubbed(tmp_path, monkeypatch):
+    import subprocess as sp
+    user = tmp_path / "userrepo"
+    user.mkdir()
+    sp.run(["git", "init", str(user)], capture_output=True, check=True)
+    (user / "u.txt").write_text("user", encoding="utf-8")
+    # A hook/rebase context exports these -- the shadow must ignore them.
+    monkeypatch.setenv("GIT_INDEX_FILE", str(user / ".git" / "index"))
+    monkeypatch.setenv("GIT_DIR", str(user / ".git"))
+    sg = ShadowGit(str(user), "rk_leak", cache_dir=str(tmp_path / "cache"))
+    assert sg.ensure()
+    (user / "agent.txt").write_text("agent file", encoding="utf-8")
+    assert sg.checkpoint("snap")["changed"]
+    st = sp.run(["git", "-C", str(user), "status", "--porcelain"],
+                capture_output=True, text=True,
+                env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+    assert "A " not in st.stdout                       # nothing staged in the USER index
+
+
+def test_shadow_key_is_per_worktree(tmp_path):
+    from webbee.checkpoints import shadow_key
+    a = tmp_path / "clone-a"; a.mkdir()
+    b = tmp_path / "clone-b"; b.mkdir()
+    assert shadow_key(str(a)) != shadow_key(str(b))    # same remote, separate machines
+    assert shadow_key(str(a)) == shadow_key(str(a))
+
+
+def test_bare_repo_workspace_is_refused(tmp_path):
+    import subprocess as sp
+    bare = tmp_path / "bare"
+    sp.run(["git", "init", "--bare", str(bare)], capture_output=True, check=True)
+    sg = ShadowGit(str(bare), "rk_bare", cache_dir=str(tmp_path / "cache"))
+    assert sg.ensure() is False and sg.available is False
+
+
+def test_failed_add_never_fakes_a_checkpoint(tmp_path, monkeypatch):
+    sg, root = _sg(tmp_path)
+    _write(root, "a.txt", "x")
+    real_git = sg._git
+    def _fake(*args):
+        if args and args[0] == "add":
+            class _R: returncode = 1; stdout = ""; stderr = "add failed"
+            return _R()
+        return real_git(*args)
+    monkeypatch.setattr(sg, "_git", _fake)
+    assert sg.checkpoint("x") is None
+
+
+def test_shadow_dir_is_private(tmp_path):
+    sg, _root = _sg(tmp_path)
+    assert (os.stat(sg.git_dir).st_mode & 0o777) == 0o700

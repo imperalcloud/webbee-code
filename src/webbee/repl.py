@@ -84,10 +84,10 @@ def _default_shadow_factory(cfg, workspace: str):
     """The reversibility shadow git. Guarded like intel: any failure (no git
     binary, cache not writable) degrades to None -- coding still works, just
     without the time machine."""
-    from webbee.checkpoints import ShadowGit
-    from webbee.repo import compute_repo_key, find_repo_root
+    from webbee.checkpoints import ShadowGit, shadow_key
+    from webbee.repo import find_repo_root
     root = find_repo_root(workspace)
-    sg = ShadowGit(root, compute_repo_key(root), cache_dir=cfg.cache_dir)
+    sg = ShadowGit(root, shadow_key(root), cache_dir=cfg.cache_dir)
     return sg if sg.ensure() else None
 
 
@@ -224,8 +224,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     _sink.note("Detail unavailable (expired or not recorded).")
                 return "continue"
             if res.action == "checkpoints":
-                _sink.note(shadow.describe() if shadow else
-                           "Reversibility is off (git unavailable).")
+                if shadow is None:
+                    _sink.note("Reversibility is off (git unavailable).")
+                else:
+                    _sink.note(await asyncio.to_thread(shadow.describe))
                 return "continue"
             if res.action == "rollback":
                 if shadow is None:
