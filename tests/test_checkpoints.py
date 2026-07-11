@@ -148,3 +148,40 @@ def test_no_git_binary_fails_soft(tmp_path, monkeypatch):
     assert sg.checkpoint("x") is None
     assert not sg.rollback("1")["ok"]
     assert "unavailable" in sg.diff()
+
+
+def test_acceptance_wrecked_project_recovers_in_one_rollback(tmp_path):
+    """Spec §3.4 acceptance: 'a wrecked-project scenario is recoverable in one
+    rollback'. The agent (via real tools + real shadow) builds a project,
+    then wrecks it -- overwrite, delete, garbage -- and ONE rollback restores
+    every checkpointed byte. The nagania answer: not a jail, a time machine."""
+    from webbee.tools import LocalToolExecutor
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    sg = ShadowGit(str(root), "rk_acc", cache_dir=str(tmp_path / "cache"))
+    assert sg.ensure()
+    ex = LocalToolExecutor(str(root), shadow=sg)
+
+    ex.run("write_file", {"path": "bot/main.py", "content": "def start():\n    return 'ok'\n"})
+    ex.run("write_file", {"path": "bot/config.py", "content": "TOKEN = 'placeholder'\n"})
+    ex.run("write_file", {"path": "README.md", "content": "# bot\n"})
+    good = sg.checkpoint("good state")
+    assert good and good["changed"]
+
+    # The wreck: overwrite, delete, scatter garbage (each write auto-checkpoints).
+    ex.run("write_file", {"path": "bot/main.py", "content": "TRASHED\n"})
+    ex.run("bash", {"command": "rm bot/config.py"})
+    ex.run("write_file", {"path": "bot/junk1.py", "content": "garbage\n"})
+    ex.run("multi_edit", {"edits": [
+        {"path": "README.md", "old": "# bot", "new": "# WRECKED"}]})
+
+    r = ex.run("rollback", {"checkpoint": str(good["n"])})   # ONE rollback
+    assert r["ok"], r
+    assert (root / "bot/main.py").read_text(encoding="utf-8") == "def start():\n    return 'ok'\n"
+    assert (root / "bot/config.py").read_text(encoding="utf-8") == "TOKEN = 'placeholder'\n"
+    assert (root / "README.md").read_text(encoding="utf-8") == "# bot\n"
+    assert not (root / "bot/junk1.py").exists()              # the wreck's garbage is gone too
+    # And the rollback itself is undoable -- nothing was destroyed.
+    rows = sg.list_checkpoints()
+    assert rows[0]["label"] == "pre-rollback"
