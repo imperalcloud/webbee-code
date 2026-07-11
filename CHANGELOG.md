@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Auto-checkpointing no longer disables itself after a single transient
+  shadow-git error — it only pauses after repeated failures, and
+  `/checkpoints` shows when it's paused.
+
 ## 0.3.0
 
 - **The agent plans in the open.** A live todo checklist (📋) rendered from the

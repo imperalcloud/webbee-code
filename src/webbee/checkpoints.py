@@ -44,7 +44,8 @@ class ShadowGit:
         base = cache_dir or os.path.expanduser("~/.cache/webbee")
         self.git_dir = os.path.join(base, "shadow", repo_key)
         self.available = False
-        self.auto_ok = True   # latched False after a failed AUTO snapshot (F8)
+        self.auto_ok = True        # auto-checkpointing enabled (F8 latch below)
+        self._auto_fail_streak = 0  # consecutive failed AUTO snapshots
 
     def _git(self, *args: str) -> "subprocess.CompletedProcess":
         cmd = (["git", "--git-dir", self.git_dir, "--work-tree", self.root]
@@ -202,12 +203,32 @@ class ShadowGit:
                  f"was saved first as checkpoint cp-{(undo or {}).get('n', '?')} "
                  f"({(undo or {}).get('id', '?')}), so this rollback is itself undoable.")}
 
+    _AUTO_FAIL_LATCH = 3   # consecutive AUTO failures before pausing auto-checkpointing
+
+    def note_auto_result(self, ok: bool) -> None:
+        """Record an AUTO (pre-write) snapshot outcome. A single transient
+        failure must NOT disable the session's time machine (final-review F8):
+        latch auto-checkpointing OFF only after _AUTO_FAIL_LATCH CONSECUTIVE
+        failures; any success resets the streak and re-enables it."""
+        if ok:
+            self._auto_fail_streak = 0
+            self.auto_ok = True
+        else:
+            self._auto_fail_streak += 1
+            if self._auto_fail_streak >= self._AUTO_FAIL_LATCH:
+                self.auto_ok = False
+
     def describe(self) -> str:
         """One printable block for the /checkpoints command."""
         if not self.available:
             return "Reversibility is off (git unavailable)."
         rows = self.list_checkpoints(limit=10)
         if not rows:
-            return "No checkpoints yet."
-        lines = [f"cp-{r['n']}  {r['id']}  {r['when']:>16}  {r['label']}" for r in rows]
-        return "Checkpoints (newest first) — /rollback <id|cp-N|N>:\n" + "\n".join(lines)
+            body = "No checkpoints yet."
+        else:
+            lines = [f"cp-{r['n']}  {r['id']}  {r['when']:>16}  {r['label']}" for r in rows]
+            body = "Checkpoints (newest first) — /rollback <id|cp-N|N>:\n" + "\n".join(lines)
+        if not self.auto_ok:
+            body = ("⚠ Auto-checkpointing is paused after repeated shadow errors — "
+                     "manual /checkpoint + /rollback still work.\n") + body
+        return body

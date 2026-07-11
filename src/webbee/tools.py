@@ -36,16 +36,20 @@ class LocalToolExecutor:
             args = {}
         if (tool in _WRITE_TIER and self.shadow is not None
                 and getattr(self.shadow, "auto_ok", True)):
-            # The time machine snapshots BEFORE every mutation -- and must
-            # never block or fail the actual work. One failed AUTO snapshot
-            # latches auto-checkpointing OFF for this session (final-review
-            # F8: a huge un-ignored tree would otherwise re-stall every write
-            # tool); manual checkpoint/rollback still try.
+            # The time machine snapshots BEFORE every mutation -- and must never
+            # block or fail the actual work. A SINGLE transient failure must not
+            # disable the session (final-review F8): note_auto_result latches
+            # auto-checkpointing OFF only after several CONSECUTIVE failures; a
+            # success re-enables it. Manual checkpoint/rollback always try.
             try:
-                if self.shadow.checkpoint(f"pre:{tool}") is None:
-                    self.shadow.auto_ok = False
+                _cp = self.shadow.checkpoint(f"pre:{tool}")
+                _note = getattr(self.shadow, "note_auto_result", None)
+                if _note is not None:
+                    _note(_cp is not None)
             except Exception:
-                self.shadow.auto_ok = False
+                _note = getattr(self.shadow, "note_auto_result", None)
+                if _note is not None:
+                    _note(False)
         try:
             fn = getattr(self, f"_t_{tool}", None)
             if fn is None:

@@ -249,3 +249,30 @@ def test_failed_add_never_fakes_a_checkpoint(tmp_path, monkeypatch):
 def test_shadow_dir_is_private(tmp_path):
     sg, _root = _sg(tmp_path)
     assert (os.stat(sg.git_dir).st_mode & 0o777) == 0o700
+
+
+def test_auto_latch_survives_a_single_transient_failure(tmp_path):
+    sg, _root = _sg(tmp_path)
+    sg.note_auto_result(False)          # one transient miss
+    assert sg.auto_ok is True           # NOT disabled on a single failure
+    sg.note_auto_result(True)           # a success clears the streak
+    assert sg.auto_ok is True and sg._auto_fail_streak == 0
+
+
+def test_auto_latch_trips_after_consecutive_failures(tmp_path):
+    sg, _root = _sg(tmp_path)
+    for _ in range(sg._AUTO_FAIL_LATCH):
+        sg.note_auto_result(False)
+    assert sg.auto_ok is False          # latched after N consecutive
+    sg.note_auto_result(True)           # recovery re-enables
+    assert sg.auto_ok is True
+
+
+def test_describe_surfaces_paused_autocheckpoint(tmp_path):
+    sg, root = _sg(tmp_path)
+    _write(root, "a.txt", "x"); sg.checkpoint("c1")
+    for _ in range(sg._AUTO_FAIL_LATCH):
+        sg.note_auto_result(False)
+    out = sg.describe()
+    assert out.startswith("⚠ Auto-checkpointing is paused")
+    assert "cp-1" in out                # the list still follows the warning

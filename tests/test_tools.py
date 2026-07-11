@@ -205,6 +205,8 @@ class _FakeShadow:
     def checkpoint(self, label=""):
         self.labels.append(label)
         return {"id": "abc1234", "n": len(self.labels), "label": label, "changed": True}
+    def note_auto_result(self, ok):
+        pass
     def diff(self, since=""):
         return f"DIFF since={since or 'HEAD'}"
     def rollback(self, to):
@@ -265,21 +267,43 @@ def test_reversibility_tools_honest_without_shadow(tmp_path):
         assert not r["ok"] and "unavailable" in r["content"]
 
 
-def test_auto_checkpoint_latches_off_after_failure(tmp_path):
+def test_auto_checkpoint_latches_off_after_consecutive_failures(tmp_path):
+    # Adapted from the P4 latch test (final-review F8): a SINGLE failed AUTO
+    # snapshot must no longer latch auto-checkpointing off; it now takes
+    # _AUTO_FAIL_LATCH CONSECUTIVE failures, driven through the real
+    # ShadowGit.note_auto_result via the executor.
     from webbee.tools import LocalToolExecutor
+    from webbee.checkpoints import ShadowGit
 
-    class _Flaky:
-        def __init__(self):
-            self.calls = 0
-            self.auto_ok = True
-        def checkpoint(self, label=""):
-            self.calls += 1
-            return None                      # simulated add/commit failure
+    sg = ShadowGit(str(tmp_path), "rk_f8_latch", cache_dir=str(tmp_path / "c3"))
+    assert sg.ensure()
+    calls = {"n": 0}
+    def _always_fails(label=""):
+        calls["n"] += 1
+        return None                          # every AUTO snapshot fails
+    sg.checkpoint = _always_fails
+    ex = LocalToolExecutor(str(tmp_path), shadow=sg)
 
-    sh = _Flaky()
-    ex = LocalToolExecutor(str(tmp_path), shadow=sh)
-    ex.run("write_file", {"path": "a.txt", "content": "1"})
-    ex.run("write_file", {"path": "b.txt", "content": "2"})
-    ex.run("write_file", {"path": "c.txt", "content": "3"})
-    assert sh.calls == 1                     # latched after the first failure
-    assert sh.auto_ok is False
+    for i in range(sg._AUTO_FAIL_LATCH - 1):
+        ex.run("write_file", {"path": f"f{i}.txt", "content": str(i)})
+        assert sg.auto_ok is True             # still enabled before the Nth failure
+
+    ex.run("write_file", {"path": "final.txt", "content": "x"})
+    assert calls["n"] == sg._AUTO_FAIL_LATCH  # latched only after N consecutive failures
+    assert sg.auto_ok is False
+
+
+def test_executor_single_transient_does_not_latch(tmp_path):
+    from webbee.tools import LocalToolExecutor
+    from webbee.checkpoints import ShadowGit
+    sg = ShadowGit(str(tmp_path), "rk_f8", cache_dir=str(tmp_path / "c"))
+    assert sg.ensure()
+    calls = {"n": 0}
+    def _flaky(label=""):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else {"id": "x", "n": calls["n"], "label": label, "changed": True}
+    sg.checkpoint = _flaky
+    ex = LocalToolExecutor(str(tmp_path), shadow=sg)
+    ex.run("write_file", {"path": "a.txt", "content": "1"})   # transient miss
+    ex.run("write_file", {"path": "b.txt", "content": "2"})   # success -> streak reset
+    assert sg.auto_ok is True                                  # still enabled
