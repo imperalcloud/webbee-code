@@ -101,7 +101,8 @@ def _run(**kw):
                          read_line=kw.pop("read_line"), auth=kw.pop("auth", FakeAuth()),
                          account_fetcher=kw.pop("account_fetcher", _fake_account_fetcher),
                          sessions_client=kw.pop("sessions_client", FakeSessions()),
-                         intel_factory=kw.pop("intel_factory", lambda cfg, ws: _NoopIntel())))
+                         intel_factory=kw.pop("intel_factory", lambda cfg, ws: _NoopIntel()),
+                         shadow_factory=kw.pop("shadow_factory", lambda cfg, ws: None)))
     return sink, agent
 
 
@@ -355,7 +356,7 @@ def test_boot_injects_intel_service_into_agent(monkeypatch):
         cfg, "default", sink=FakeSink(), read_line=_lines("/exit"),
         agent_factory=None, intel_factory=intel_factory,
         auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
-        sessions_client=FakeSessions(),
+        sessions_client=FakeSessions(), shadow_factory=lambda cfg, ws: None,
     ))
     assert _SpyAgent.last_intel is fake
     assert fake.built is True
@@ -377,7 +378,7 @@ def test_boot_survives_intel_import_failure_base_install(monkeypatch):
         cfg, "default", sink=sink, read_line=_lines("/exit"),
         agent_factory=None, intel_factory=broken_intel_factory,
         auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
-        sessions_client=FakeSessions(),
+        sessions_client=FakeSessions(), shadow_factory=lambda cfg, ws: None,
     ))
     assert _SpyAgent.last_intel is None
     assert sink.turns == []  # boot completed cleanly, no crash mid-boot
@@ -397,7 +398,7 @@ def test_boot_skips_intel_when_disabled_in_config(monkeypatch):
         cfg, "default", sink=FakeSink(), read_line=_lines("/exit"),
         agent_factory=None, intel_factory=intel_factory,
         auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
-        sessions_client=FakeSessions(),
+        sessions_client=FakeSessions(), shadow_factory=lambda cfg, ws: None,
     ))
     assert called == []                    # intel_factory never invoked
     assert _SpyAgent.last_intel is None
@@ -435,7 +436,7 @@ def test_watcher_started_at_intel_root_not_workspace(monkeypatch, tmp_path):
         cfg, "default", sink=FakeSink(), read_line=_lines("/exit"),
         agent_factory=None, intel_factory=lambda cfg, ws: _RootedIntel(),
         auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
-        sessions_client=FakeSessions(),
+        sessions_client=FakeSessions(), shadow_factory=lambda cfg, ws: None,
     ))
     assert captured.get("root") == str(tmp_path)
     assert captured.get("root") != os.getcwd()

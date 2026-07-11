@@ -104,7 +104,7 @@ def _default_intel_factory(cfg, workspace: str):
 
 async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None, read_line=input,
                    agent_factory=None, auth=None, account_fetcher=None,
-                   sessions_client=None, intel_factory=None) -> None:
+                   sessions_client=None, intel_factory=None, shadow_factory=None) -> None:
     """Interactive coding REPL. Production (a real tty, no injected sink) runs
     the persistent prompt_toolkit dock (`tui.run_session`): the bordered input
     box is pinned at the bottom, turn output scrolls above it (patch_stdout →
@@ -288,7 +288,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         # Whole-mind P4: the reversibility shadow (never the user's VCS);
         # guarded -- boot must not fail over the time machine.
         try:
-            shadow = await asyncio.to_thread(_default_shadow_factory, cfg, workspace)
+            shadow = await asyncio.to_thread(shadow_factory or _default_shadow_factory, cfg, workspace)
         except Exception:
             shadow = None
         agent = agent_factory(cfg, token_provider, workspace, state["mode"])
