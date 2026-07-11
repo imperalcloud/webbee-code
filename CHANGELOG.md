@@ -2,6 +2,7 @@
 
 ## 0.2.3
 
+- Live todo checklist line (📋) rendered from the kernel's todo facts; precise edit_file (unique match + replace_all) and atomic multi_edit executors.
 - **Readable big numbers.** Token and credit counts in the toolbar now scale
   (`1.5M tok`, `2M credits`) instead of an awkward `1500.0k`.
 - **Esc really stops a turn now.** Previously only Ctrl-C worked; Esc now cancels

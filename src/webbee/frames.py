@@ -129,7 +129,7 @@ def handle_action_frame(frame: dict, sink, started: set, finished: set, steps: l
 # composes ONE human-readable line per fact (I-FRAMES-FACTS-ONLY). Defensive:
 # unknown / missing fields degrade to a bare label, never crash.
 
-_MARATHON_FACT_TYPES = ("marathon_plan", "milestone", "marathon_paused")
+_MARATHON_FACT_TYPES = ("marathon_plan", "milestone", "marathon_paused", "todo")
 
 
 def marathon_note(frame: dict) -> str:
@@ -154,4 +154,12 @@ def marathon_note(frame: dict) -> str:
     if ftype == "marathon_paused":
         reason = str(frame.get("reason") or frame.get("summary") or "").strip()
         return f"⏸ Marathon paused: {reason}" if reason else "⏸ Marathon paused"
+    if ftype == "todo":
+        todos = frame.get("todos") if isinstance(frame.get("todos"), list) else []
+        total = frame.get("total", len(todos))
+        done = frame.get("completed", 0)
+        current = next((str(t.get("content", "")) for t in todos
+                        if isinstance(t, dict) and t.get("status") == "in_progress"), "")
+        head = f"📋 Todos {done}/{total}"
+        return f"{head} — now: {current}" if current else head
     return str(frame.get("type", ""))

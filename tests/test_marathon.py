@@ -322,3 +322,18 @@ def test_marathon_note_degrades_on_missing_fields():
     assert marathon_note({"type": "marathon_plan"}) == "🏁 Marathon plan"
     assert marathon_note({"type": "milestone"}) == "• Milestone"
     assert marathon_note({"type": "marathon_paused"}) == "⏸ Marathon paused"
+
+
+def test_todo_fact_renders_progress_line():
+    from webbee.frames import _MARATHON_FACT_TYPES, marathon_note
+    assert "todo" in _MARATHON_FACT_TYPES
+    note = marathon_note({"type": "todo", "total": 3, "completed": 1, "todos": [
+        {"content": "map the repo", "status": "completed"},
+        {"content": "fix the bug", "status": "in_progress"},
+        {"content": "run tests", "status": "pending"}]})
+    assert "1/3" in note and "fix the bug" in note
+
+
+def test_todo_fact_degrades_on_missing_fields():
+    from webbee.frames import marathon_note
+    assert "0/0" in marathon_note({"type": "todo"})          # never crashes
