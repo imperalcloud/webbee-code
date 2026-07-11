@@ -108,3 +108,64 @@ def test_cpc_graph_slice_coerces_stringified_symbols(tmp_path):
 
     r3 = ex.run("impact_of_change", {"symbols": "beta"})
     assert r3["ok"] and any(i["id"].startswith("a.py") for i in r3["data"]["items"])
+
+
+def test_edit_file_rejects_ambiguous_old(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "x = 1\nx = 1\n"})
+    r = ex.run("edit_file", {"path": "a.txt", "old": "x = 1", "new": "x = 2"})
+    assert not r["ok"] and "2 times" in r["content"]
+    # untouched on failure
+    assert ex.run("read_file", {"path": "a.txt"})["content"] == "x = 1\nx = 1\n"
+
+
+def test_edit_file_replace_all(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "x = 1\nx = 1\n"})
+    r = ex.run("edit_file", {"path": "a.txt", "old": "x = 1", "new": "x = 2",
+                             "replace_all": True})
+    assert r["ok"]
+    assert ex.run("read_file", {"path": "a.txt"})["content"] == "x = 2\nx = 2\n"
+
+
+def test_multi_edit_applies_across_files(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.py", "content": "def old_name():\n    pass\n"})
+    ex.run("write_file", {"path": "b.py", "content": "from a import old_name\n"})
+    r = ex.run("multi_edit", {"edits": [
+        {"path": "a.py", "old": "def old_name", "new": "def new_name"},
+        {"path": "b.py", "old": "import old_name", "new": "import new_name"},
+    ]})
+    assert r["ok"] and "2 edits" in r["content"]
+    assert "new_name" in ex.run("read_file", {"path": "a.py"})["content"]
+    assert "new_name" in ex.run("read_file", {"path": "b.py"})["content"]
+
+
+def test_multi_edit_is_all_or_nothing(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.py", "content": "alpha\n"})
+    ex.run("write_file", {"path": "b.py", "content": "beta\n"})
+    r = ex.run("multi_edit", {"edits": [
+        {"path": "a.py", "old": "alpha", "new": "ALPHA"},
+        {"path": "b.py", "old": "MISSING", "new": "x"},
+    ]})
+    assert not r["ok"] and "applied NOTHING" in r["content"] and "b.py" in r["content"]
+    assert ex.run("read_file", {"path": "a.py"})["content"] == "alpha\n"   # untouched
+
+
+def test_multi_edit_same_file_edits_compose(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.py", "content": "one\ntwo\n"})
+    r = ex.run("multi_edit", {"edits": [
+        {"path": "a.py", "old": "one", "new": "ONE"},
+        {"path": "a.py", "old": "two", "new": "TWO"},
+    ]})
+    assert r["ok"]
+    assert ex.run("read_file", {"path": "a.py"})["content"] == "ONE\nTWO\n"
+
+
+def test_multi_edit_outside_workspace_rejected(tmp_path):
+    ex = _ex(tmp_path)
+    r = ex.run("multi_edit", {"edits": [
+        {"path": "../evil.txt", "old": "a", "new": "b"}]})
+    assert not r["ok"] and "applied NOTHING" in r["content"]

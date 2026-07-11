@@ -82,11 +82,71 @@ class LocalToolExecutor:
             return {"ok": False, "content": "edit_file requires 'old' (the text to replace)"}
         with open(p, "r", encoding="utf-8") as f:
             text = f.read()
-        if old not in text:
+        n = text.count(old)
+        if n == 0:
             return {"ok": False, "content": "old string not found"}
+        replace_all = bool(a.get("replace_all"))
+        if n > 1 and not replace_all:
+            return {"ok": False, "content":
+                    f"old string occurs {n} times; add surrounding context to make it "
+                    f"unique, or pass replace_all=true to replace every occurrence"}
         with open(p, "w", encoding="utf-8") as f:
-            f.write(text.replace(old, new, 1))
-        return {"ok": True, "content": f"edited {rel}"}
+            f.write(text.replace(old, new) if replace_all else text.replace(old, new, 1))
+        note = f" ({n} occurrences)" if replace_all and n > 1 else ""
+        return {"ok": True, "content": f"edited {rel}{note}"}
+
+    def _t_multi_edit(self, a: dict) -> dict:
+        edits = a.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return {"ok": False, "content": "multi_edit requires a non-empty 'edits' list"}
+        # Validate EVERYTHING first -- all-or-nothing (a half-applied batch is
+        # worse than a failed one).
+        staged = []
+        problems = []
+        for i, e in enumerate(edits):
+            if not isinstance(e, dict):
+                problems.append(f"edit {i}: not an object")
+                continue
+            try:
+                rel = self._rel(e)
+                p = self.resolve_in_workspace(rel)
+            except (ValueError, OutsideWorkspaceError) as err:
+                problems.append(f"edit {i}: {err}")
+                continue
+            old = e.get("old", e.get("old_string", ""))
+            new = e.get("new", e.get("new_string", ""))
+            if not old:
+                problems.append(f"edit {i} ({rel}): 'old' is required")
+                continue
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except OSError as err:
+                problems.append(f"edit {i} ({rel}): {type(err).__name__}: {err}")
+                continue
+            n = text.count(old)
+            if n != 1:
+                problems.append(f"edit {i} ({rel}): 'old' occurs {n} times (must be exactly 1)")
+                continue
+            staged.append((p, rel, old, new))
+        if problems:
+            return {"ok": False, "content":
+                    "multi_edit applied NOTHING -- fix these and retry:\n" + "\n".join(problems)}
+        # Apply sequentially, re-reading so multiple edits to the SAME file
+        # compose; if an earlier edit invalidated a later one, stop honestly.
+        applied = []
+        for p, rel, old, new in staged:
+            with open(p, "r", encoding="utf-8") as f:
+                text = f.read()
+            if text.count(old) != 1:
+                return {"ok": False, "content":
+                        f"multi_edit stopped at {rel}: an earlier edit in this batch changed "
+                        f"the text around 'old' (applied so far: {', '.join(applied) or 'none'}); "
+                        f"re-read the file and retry the remaining edits"}
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(text.replace(old, new, 1))
+            applied.append(rel)
+        return {"ok": True, "content": f"applied {len(applied)} edits: " + ", ".join(applied)}
 
     def _t_bash(self, a: dict) -> dict:
         timeout = min(int(a.get("timeout", 120) or 120), 3600)
