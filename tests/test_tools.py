@@ -169,3 +169,29 @@ def test_multi_edit_outside_workspace_rejected(tmp_path):
     r = ex.run("multi_edit", {"edits": [
         {"path": "../evil.txt", "old": "a", "new": "b"}]})
     assert not r["ok"] and "applied NOTHING" in r["content"]
+
+
+def test_edit_file_replace_all_string_false_is_false(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "x = 1\nx = 1\n"})
+    r = ex.run("edit_file", {"path": "a.txt", "old": "x = 1", "new": "x = 2",
+                             "replace_all": "false"})
+    assert not r["ok"] and "2 times" in r["content"]        # stringly false != True
+
+
+def test_multi_edit_unwritable_target_fails_validation(tmp_path):
+    import os as _os
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.py", "content": "alpha\n"})
+    ex.run("write_file", {"path": "ro.py", "content": "beta\n"})
+    _os.chmod(str(tmp_path / "ro.py"), 0o444)
+    try:
+        r = ex.run("multi_edit", {"edits": [
+            {"path": "a.py", "old": "alpha", "new": "ALPHA"},
+            {"path": "ro.py", "old": "beta", "new": "BETA"},
+        ]})
+        assert not r["ok"] and "applied NOTHING" in r["content"]
+        assert "not writable" in r["content"]
+        assert ex.run("read_file", {"path": "a.py"})["content"] == "alpha\n"   # untouched
+    finally:
+        _os.chmod(str(tmp_path / "ro.py"), 0o644)

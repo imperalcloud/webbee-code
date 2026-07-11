@@ -85,7 +85,9 @@ class LocalToolExecutor:
         n = text.count(old)
         if n == 0:
             return {"ok": False, "content": "old string not found"}
-        replace_all = bool(a.get("replace_all"))
+        _ra = a.get("replace_all")
+        replace_all = (_ra.strip().lower() in ("true", "1", "yes")
+                       if isinstance(_ra, str) else bool(_ra))
         if n > 1 and not replace_all:
             return {"ok": False, "content":
                     f"old string occurs {n} times; add surrounding context to make it "
@@ -127,6 +129,9 @@ class LocalToolExecutor:
             n = text.count(old)
             if n != 1:
                 problems.append(f"edit {i} ({rel}): 'old' occurs {n} times (must be exactly 1)")
+                continue
+            if not os.access(p, os.W_OK):
+                problems.append(f"edit {i} ({rel}): file is not writable")
                 continue
             staged.append((p, rel, old, new))
         if problems:
