@@ -195,3 +195,70 @@ def test_multi_edit_unwritable_target_fails_validation(tmp_path):
         assert ex.run("read_file", {"path": "a.py"})["content"] == "alpha\n"   # untouched
     finally:
         _os.chmod(str(tmp_path / "ro.py"), 0o644)
+
+
+class _FakeShadow:
+    def __init__(self):
+        self.labels = []
+        self.rolled = []
+    def checkpoint(self, label=""):
+        self.labels.append(label)
+        return {"id": "abc1234", "n": len(self.labels), "label": label, "changed": True}
+    def diff(self, since=""):
+        return f"DIFF since={since or 'HEAD'}"
+    def rollback(self, to):
+        self.rolled.append(to)
+        return {"ok": True, "content": f"restored to {to}"}
+
+
+def _ex_shadow(tmp_path):
+    from webbee.tools import LocalToolExecutor
+    sh = _FakeShadow()
+    return LocalToolExecutor(str(tmp_path), shadow=sh), sh
+
+
+def test_write_tools_auto_checkpoint_first(tmp_path):
+    ex, sh = _ex_shadow(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "x"})
+    ex.run("edit_file", {"path": "a.txt", "old": "x", "new": "y"})
+    ex.run("bash", {"command": "true"})
+    assert sh.labels == ["pre:write_file", "pre:edit_file", "pre:bash"]
+
+
+def test_read_tools_do_not_checkpoint(tmp_path):
+    ex, sh = _ex_shadow(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "x"})
+    ex.run("read_file", {"path": "a.txt"})
+    ex.run("grep", {"pattern": "x"})
+    assert sh.labels == ["pre:write_file"]
+
+
+def test_shadow_failure_never_blocks_the_write(tmp_path):
+    from webbee.tools import LocalToolExecutor
+
+    class _Boom:
+        def checkpoint(self, label=""):
+            raise RuntimeError("shadow down")
+
+    ex = LocalToolExecutor(str(tmp_path), shadow=_Boom())
+    r = ex.run("write_file", {"path": "a.txt", "content": "x"})
+    assert r["ok"]                                          # the work still happened
+
+
+def test_checkpoint_diff_rollback_shims(tmp_path):
+    ex, sh = _ex_shadow(tmp_path)
+    r = ex.run("checkpoint", {"label": "before refactor"})
+    assert r["ok"] and "cp-" in r["content"]
+    r = ex.run("diff", {"since": "cp-1"})
+    assert r["ok"] and r["content"] == "DIFF since=cp-1"
+    r = ex.run("rollback", {"checkpoint": "cp-1"})
+    assert r["ok"] and sh.rolled == ["cp-1"]
+    r = ex.run("rollback", {})
+    assert not r["ok"] and "requires" in r["content"]
+
+
+def test_reversibility_tools_honest_without_shadow(tmp_path):
+    ex = _ex(tmp_path)                                      # no shadow wired
+    for tool, args in (("checkpoint", {}), ("diff", {}), ("rollback", {"checkpoint": "1"})):
+        r = ex.run(tool, args)
+        assert not r["ok"] and "unavailable" in r["content"]

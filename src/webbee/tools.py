@@ -3,14 +3,20 @@ import re
 import subprocess
 
 
+# Tools that MUTATE the workspace -> auto-checkpoint before each run
+# (mirrors the kernel write tier; rollback snapshots itself, so not listed).
+_WRITE_TIER = {"write_file", "edit_file", "multi_edit", "bash"}
+
+
 class OutsideWorkspaceError(Exception):
     pass
 
 
 class LocalToolExecutor:
-    def __init__(self, workspace_root: str, indexer=None) -> None:
+    def __init__(self, workspace_root: str, indexer=None, shadow=None) -> None:
         self.root = os.path.realpath(workspace_root)
         self.indexer = indexer  # IntelService (or None on a base install) -- Task 5's _t_<verb> shims read this
+        self.shadow = shadow    # ShadowGit (or None) -- the reversibility time machine
 
     def resolve_in_workspace(self, path: str) -> str:
         full = os.path.realpath(os.path.join(self.root, path))
@@ -28,6 +34,13 @@ class LocalToolExecutor:
                 args = {}
         if not isinstance(args, dict):
             args = {}
+        if tool in _WRITE_TIER and self.shadow is not None:
+            # The time machine snapshots BEFORE every mutation -- and must
+            # never block or fail the actual work.
+            try:
+                self.shadow.checkpoint(f"pre:{tool}")
+            except Exception:
+                pass
         try:
             fn = getattr(self, f"_t_{tool}", None)
             if fn is None:
@@ -152,6 +165,29 @@ class LocalToolExecutor:
                 f.write(text.replace(old, new, 1))
             applied.append(rel)
         return {"ok": True, "content": f"applied {len(applied)} edits: " + ", ".join(applied)}
+
+    def _t_checkpoint(self, a: dict) -> dict:
+        if self.shadow is None:
+            return {"ok": False, "content": "reversibility is unavailable (no shadow git)"}
+        cp = self.shadow.checkpoint(str(a.get("label", "") or "manual"))
+        if cp is None:
+            return {"ok": False, "content": "checkpoint failed (shadow git error)"}
+        note = "created" if cp.get("changed") else "no changes since the last checkpoint"
+        return {"ok": True, "content": f"checkpoint cp-{cp.get('n')} ({cp.get('id')}): {note}"}
+
+    def _t_diff(self, a: dict) -> dict:
+        if self.shadow is None:
+            return {"ok": False, "content": "reversibility is unavailable (no shadow git)"}
+        return {"ok": True, "content": self.shadow.diff(str(a.get("since", "") or ""))}
+
+    def _t_rollback(self, a: dict) -> dict:
+        if self.shadow is None:
+            return {"ok": False, "content": "reversibility is unavailable (no shadow git)"}
+        to = str(a.get("checkpoint", "") or a.get("to", "") or "")
+        if not to:
+            return {"ok": False, "content":
+                    "rollback requires 'checkpoint' (an id, cp-N or N -- see diff/checkpoint output)"}
+        return self.shadow.rollback(to)
 
     def _t_bash(self, a: dict) -> dict:
         timeout = min(int(a.get("timeout", 120) or 120), 3600)
