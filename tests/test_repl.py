@@ -475,3 +475,97 @@ def test_watcher_started_at_intel_root_not_workspace(monkeypatch, tmp_path):
     ))
     assert captured.get("root") == str(tmp_path)
     assert captured.get("root") != os.getcwd()
+
+
+# ── boot replay of the durable coding thread (Task 9) ─────────────────────────
+
+class _FakeImperalClient:
+    """Stands in for imperal_mcp.client.ImperalClient -- house pattern already
+    used by test_session.py/test_marathon.py for the same external class."""
+    def __init__(self, cfg, token_provider):
+        pass
+
+    async def whoami(self):
+        return "user-1"
+
+
+def test_boot_replays_recent_thread_before_live_loop(monkeypatch):
+    import imperal_mcp.client as ic
+    import webbee.thread as TH
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    async def fake_fetch(cfg, token_provider, session_id):
+        assert session_id == "marathon-user-1-rboot"     # _owns prefix contract
+        return [
+            {"role": "user", "content": "hi", "surface": "telegram"},
+            {"role": "assistant", "content": "done", "surface": "terminal"},
+        ]
+    monkeypatch.setattr(TH, "fetch_recent_thread", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert sink.foreign == [
+        ("telegram", "user", "hi"),           # renders as "you [telegram]: hi"
+        ("terminal", "assistant", "done"),
+    ]
+    assert any("live" in n for n in sink.notes)
+    # replay happened during boot, strictly before any turn ran
+    assert agent.tasks == []
+
+
+def test_boot_replay_survives_thread_fetch_failure(monkeypatch):
+    import imperal_mcp.client as ic
+    import webbee.thread as TH
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    async def boom(cfg, token_provider, session_id):
+        raise RuntimeError("connection refused")
+    monkeypatch.setattr(TH, "fetch_recent_thread", boom)
+
+    sink, agent = _run(read_line=_lines("hello", "/exit"))
+    assert getattr(sink, "foreign", []) == []
+    assert agent.tasks == ["hello"]            # boot completed cleanly, agent still works
+
+
+def test_boot_replay_survives_whoami_failure(monkeypatch):
+    # No imperal_mcp.client.ImperalClient patched here -- whoami() hits the
+    # (unreachable) fake api_url and raises. The whole replay block must be
+    # swallowed, never crashing boot or delaying it past the intel/agent setup.
+    sink, agent = _run(read_line=_lines("hello", "/exit"))
+    assert getattr(sink, "foreign", []) == []
+    assert agent.tasks == ["hello"]
+
+
+def test_boot_replay_truncates_long_messages(monkeypatch):
+    import imperal_mcp.client as ic
+    import webbee.thread as TH
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    long_text = "x" * 1000
+
+    async def fake_fetch(cfg, token_provider, session_id):
+        return [{"role": "assistant", "content": long_text, "surface": "terminal"}]
+    monkeypatch.setattr(TH, "fetch_recent_thread", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert len(sink.foreign) == 1
+    rendered = sink.foreign[0][2]
+    assert len(rendered) <= 401                 # 400 chars + ellipsis
+    assert rendered.endswith("…")
+
+
+def test_boot_replay_skips_note_when_thread_empty(monkeypatch):
+    import imperal_mcp.client as ic
+    import webbee.thread as TH
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    async def fake_fetch(cfg, token_provider, session_id):
+        return []
+    monkeypatch.setattr(TH, "fetch_recent_thread", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert getattr(sink, "foreign", []) == []
+    assert not any("live" in n for n in sink.notes)

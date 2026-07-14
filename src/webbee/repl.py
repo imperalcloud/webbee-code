@@ -291,6 +291,21 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         account = await account_fetcher(cfg, token_provider)
         state["logged_in"] = account.signed_in
         _sink.welcome(account, workspace, "terminal")
+        # Boot replay of the durable per-user thread (Task 9): best-effort,
+        # entirely swallowed on any failure -- history is a nice-to-have,
+        # never a boot blocker (network down, no such session yet, etc.).
+        try:
+            from imperal_mcp.client import ImperalClient
+            from webbee.thread import fetch_recent_thread, truncate_for_display
+            _iid = await ImperalClient(cfg, token_provider).whoami()
+            _msgs = await fetch_recent_thread(cfg, token_provider, f"marathon-{_iid}-rboot")
+            for _m in _msgs[-40:]:
+                _sink.foreign_turn(_m.get("surface", "terminal"), _m.get("role", ""),
+                                   truncate_for_display(_m.get("content", "")))
+            if _msgs:
+                _sink.note("— live —")
+        except Exception:
+            pass  # replay is best-effort; never block boot
         if cfg.intel_enabled:
             # Off-loop build (indexing does sync file I/O + subprocess). Any
             # failure here (missing extra, bad repo, etc.) must degrade to
