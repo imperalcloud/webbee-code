@@ -16,6 +16,7 @@ _HELP = """Commands:
   /sessions          list active sessions (this + other devices)
   /sessions revoke <#>   revoke a session by its number
   /logout-others     sign out every session except this one
+  /notify [tg|panel|both|off]   mirror this session to Telegram/panel & steer it back
   /exit  (=/quit)    quit"""
 
 
@@ -85,6 +86,8 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         return SlashResult(handled=True, action="checkpoints")
     if cmd == "/rollback":
         return SlashResult(handled=True, action="rollback", arg=" ".join(args))
+    if cmd == "/notify":
+        return SlashResult(handled=True, action="notify", arg=(args[0].lower() if args else ""))
     if cmd == "/mode":
         if not args:
             return SlashResult(handled=True, action="mode", new_mode=None,

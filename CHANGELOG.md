@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4
+
+- `/notify [tg|panel|both|off]` — mirror this coding session to Telegram
+  and/or the panel, and let either surface steer it back (approve/deny
+  prompts, follow-up turns). No argument shows the current routing. Talks to
+  the gateway's per-session remote-control state; a network hiccup notes
+  cleanly instead of crashing the dock.
+
 ## 0.3.3
 
 - Mouse-garbage / dead-keyboard fix (Linux, occasionally macOS): the dock now

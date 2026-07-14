@@ -238,6 +238,24 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     _r = await asyncio.to_thread(shadow.rollback, res.arg)
                     _sink.note(str(_r.get("content", "")))
                 return "continue"
+            if res.action == "notify":
+                from webbee import remote as _remote
+                sid = getattr(agent, "session_id", "")
+                if not sid:
+                    _sink.note("Start a coding turn first, then /notify to route it.")
+                    return "continue"
+                try:
+                    if res.arg in ("tg", "panel", "both", "off"):
+                        st = await _remote.set_remote(cfg, token_provider, sid, res.arg)
+                    elif res.arg:
+                        _sink.note("Usage: /notify [tg|panel|both|off]")
+                        return "continue"
+                    else:
+                        st = await _remote.get_remote(cfg, token_provider, sid)
+                    _sink.note(_remote.describe(st))
+                except Exception as e:
+                    _sink.note(f"Remote control unavailable: {type(e).__name__}")
+                return "continue"
             if res.action == "clear":
                 _sink.clear()
                 _sink.note(res.message)

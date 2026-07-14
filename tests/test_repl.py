@@ -404,6 +404,39 @@ def test_boot_skips_intel_when_disabled_in_config(monkeypatch):
     assert _SpyAgent.last_intel is None
 
 
+# ── /notify remote control (Task 8) ───────────────────────────────────────────
+
+def test_notify_sets_remote_and_shows_state(monkeypatch):
+    agent = StepAgent()
+
+    async def fake_set(cfg, tp, sid, arg):
+        assert sid == "sess-1" and arg == "tg"
+        return {"enabled": True, "mirror": ["telegram"], "steer": ["telegram"]}
+    monkeypatch.setattr("webbee.remote.set_remote", fake_set)
+
+    sink, agent = _run(read_line=_lines("/notify tg", "/exit"), agent=agent)
+    assert any("ON" in n for n in sink.notes)
+
+
+def test_notify_without_session_prompts_to_start_a_turn():
+    sink, agent = _run(read_line=_lines("/notify tg", "/exit"), agent=StepAgent(session_id=""))
+    assert any("Start a coding turn first" in n for n in sink.notes)
+
+
+def test_notify_bad_arg_shows_usage():
+    sink, agent = _run(read_line=_lines("/notify bogus", "/exit"), agent=StepAgent())
+    assert any("Usage: /notify" in n for n in sink.notes)
+
+
+def test_notify_network_error_notes_cleanly(monkeypatch):
+    async def fake_set(cfg, tp, sid, arg):
+        raise RuntimeError("connection refused")
+    monkeypatch.setattr("webbee.remote.set_remote", fake_set)
+
+    sink, agent = _run(read_line=_lines("/notify tg", "/exit"), agent=StepAgent())
+    assert any("Remote control unavailable" in n for n in sink.notes)
+
+
 def test_watcher_started_at_intel_root_not_workspace(monkeypatch, tmp_path):
     """F1: IntelService.root is the discovered repo root, which can differ
     from the raw cwd (e.g. the REPL launched from a subdir). The watcher must

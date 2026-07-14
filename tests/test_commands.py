@@ -140,3 +140,15 @@ def test_help_mentions_the_time_machine():
     from webbee.commands import dispatch
     res = dispatch("/help", _anyctx())
     assert "/checkpoints" in res.message and "/rollback" in res.message
+
+
+def test_notify_command_dispatches():
+    from webbee.commands import dispatch
+    assert dispatch("/notify", _anyctx()).action == "notify"
+    r = dispatch("/notify tg", _anyctx())
+    assert r.action == "notify" and r.arg == "tg"
+
+
+def test_help_mentions_notify():
+    from webbee.commands import dispatch
+    assert "/notify" in dispatch("/help", _anyctx()).message
