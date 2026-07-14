@@ -246,6 +246,34 @@ def test_user_echo_is_unboxed_line():
     assert "╭" not in out and "│" not in out and "╰" not in out   # NOT the input box
 
 
+def test_foreign_turn_tagged_line_no_turn_accounting():
+    # A cross-surface line is DISPLAY-ONLY: tagged by origin surface, empty
+    # tag for terminal/replay-own, and it must NOT touch the terminal's own
+    # turn accounting (_tools/tokens/_busy) -- recon §3's contamination risk.
+    s = _sink()
+    s.begin_turn()
+    tools, tokens, busy = s._tools, s.tokens, s._busy
+    s.foreign_turn("telegram", "assistant", "done on telegram")
+    s.foreign_turn("terminal", "user", "fix the tests")
+    s.foreign_turn("", "assistant", "stale line")
+    out = s.console.export_text()
+    assert "🐝 webbee [telegram]: done on telegram" in out
+    assert "you: fix the tests" in out                  # terminal -> no tag
+    assert "[terminal]" not in out
+    assert "🐝 webbee: stale line" in out               # empty surface -> no tag
+    assert (s._tools, s.tokens, s._busy) == (tools, tokens, busy)
+    assert not NO_CYRILLIC.search(out)
+
+
+def test_foreign_turn_strips_control_bytes():
+    # Kernel-relayed text is untrusted -- same _clean rule as note()/tool lines.
+    s = _sink()
+    s.foreign_turn("tele\x1b[2Jgram", "assistant", "hi\x1b]0;pwned\x07 there")
+    out = s.console.export_text()
+    assert "\x1b[2J" not in out and "pwned" not in out
+    assert "[telegram]" in out and "hi there" in out
+
+
 def test_answer_marker_shows_webbee_name():
     s = _sink()
     s.begin_turn(); s.end_turn("here is the answer")

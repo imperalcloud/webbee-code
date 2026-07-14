@@ -222,6 +222,17 @@ class RichSink:
         self.console.print(_pad(Text(" ❯ " + _clean(text) + " ", style="bold white on grey30")))
         self._nudge()
 
+    def foreign_turn(self, surface: str, role: str, text: str) -> None:
+        """One tagged line for a turn that lives on ANOTHER surface (a
+        Telegram/panel-steered turn on the shared stream, or a replayed prior
+        turn). DISPLAY-ONLY: never touches _tools/tokens/_busy, so the
+        terminal's own turn accounting stays uncontaminated."""
+        who = "you" if role == "user" else "🐝 webbee"
+        surface = _clean(surface)
+        tag = "" if surface in ("", "terminal") else f" [{surface}]"
+        self.console.print(_pad(Text(f"{who}{tag}: {_clean(text)}", style=_BEE)))
+        self._nudge()
+
     def clear(self) -> None:
         """/clear: wipe the pane/screen + reset the session counters."""
         self.console.clear()

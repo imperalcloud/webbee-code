@@ -123,6 +123,51 @@ def handle_action_frame(frame: dict, sink, started: set, finished: set, steps: l
     steps.append({"step_id": sid, "label": lbl, "ok": ok})
 
 
+# --- Cross-surface (foreign-turn) frames -------------------------------------
+# Frames stamped with a DIFFERENT task_id belong to another turn on the shared
+# persistent stream -- a turn steered from Telegram/the panel (kernel stamps
+# `origin` with the source surface) or a stale prior turn (no `origin`). They
+# are DISPLAY-ONLY for this client: one tagged line, NEVER executed, NEVER
+# consented, NEVER terminal for the client's own turn (the C7 safety filter in
+# session.run() owns that guarantee; these helpers only compose the line).
+
+_FOREIGN_ACTIONABLE_TYPES = ("tool_request", "confirm_request", "final",
+                             "marathon_complete", "panel_release_required")
+
+
+def _foreign_note(frame: dict) -> str:
+    """One-line display text for a cross-surface frame, or "" when there is
+    nothing meaningful to show (usage/step bookkeeping/unknown types) -- the
+    caller then skips it silently."""
+    ftype = frame.get("type", "")
+    tool = str(frame.get("tool", "") or "")
+    if ftype == "tool_request":
+        return f"running {tool}" if tool else "running a tool"
+    if ftype == "confirm_request":
+        return f"approval requested: {tool}" if tool else "approval requested"
+    if ftype in ("final", "marathon_complete", "progress", "thinking"):
+        return _progress_text(frame).strip()
+    if ftype == "panel_release_required":
+        summary = str(frame.get("summary", "") or "").strip()
+        return summary or "payment approval required in the panel"
+    return ""
+
+
+def render_foreign_frame(frame: dict, sink) -> None:
+    """Render ONE tagged, display-only line for a foreign-turn frame. Guarded
+    like the marathon notes: a minimal sink without `foreign_turn` drops the
+    line, and a render error must never break the safety `continue` in
+    session.run() (rendering is the ONLY thing foreign frames ever get)."""
+    text = _foreign_note(frame)
+    render = getattr(sink, "foreign_turn", None)
+    if not text or render is None:
+        return
+    try:
+        render(str(frame.get("origin", "") or ""), "assistant", text)
+    except Exception:
+        pass
+
+
 # --- U4 marathon FACT frames -------------------------------------------------
 # A marathon (long-horizon autonomous run) streams the SAME frame vocabulary as
 # a coding turn PLUS three progress FACTS. The kernel emits facts; this renderer

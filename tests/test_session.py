@@ -137,10 +137,22 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
 
     async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
-        # A foreign turn's tool_request and final (must be ignored), THEN
-        # this turn's own final (must be honored).
+        # A foreign turn's tool_request and final (must NEVER be executed /
+        # terminal for THIS turn -- only rendered as tagged lines), THEN this
+        # turn's own final (must be honored). Cross-surface frames carry the
+        # kernel-stamped `origin`; a stale prior-turn frame carries none.
         yield {"type": "tool_request", "task_id": "OTHER", "req_id": "r1",
                "tool": "read_file", "args": {}}
+        yield {"type": "tool_request", "task_id": "TG", "req_id": "r2",
+               "tool": "write_file", "args": {}, "origin": "telegram"}
+        yield {"type": "confirm_request", "task_id": "TG", "req_id": "r3",
+               "tool": "bash", "args": {}, "origin": "telegram"}
+        yield {"type": "progress", "task_id": "TG", "text": "thinking it over",
+               "origin": "telegram"}
+        yield {"type": "usage", "task_id": "TG", "tokens": 5, "credits": 1,
+               "origin": "telegram"}  # nothing to show -> silently skipped
+        yield {"type": "final", "task_id": "TG", "text": "done on telegram",
+               "origin": "telegram"}
         yield {"type": "final", "task_id": "OTHER", "text": "wrong turn"}
         yield {"type": "final", "task_id": "OURS", "text": "done"}
 
@@ -168,22 +180,38 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
     class RecSink:
+        def __init__(self):
+            self.foreign = []; self.progress_calls = []; self.usage_calls = []
         def tool_start(self, *a): ...
         def tool_result(self, *a): ...
         def ask_consent(self, *a): return "y"
         def panel_release(self, *a): ...
-        def progress(self, *a): ...
-        def usage(self, *a): ...
+        def progress(self, text): self.progress_calls.append(text)
+        def usage(self, *a): self.usage_calls.append(a)
+        def foreign_turn(self, surface, role, text): self.foreign.append((surface, role, text))
 
     async def token_provider():
         return "tok"
 
     sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
-    result = asyncio.run(sess.run("do it", RecSink()))
+    sink = RecSink()
+    result = asyncio.run(sess.run("do it", sink))
 
-    assert result == "done"                # ended on OUR final, not the foreign one
-    assert executor_calls == []            # foreign tool_request never dispatched
-    assert posts == ["/v1/agent/sessions"]  # no /result POST for the ignored frames
+    assert result == "done"                # ended on OUR final, not a foreign one
+    assert executor_calls == []            # foreign tool_requests never dispatched
+    assert posts == ["/v1/agent/sessions"]  # no /result POST for the foreign frames
+    # Cross-surface/stale frames render as DISPLAY-ONLY tagged lines (origin
+    # tag; empty for a stale/legacy frame) -- and nothing else happens.
+    assert sink.foreign == [
+        ("", "assistant", "running read_file"),
+        ("telegram", "assistant", "running write_file"),
+        ("telegram", "assistant", "approval requested: bash"),
+        ("telegram", "assistant", "thinking it over"),
+        ("telegram", "assistant", "done on telegram"),
+        ("", "assistant", "wrong turn"),
+    ]
+    assert sink.progress_calls == []       # foreign progress never leaks into the own feed
+    assert sink.usage_calls == []          # foreign usage: nothing to show, nothing counted
 
 
 def test_action_frame_maps_to_feed():
@@ -258,6 +286,36 @@ def test_summary_from_facts_pluralizes_with_entity_kind_when_present():
     from webbee.frames import _summary_from_facts
     assert _summary_from_facts({"count": 1, "entity_kind": "message"}) == "1 message"
     assert _summary_from_facts({"count": 3, "entity_kind": "message"}) == "3 messages"
+
+
+def test_render_foreign_frame_is_display_only_and_never_raises():
+    # Cross-surface frames (Telegram/panel steering) get ONE tagged line and
+    # NOTHING else. The render side effect must never break the safety
+    # `continue` in session.run(): a sink without foreign_turn drops the line;
+    # a sink whose foreign_turn raises is swallowed.
+    from webbee.frames import render_foreign_frame
+
+    class Rec:
+        def __init__(self): self.calls = []
+        def foreign_turn(self, surface, role, text): self.calls.append((surface, role, text))
+
+    r = Rec()
+    render_foreign_frame({"type": "tool_request", "tool": "bash", "origin": "web-panel"}, r)
+    assert r.calls == [("web-panel", "assistant", "running bash")]
+    render_foreign_frame({"type": "usage", "tokens": 1, "origin": "telegram"}, r)
+    assert len(r.calls) == 1               # nothing meaningful to show -> skipped
+    render_foreign_frame({"type": "final", "text": "", "origin": "telegram"}, r)
+    assert len(r.calls) == 1               # empty final text -> skipped
+    render_foreign_frame({"type": "progress", "llm_text": "planning", "origin": "telegram"}, r)
+    assert r.calls[-1] == ("telegram", "assistant", "planning")
+
+    class Bare:                            # minimal sink (no foreign_turn) -> no-op
+        pass
+    render_foreign_frame({"type": "final", "text": "x", "origin": "telegram"}, Bare())
+
+    class Boom:
+        def foreign_turn(self, *a): raise RuntimeError("ui bug")
+    render_foreign_frame({"type": "final", "text": "x", "origin": "telegram"}, Boom())
 
 
 def test_handle_step_started_calls_tool_start_once():

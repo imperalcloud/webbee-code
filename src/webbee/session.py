@@ -3,6 +3,7 @@ import os
 import subprocess
 
 from webbee.frames import (
+    _FOREIGN_ACTIONABLE_TYPES,
     _MARATHON_FACT_TYPES,
     _first_time,
     _progress_text,
@@ -10,6 +11,7 @@ from webbee.frames import (
     handle_step_finished,
     handle_step_started,
     marathon_note,
+    render_foreign_frame,
 )
 
 
@@ -218,11 +220,15 @@ class AgentSession:
                 ftype = frame.get("type")
 
                 _ftid = frame.get("task_id", "")
-                # Ignore actionable frames from a DIFFERENT turn on the shared
-                # persistent stream (task_id absent on legacy kernels -> not filtered).
-                if _ftid and self._task_id and _ftid != self._task_id and ftype in (
-                        "tool_request", "confirm_request", "final",
-                        "marathon_complete", "panel_release_required"):
+                # A frame from a DIFFERENT turn on the shared persistent stream
+                # (task_id absent on legacy kernels -> treated as own). C7 safety:
+                # foreign actionable frames are NEVER executed/consented and NEVER
+                # end this turn -- but instead of vanishing they (and any origin-
+                # stamped cross-surface display frame, e.g. a Telegram-steered
+                # turn's progress) now render ONE tagged, display-only line.
+                if _ftid and self._task_id and _ftid != self._task_id and (
+                        frame.get("origin") or ftype in _FOREIGN_ACTIONABLE_TYPES):
+                    render_foreign_frame(frame, sink)
                     continue
 
                 if ftype == "tool_request":
