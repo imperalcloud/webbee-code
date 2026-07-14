@@ -6,6 +6,7 @@ from webbee.frames import (
     _FOREIGN_ACTIONABLE_TYPES,
     _MARATHON_FACT_TYPES,
     _first_time,
+    _origin_tag,
     _progress_text,
     handle_action_frame,
     handle_step_finished,
@@ -231,6 +232,12 @@ class AgentSession:
                     render_foreign_frame(frame, sink)
                     continue
 
+                # Live steer topology: a Telegram/panel-steered turn keeps THIS
+                # client's task_id (the terminal stays the sole executor) with
+                # `origin` stamped -- tag the text renders below; everything
+                # else (execution, dedup, consent, accounting) is unchanged.
+                _tag = _origin_tag(frame)
+
                 if ftype == "tool_request":
                     rid = frame.get("req_id")
                     sid = str(rid or "")
@@ -242,14 +249,14 @@ class AgentSession:
                         # dispatch and freezes the dock).
                         if _first_time(sid, started):
                             try:
-                                sink.tool_start(frame.get("tool", ""), frame.get("args", {}))
+                                sink.tool_start(_tag + frame.get("tool", ""), frame.get("args", {}))
                             except Exception:
                                 pass
                         out = await asyncio.to_thread(handle_tool_request, frame, executor)
                         res = out["result"]
                         if _first_time(sid, finished):
                             try:
-                                sink.tool_result(frame.get("tool", ""), bool(res.get("ok")), _summary(res))
+                                sink.tool_result(_tag + frame.get("tool", ""), bool(res.get("ok")), _summary(res))
                                 self.steps.append({"step_id": sid,
                                                    "label": frame.get("tool", ""),
                                                    "ok": bool(res.get("ok"))})
@@ -282,10 +289,12 @@ class AgentSession:
                     handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
 
                 elif ftype == "thinking":  # system-driven reasoning -> the 💭 block
-                    (getattr(sink, "thinking", None) or sink.progress)(_progress_text(frame))
+                    _text = _progress_text(frame)
+                    (getattr(sink, "thinking", None) or sink.progress)(_tag + _text if _text else "")
 
                 elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
-                    sink.progress(_progress_text(frame))
+                    _text = _progress_text(frame)
+                    sink.progress(_tag + _text if _text else "")
 
                 elif ftype == "usage":  # P2 — cumulative tokens + credits (Slice C; raw $ stays server-side)
                     sink.usage(
@@ -317,7 +326,8 @@ class AgentSession:
                     # non-marathon coding turn's `final` is terminal (unchanged).
                     if marathon and not frame.get("stopped"):
                         continue
-                    return frame.get("text", "")
+                    _text = frame.get("text", "")
+                    return _tag + _text if _text else ""
 
         return ""
 

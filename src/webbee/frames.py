@@ -135,6 +135,16 @@ _FOREIGN_ACTIONABLE_TYPES = ("tool_request", "confirm_request", "final",
                              "marathon_complete", "panel_release_required")
 
 
+def _origin_tag(frame: dict) -> str:
+    """Display prefix for an OWN-turn frame steered from another surface.
+    Live steer topology: a Telegram/panel-steered turn keeps the terminal's
+    OWN task_id (the terminal stays the sole executor) -- only the kernel-
+    stamped `origin` says where it came from. Empty for terminal/own frames,
+    so untagged rendering stays byte-identical to today."""
+    origin = str(frame.get("origin", "") or "")
+    return f"[{origin}] " if origin and origin != "terminal" else ""
+
+
 def _foreign_note(frame: dict) -> str:
     """One-line display text for a cross-surface frame, or "" when there is
     nothing meaningful to show (usage/step bookkeeping/unknown types) -- the

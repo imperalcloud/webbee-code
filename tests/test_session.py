@@ -214,6 +214,133 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
     assert sink.usage_calls == []          # foreign usage: nothing to show, nothing counted
 
 
+def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(monkeypatch):
+    # Live steer topology (final review C1): a Telegram-steered turn keeps the
+    # terminal's OWN task_id (the kernel drain adopts it -- the terminal stays
+    # the sole executor) and stamps `origin` with the source surface. The own
+    # path must behave EXACTLY as today (execute once, dedup, accounting,
+    # consent flow untouched) with the surface tag prefixed onto the text
+    # renders; own frames WITHOUT origin render byte-identical to today.
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+    import webbee.tools as T
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    executor_calls = []
+
+    class _RecExecutor:
+        def __init__(self, root, indexer=None, shadow=None):
+            pass
+
+        def run(self, tool, args):
+            executor_calls.append((tool, args))
+            return {"ok": True, "content": "ran"}
+
+    monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+        yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
+               "tool": "read_file", "args": {}, "origin": "telegram"}
+        yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
+               "tool": "read_file", "args": {}, "origin": "telegram"}  # dup req_id -> dedup
+        yield {"type": "tool_request", "task_id": "OURS", "req_id": "r2",
+               "tool": "write_file", "args": {}}                       # no origin -> untagged
+        yield {"type": "progress", "task_id": "OURS", "text": "editing files",
+               "origin": "telegram"}
+        yield {"type": "thinking", "task_id": "OURS", "llm_text": "pondering",
+               "origin": "telegram"}
+        yield {"type": "progress", "task_id": "OURS", "text": "plain progress"}
+        yield {"type": "progress", "task_id": "OURS", "text": "own terminal line",
+               "origin": "terminal"}                                    # own surface -> no tag
+        yield {"type": "progress", "task_id": "OURS", "text": "",
+               "origin": "telegram"}   # empty text -> stays empty, no lone tag line
+        yield {"type": "final", "task_id": "OURS", "text": "steered done",
+               "origin": "telegram"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    class _SessResp:
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class _ResultResp:
+        def raise_for_status(self): pass
+        def json(self): return {}
+
+    posts = []
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, **kw):
+            posts.append(path)
+            return _SessResp() if path == "/v1/agent/sessions" else _ResultResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    class RecSink:
+        def __init__(self):
+            self.starts = []; self.results = []; self.progress_calls = []; self.foreign = []
+        def tool_start(self, tool, args): self.starts.append((tool, dict(args)))
+        def tool_result(self, tool, ok, summary): self.results.append((tool, ok, summary))
+        def ask_consent(self, *a): return "y"
+        def panel_release(self, *a): ...
+        def progress(self, text): self.progress_calls.append(text)
+        def usage(self, *a): ...
+        def foreign_turn(self, surface, role, text): self.foreign.append((surface, role, text))
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    sink = RecSink()
+    result = asyncio.run(sess.run("do it", sink))
+
+    assert result == "[telegram] steered done"      # final text carries the tag
+    # Execution/dedup/accounting IDENTICAL to today: each req_id runs once,
+    # the dup re-posts the cached result (at-least-once), steps record cleanly.
+    assert executor_calls == [("read_file", {}), ("write_file", {})]
+    assert posts[0] == "/v1/agent/sessions"
+    assert posts.count("/v1/agent/sessions/sid1/result") == 3  # r1, r1-dup, r2
+    assert sess.steps == [
+        {"step_id": "r1", "label": "read_file", "ok": True},
+        {"step_id": "r2", "label": "write_file", "ok": True},
+    ]
+    # Tool lines: tagged when steered, untagged otherwise.
+    assert sink.starts == [("[telegram] read_file", {}), ("write_file", {})]
+    assert sink.results == [("[telegram] read_file", True, "ran"),
+                            ("write_file", True, "ran")]
+    # Text lines: tagged when steered; no stray tag for no-origin/terminal.
+    assert sink.progress_calls == ["[telegram] editing files", "[telegram] pondering",
+                                   "plain progress", "own terminal line", ""]
+    assert sink.foreign == []                        # own-path never routes via foreign_turn
+
+
+def test_origin_tag_prefix_only_for_other_surfaces():
+    from webbee.frames import _origin_tag
+    assert _origin_tag({"origin": "telegram"}) == "[telegram] "
+    assert _origin_tag({"origin": "web-panel"}) == "[web-panel] "
+    assert _origin_tag({"origin": "terminal"}) == ""   # own surface
+    assert _origin_tag({"origin": ""}) == ""
+    assert _origin_tag({}) == ""
+
+
 def test_action_frame_maps_to_feed():
     class Rec:
         def __init__(self): self.starts=[]; self.results=[]
