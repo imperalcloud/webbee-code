@@ -129,3 +129,25 @@ def test_truncate_for_display_long_text_capped_with_ellipsis():
 
 def test_truncate_for_display_respects_custom_limit():
     assert truncate_for_display("abcdef", limit=3) == "abc…"
+
+
+def test_conversational_text_plain_message_untouched():
+    from webbee.thread import conversational_text
+    assert conversational_text("почини тесты") == "почини тесты"
+
+
+def test_conversational_text_pure_tool_traffic_skipped():
+    from webbee.thread import conversational_text
+    assert conversational_text('[tool_result] {"content": "COMPILE_OK", "ok": true}') == ""
+    assert conversational_text('[tool_use bash] {"command": "pytest -q"}') == ""
+
+
+def test_conversational_text_narration_kept_tool_tail_cut():
+    from webbee.thread import conversational_text
+    mixed = 'Всё компилируется чисто. Теперь коммичу.\n[tool_use bash] {"command": "git push"}'
+    assert conversational_text(mixed) == "Всё компилируется чисто. Теперь коммичу."
+
+
+def test_conversational_text_none_is_empty():
+    from webbee.thread import conversational_text
+    assert conversational_text(None) == ""

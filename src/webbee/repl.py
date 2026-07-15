@@ -296,13 +296,19 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         # never a boot blocker (network down, no such session yet, etc.).
         try:
             from imperal_mcp.client import ImperalClient
-            from webbee.thread import fetch_recent_thread, truncate_for_display
+            from webbee.thread import (conversational_text, fetch_recent_thread,
+                                       truncate_for_display)
             _iid = await ImperalClient(cfg, token_provider).whoami()
             _msgs = await fetch_recent_thread(cfg, token_provider, f"marathon-{_iid}-rboot")
+            _shown = 0
             for _m in _msgs[-40:]:
+                _text = conversational_text(_m.get("content", ""))
+                if not _text:
+                    continue  # pure tool traffic -- mind-food, not conversation
                 _sink.foreign_turn(_m.get("surface", "terminal"), _m.get("role", ""),
-                                   truncate_for_display(_m.get("content", "")))
-            if _msgs:
+                                   truncate_for_display(_text))
+                _shown += 1
+            if _shown:
                 _sink.note("— live —")
         except Exception:
             pass  # replay is best-effort; never block boot

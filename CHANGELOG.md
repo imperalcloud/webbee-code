@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.6
+
+- Boot replay shows only the conversation: flattened tool traffic
+  (`[tool_use …]` / `[tool_result] …` blocks the agent keeps as its own
+  working memory) no longer floods the boot screen — each replayed message
+  shows its human-readable part, pure tool messages are skipped.
+
 ## 0.3.5
 
 - Surface-aware conversation: turns steered from Telegram/the panel render

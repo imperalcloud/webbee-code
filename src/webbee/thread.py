@@ -11,6 +11,26 @@ from __future__ import annotations
 
 _DISPLAY_LIMIT = 400
 
+# The durable thread stores each tool exchange FLATTENED into the message
+# text ("[tool_use bash] {...}" / "[tool_result] ..."), so the agent can
+# reread its own past work. That is mind-food, not conversation -- replaying
+# it verbatim floods the boot screen with raw JSON (Valentin, live
+# 2026-07-15). Replay shows only the conversational part of each message.
+_FLATTEN_MARKERS = ("[tool_use ", "[tool_result]")
+
+
+def conversational_text(content) -> str:
+    """The human-conversation part of one stored thread message: everything
+    up to the first flattened tool block, stripped. "" means the message was
+    pure tool traffic and must be skipped by the replay."""
+    text = str(content or "")
+    cut = len(text)
+    for m in _FLATTEN_MARKERS:
+        i = text.find(m)
+        if i != -1:
+            cut = min(cut, i)
+    return text[:cut].strip()
+
 
 async def fetch_recent_thread(cfg, token_provider, session_id: str) -> list[dict]:
     import httpx
