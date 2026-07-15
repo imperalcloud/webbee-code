@@ -58,8 +58,8 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
 
     workspace = os.getcwd()
 
-    async def token_provider() -> str:
-        return await auth.ensure_access_token(cfg)
+    from webbee.tokens import make_token_provider
+    token_provider = make_token_provider(cfg, auth)
 
     if agent_factory is None:
         agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m)  # noqa: E731
@@ -72,9 +72,11 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
     except (KeyboardInterrupt, asyncio.CancelledError):
         await agent.stop()
         sink.note("Interrupted.")
+        sink.end_turn("")   # clear busy (poller starvation guard)
         return ""
     except Exception as e:  # network/auth/etc — never crash
         sink.note(f"Error: {type(e).__name__}: {e}")
+        sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
         return ""
     sink.end_turn(text)
     return text
@@ -122,8 +124,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
 
     workspace = os.getcwd()
 
-    async def token_provider() -> str:
-        return await auth.ensure_access_token(cfg)
+    from webbee.tokens import make_token_provider
+    token_provider = make_token_provider(cfg, auth)
 
     # Prod dock path = the default reader + a real tty + no injected sink; tests
     # inject sink/read_line and take the plain fallback loop.
@@ -287,9 +289,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         except (KeyboardInterrupt, asyncio.CancelledError):
             _sink.abort()
             _sink.note("Interrupted.")
+            _sink.end_turn("")   # clear busy (poller starvation guard)
             return
         except Exception as e:  # network/auth/etc — never crash the REPL
             _sink.note(f"Error: {type(e).__name__}: {e}")
+            _sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
             return
         _sink.end_turn(text)
 

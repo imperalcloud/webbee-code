@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.8
+
+- No more sign-in races: token refresh is serialized and retries once after
+  a sibling terminal rotates the session — multiple open terminals no longer
+  knock each other out with "session expired".
+- No more dock lockup: a turn that fails (for example, an expired session)
+  now clears the "working" state, and every key keeps responding even if the
+  turn state ever goes stale. The idle pickup poller also backs off instead
+  of hammering a signed-out session.
+
 ## 0.3.7
 
 - Terminal liveness: a consent answered from Telegram/panel no longer

@@ -73,8 +73,10 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
     from webbee.thread import fetch_pending_steer
     derived = ""
     backlog: deque = deque()
+    failures = 0    # consecutive fetch/auth failures -> backoff (a logged-out
+                    # terminal must not hammer the token-refresh path every 4s)
     while True:
-        await asyncio.sleep(interval)
+        await asyncio.sleep(min(interval * (2 ** min(failures, 4)), 60.0))
         try:
             if is_busy():
                 continue
@@ -103,4 +105,8 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
         except Exception:
             # Fail-soft by design: a network blip / auth hiccup skips this
             # tick; undrained items stay durable on the gateway (1h TTL).
+            # Consecutive failures back the poll off (up to 60s) so a
+            # logged-out terminal never hammers the token-refresh path.
+            failures += 1
             continue
+        failures = 0

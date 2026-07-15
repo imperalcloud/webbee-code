@@ -162,7 +162,10 @@ def test_agent_error_is_swallowed_and_loop_continues():
     assert agent.tasks == ["do it"]
     assert any("Error" in n for n in sink.notes)
     assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
-    assert sink.turns == []
+    # Liveness: this path MUST clear busy via end_turn("") -- a stuck busy
+    # flag locked the whole dock out (live 2026-07-15) and starves the idle-
+    # steer poller. Empty text = no final panel, just the state reset.
+    assert sink.turns == [""]
 
 
 def test_login_command_calls_auth_and_logs_in():
@@ -234,7 +237,10 @@ def test_ctrl_c_mid_turn_aborts_and_returns_to_prompt():
     assert sink.aborted is True
     assert any("Interrupted" in n for n in sink.notes)
     assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
-    assert sink.turns == []
+    # Liveness: this path MUST clear busy via end_turn("") -- a stuck busy
+    # flag locked the whole dock out (live 2026-07-15) and starves the idle-
+    # steer poller. Empty text = no final panel, just the state reset.
+    assert sink.turns == [""]
 
 
 def test_welcome_shown_on_start():

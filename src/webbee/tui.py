@@ -157,6 +157,16 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     kb = KeyBindings()
 
+    def _busy_live() -> bool:
+        """Lockout-proof busy for the key handlers: busy only while the turn
+        TASK is genuinely alive. A turn that died without clearing the sink's
+        busy flag (an error path that skipped end_turn) must never brick the
+        dock -- Enter/Esc/Ctrl-C/Ctrl-D all gate on THIS, so a stale flag
+        degrades to a cosmetic toolbar glitch instead of an unusable input
+        (Valentin, live 2026-07-15: 'working' spun and NO key reacted)."""
+        t = turn.get("task")
+        return bool(is_busy() and t is not None and not t.done())
+
     @kb.add("enter")
     def _enter(event):
         text = scrub_mouse_residue(buf.text)   # never send leaked mouse reports
@@ -164,11 +174,11 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         if consent_pending():
             resolve_consent(text)              # ICNLI: relay the raw reply verbatim
             return
-        if not text.strip() and sel["i"] is not None and steps_nav and not is_busy():
+        if not text.strip() and sel["i"] is not None and steps_nav and not _busy_live():
             idx, sel["i"] = sel["i"], None
             event.app.create_background_task(steps_nav["expand"](idx))
             return
-        if is_busy() or not text.strip():
+        if _busy_live() or not text.strip():
             return
         turn["task"] = event.app.create_background_task(_run_turn(text))
 
@@ -179,11 +189,11 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("c-c")
     def _interrupt(event):
-        _interrupt_action(turn, is_busy, stop_turn, event)
+        _interrupt_action(turn, _busy_live, stop_turn, event)
 
     @kb.add("c-d")
     def _eof(event):
-        if not is_busy():
+        if not _busy_live():
             event.app.exit()
 
     sel = {"i": None}   # None = no selection; else 0-based step index
@@ -197,20 +207,20 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     @kb.add("up")
     def _step_up(event):
         n = _nav_count()
-        if n and not buf.text and not is_busy():
+        if n and not buf.text and not _busy_live():
             sel["i"] = (n - 1) if sel["i"] is None else max(0, sel["i"] - 1)
             event.app.invalidate()
 
     @kb.add("down")
     def _step_down(event):
         n = _nav_count()
-        if n and not buf.text and not is_busy():
+        if n and not buf.text and not _busy_live():
             sel["i"] = 0 if sel["i"] is None else min(n - 1, sel["i"] + 1)
             event.app.invalidate()
 
     @kb.add("escape")
     def _step_clear(event):
-        _escape_action(sel, turn, is_busy, stop_turn, event, buf=buf)
+        _escape_action(sel, turn, _busy_live, stop_turn, event, buf=buf)
 
     @kb.add("pageup")
     def _pgup(event):
