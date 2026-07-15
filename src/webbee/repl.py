@@ -1,43 +1,14 @@
 import asyncio
 import contextlib
 import os
-import subprocess
 import sys
 
 from webbee import __version__
+from webbee.account import login_device_flow
+from webbee.boot import _git_branch, _open_dock_stderr_log, replay_thread, start_intel, start_shadow
 from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
 from webbee.tui import next_mode
-
-
-def _git_branch(workspace: str) -> str:
-    try:
-        p = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=workspace,
-                           capture_output=True, text=True, timeout=5)
-        return p.stdout.strip() if p.returncode == 0 else "-"
-    except (OSError, subprocess.SubprocessError):
-        return "-"
-
-
-def _open_dock_stderr_log():
-    """A file to swallow stderr for the full-screen dock's lifetime. The dock is
-    a prompt_toolkit full-screen Application that OWNS the terminal (it diffs the
-    screen); ANY stray write to stderr while it runs — a dependency's tqdm
-    download bar, a library warning, a background watcher-task traceback —
-    desyncs that diff and shows up as overlapping/duplicated text. Routing
-    stderr to ~/.cache/webbee/tui-stderr.log keeps the dock pixel-clean while
-    still preserving errors for debugging. Falls back to os.devnull if the cache
-    dir is unwritable; NEVER raises."""
-    try:
-        d = os.path.expanduser("~/.cache/webbee")
-        os.makedirs(d, exist_ok=True)
-        return open(os.path.join(d, "tui-stderr.log"), "a", buffering=1, encoding="utf-8")
-    except Exception:
-        try:
-            return open(os.devnull, "w")
-        except Exception:
-            import io
-            return io.StringIO()
 
 
 async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
@@ -80,28 +51,6 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
         return ""
     sink.end_turn(text)
     return text
-
-
-def _default_shadow_factory(cfg, workspace: str):
-    """The reversibility shadow git. Guarded like intel: any failure (no git
-    binary, cache not writable) degrades to None -- coding still works, just
-    without the time machine."""
-    from webbee.checkpoints import ShadowGit, shadow_key
-    from webbee.repo import find_repo_root
-    root = find_repo_root(workspace)
-    sg = ShadowGit(root, shadow_key(root), cache_dir=cfg.cache_dir)
-    return sg if sg.ensure() else None
-
-
-def _default_intel_factory(cfg, workspace: str):
-    """Lazy/guarded -- a base install (no tree-sitter/watchfiles extra) must
-    never fail to import here; `_boot` wraps the whole intel boot in
-    try/except so any error (missing extra, indexing failure) degrades to
-    `intel=None` rather than crashing the REPL."""
-    from webbee.intel.service import IntelService
-    from webbee.repo import compute_repo_key, find_repo_root
-    root = find_repo_root(workspace)
-    return IntelService(root, compute_repo_key(root), cache_dir=cfg.cache_dir)
 
 
 async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None, read_line=input,
@@ -158,18 +107,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             if res.exit:
                 return "exit"
             if res.action == "login":
-                # ONE shared imperal_mcp mechanism: device-code flow (RFC 8628),
-                # async, so we await it directly on the dock's event loop (the
-                # /login turn runs as a background task, so the dock stays
-                # responsive while it polls). on_prompt renders the code + URL
-                # into the feed — a bare print would be invisible in the dock.
-                def _login_prompt(user_code, uri, uri_complete):
-                    show = getattr(_sink, "login_prompt", None)
-                    if show:
-                        show(user_code, uri)
-                    else:
-                        _sink.note(f"Open {uri} and enter code: {user_code}")
-                email = await auth.login_device(cfg, on_prompt=_login_prompt)
+                # Device-code flow (RFC 8628) — rendering + polling in webbee.account.
+                email = await login_device_flow(cfg, auth, _sink)
                 state["logged_in"] = True
                 _sink.note(f"Signed in as {email}.")
                 return "continue"
@@ -317,47 +256,16 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         account = await account_fetcher(cfg, token_provider)
         state["logged_in"] = account.signed_in
         _sink.welcome(account, workspace, "terminal")
-        # Boot replay of the durable per-user thread (Task 9): best-effort,
-        # entirely swallowed on any failure -- history is a nice-to-have,
-        # never a boot blocker (network down, no such session yet, etc.).
-        try:
-            from imperal_mcp.client import ImperalClient
-            from webbee.thread import (conversational_text, fetch_recent_thread,
-                                       truncate_for_display)
-            _iid = await ImperalClient(cfg, token_provider).whoami()
-            _msgs = await fetch_recent_thread(cfg, token_provider, f"marathon-{_iid}-rboot")
-            _shown = 0
-            for _m in _msgs[-40:]:
-                _text = conversational_text(_m.get("content", ""))
-                if not _text:
-                    continue  # pure tool traffic -- mind-food, not conversation
-                _sink.foreign_turn(_m.get("surface", "terminal"), _m.get("role", ""),
-                                   truncate_for_display(_text))
-                _shown += 1
-            if _shown:
-                _sink.note("— live —")
-        except Exception:
-            pass  # replay is best-effort; never block boot
+        # Boot replay of the durable per-user thread (Task 9) — best-effort,
+        # never a boot blocker (webbee.boot.replay_thread swallows everything).
+        await replay_thread(cfg, token_provider, _sink)
         if cfg.intel_enabled:
-            # Off-loop build (indexing does sync file I/O + subprocess). Any
-            # failure here (missing extra, bad repo, etc.) must degrade to
-            # intel=None, never crash the boot -- coding still works, just
-            # without repo intelligence.
-            try:
-                svc = (intel_factory or _default_intel_factory)(cfg, workspace)
-                await asyncio.to_thread(svc.build)
-                intel = svc
-                from webbee.intel import watch
-                watcher_task = asyncio.ensure_future(watch.watch_workspace(intel.root, intel.apply_changes))
-            except Exception:
-                intel = None
-                watcher_task = None
+            # Guarded off-loop build + watcher; any failure degrades to
+            # intel=None, never crashes the boot (webbee.boot.start_intel).
+            intel, watcher_task = await start_intel(cfg, workspace, intel_factory)
         # Whole-mind P4: the reversibility shadow (never the user's VCS);
         # guarded -- boot must not fail over the time machine.
-        try:
-            shadow = await asyncio.to_thread(shadow_factory or _default_shadow_factory, cfg, workspace)
-        except Exception:
-            shadow = None
+        shadow = await start_shadow(cfg, workspace, shadow_factory)
         agent = agent_factory(cfg, token_provider, workspace, state["mode"])
         # Liveness v2 §B: idle-steer pickup. All poll/drain logic lives in
         # webbee.steer -- this is wiring only: the sink's live turn state

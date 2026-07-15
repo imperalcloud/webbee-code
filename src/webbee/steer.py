@@ -27,7 +27,7 @@ async def derive_session_id(cfg, token_provider, workspace: str, *,
     turn has run: the gateway keys coding sessions stable per user+repo as
     `{marathon|coding}-{imperal_id}-r{repo_key}` (agent_sessions/router.py)
     from the repo_key the client itself sends in coding_context
-    (session.build_coding_context -> repo.compute_repo_key). The boot-replay
+    (coding_context.build_coding_context -> repo.compute_repo_key). The boot-replay
     placeholder (`marathon-{iid}-rboot`) would pass the gateway's ownership
     prefix check but MISS the per-session remote-control state key
     (resolve_state reads k_state(session_id) -- set by /notify under the real

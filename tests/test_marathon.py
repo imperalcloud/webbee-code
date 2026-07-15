@@ -10,7 +10,7 @@ Covers the two SECURITY/behaviour-load-bearing pieces:
 """
 import asyncio
 
-from webbee.session import detect_verify_cmd
+from webbee.coding_context import detect_verify_cmd
 
 
 # --- detect_verify_cmd -------------------------------------------------------

@@ -1,6 +1,8 @@
 import asyncio
 
-from webbee.session import handle_tool_request, handle_confirm_request, build_coding_context
+from webbee.coding_context import build_coding_context
+from webbee.consent import handle_confirm_request
+from webbee.frames import handle_tool_request
 
 
 class RecordingExecutor:
@@ -529,7 +531,7 @@ def test_local_tool_v2_frames_dont_double_the_tool_request_render():
     # EXISTING mechanism, then step_finished. Only ONE start/result pair
     # must reach the sink.
     from webbee.frames import handle_step_started, handle_step_finished, _first_time
-    from webbee.session import _summary
+    from webbee.frames import _summary
     sink = RecSink()
     started, finished, labels, steps, local_ids = set(), set(), {}, [], set()
     handle_step_started({"step_id": "toolu_1", "kind": "local_tool", "tool": "read_file"},

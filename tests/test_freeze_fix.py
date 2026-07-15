@@ -7,7 +7,8 @@ terminal). Every path must return a result so the kernel unblocks."""
 import asyncio
 
 from webbee.tools import LocalToolExecutor
-from webbee.session import handle_tool_request, handle_confirm_request
+from webbee.consent import handle_confirm_request
+from webbee.frames import handle_tool_request
 
 
 def test_outside_workspace_returns_result_not_raise(tmp_path):

@@ -39,6 +39,21 @@ async def _default_get(cfg, token: str, path: str) -> dict:
         return r.json()
 
 
+async def login_device_flow(cfg, auth, sink) -> str:
+    """ONE shared imperal_mcp mechanism: device-code flow (RFC 8628), async,
+    so the caller awaits it directly on the dock's event loop (the /login turn
+    runs as a background task, so the dock stays responsive while it polls).
+    on_prompt renders the code + URL into the feed — a bare print would be
+    invisible in the dock. Returns the signed-in email."""
+    def _login_prompt(user_code, uri, uri_complete):
+        show = getattr(sink, "login_prompt", None)
+        if show:
+            show(user_code, uri)
+        else:
+            sink.note(f"Open {uri} and enter code: {user_code}")
+    return await auth.login_device(cfg, on_prompt=_login_prompt)
+
+
 async def fetch_account(cfg, token_provider, *, get=None) -> Account:
     """Best-effort account summary for the welcome screen. NEVER raises: no
     token or a failed /v1/auth/me -> Account(signed_in=False); a failed

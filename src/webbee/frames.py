@@ -25,6 +25,13 @@ def _v2_step_label(frame: dict) -> str:
     return "·".join(x for x in (frame.get("app_id", ""), frame.get("tool", "")) if x)
 
 
+def _summary(result: dict) -> str:
+    """One-line summary of a tool result for the UI."""
+    content = str(result.get("content", ""))
+    first = content.strip().splitlines()[0] if content.strip() else ""
+    return first[:120]
+
+
 def _summary_from_facts(facts: dict) -> str:
     """Renderer-composed one-line summary from v2 structured summary_facts
     (I-FRAMES-FACTS-ONLY: the kernel emits facts, never prose here). Degrades
@@ -103,6 +110,21 @@ def handle_step_finished(frame: dict, sink, finished: set, step_labels: dict, st
     steps.append({"step_id": sid, "label": label, "ok": ok})
 
 
+def handle_tool_request(frame: dict, executor) -> dict:
+    """Run a (kernel-pre-approved) local tool. The kernel gates write/bash
+    consent via confirm_request BEFORE dispatching, so a tool_request here is
+    always cleared to run. NEVER raises: a tool that errored (or a bug in the
+    executor) must STILL return a result so the caller posts it back and the
+    kernel's dispatch unblocks — an unposted result hangs the turn and freezes
+    the whole dock."""
+    rid = frame.get("req_id")
+    try:
+        result = executor.run(frame.get("tool", ""), frame.get("args", {}))
+    except Exception as e:
+        result = {"ok": False, "content": f"local tool crashed: {type(e).__name__}: {e}"}
+    return {"req_id": rid, "result": result}
+
+
 def handle_action_frame(frame: dict, sink, started: set, finished: set, steps: list) -> None:
     """OLD R2 ext-tool 'action' start/done frame -> sink.tool_start/
     tool_result, deduped by step_id against the v2 twin (dual-emit compat
@@ -133,6 +155,16 @@ def handle_action_frame(frame: dict, sink, started: set, finished: set, steps: l
 
 _FOREIGN_ACTIONABLE_TYPES = ("tool_request", "confirm_request", "final",
                              "marathon_complete", "panel_release_required")
+
+
+def _is_foreign_frame(frame: dict, own_task_id: str) -> bool:
+    """C7 filter predicate (extracted verbatim from run()'s inline check): a
+    frame stamped with a DIFFERENT task_id on the shared persistent stream,
+    when it is origin-stamped or actionable, belongs to another turn and is
+    DISPLAY-ONLY for this client. task_id absent (legacy kernels) -> own."""
+    ftid = frame.get("task_id", "")
+    return bool(ftid and own_task_id and ftid != own_task_id and (
+        frame.get("origin") or frame.get("type") in _FOREIGN_ACTIONABLE_TYPES))
 
 
 def _origin_tag(frame: dict) -> str:

@@ -8,8 +8,8 @@ download progress bars at the entry point; (2) route stderr to a log file for
 the dock's whole lifetime."""
 import os
 
+from webbee.boot import _open_dock_stderr_log
 from webbee.cli import _quiet_downloads
-from webbee.repl import _open_dock_stderr_log
 
 
 def test_quiet_downloads_sets_env(monkeypatch):
