@@ -887,3 +887,75 @@ def test_stop_swallows_network_errors(monkeypatch):
     sess = AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
     sess.session_id = "coding-u-1"
     asyncio.run(sess.stop())  # must not raise — fail-soft
+
+
+# ── surface threading into the turn POST (liveness v2 §B) ─────────────────────
+# An idle-steer pickup submits the remote instruction through the SAME turn
+# path a typed line takes, plus ONE additive body key: `surface` = the queued
+# item's origin. The kernel adopts it start-path to stamp provenance/tags.
+
+def _run_turn_capture_body(monkeypatch, **run_kw):
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    bodies = []
+
+    class _SessResp:
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, json=None, **kw):
+            if path == "/v1/agent/sessions":
+                bodies.append(json)
+            return _SessResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    class _Sink:
+        def progress(self, *a): ...
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    out = asyncio.run(sess.run("do it", _Sink(), **run_kw))
+    assert out == "done"
+    return bodies[0]
+
+
+def test_run_threads_surface_into_session_post_body(monkeypatch):
+    body = _run_turn_capture_body(monkeypatch, surface="telegram")
+    assert body["surface"] == "telegram"
+    assert body["task"] == "do it"
+
+
+def test_run_omits_surface_key_for_plain_typed_turns(monkeypatch):
+    # Additive-only contract: a normal typed turn's POST body is byte-identical
+    # to before -- no `surface` key at all.
+    body = _run_turn_capture_body(monkeypatch)
+    assert "surface" not in body

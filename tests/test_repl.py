@@ -570,3 +570,116 @@ def test_boot_replay_skips_note_when_thread_empty(monkeypatch):
     sink, agent = _run(read_line=_lines("/exit"))
     assert getattr(sink, "foreign", []) == []
     assert not any("live" in n for n in sink.notes)
+
+
+# ── idle-steer pickup wiring (liveness v2 §B) ─────────────────────────────────
+# The poll loop itself lives in webbee.steer (unit-tested in test_steer.py);
+# these cover ONLY the repl wiring: the poller task starts at boot with the
+# right seams, its submit renders the remote line + runs a surface-tagged turn
+# through the SAME path a typed line takes, and it is cancelled on exit.
+
+class SurfaceAgent(FakeAgent):
+    """FakeAgent that accepts the additive `surface` turn kwarg and yields to
+    the event loop once per run so the boot-started poller task can interleave
+    with a typed turn (the plain fallback read_line is sync)."""
+    session_id = "marathon-user-1-rab12cd34ef56"
+
+    async def run(self, task, sink, *, marathon=False, goal="", surface=""):
+        self.tasks.append(task)
+        self.runs.append({"task": task, "marathon": marathon, "goal": goal,
+                          "surface": surface})
+        await asyncio.sleep(0)
+        return f"answer:{task}"
+
+
+def test_steer_pickup_renders_remote_line_and_runs_tagged_turn(monkeypatch):
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, workspace, is_busy, submit,
+                         marathon=True, live_session_id=lambda: "", **kw):
+        captured["marathon"] = marathon
+        captured["live_sid"] = live_session_id()
+        await submit("push the fix", "telegram")
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+
+    agent = SurfaceAgent()
+    # three yield points: "hello" lets the boot-started poller task interleave
+    # (submit begins the steer turn), "again" lets the steer turn COMPLETE
+    # before /exit tears the loop down (read_line itself is sync here).
+    sink, agent = _run(read_line=_lines("hello", "again", "/exit"), agent=agent)
+    # the remote user's line renders tagged with its origin surface...
+    assert ("telegram", "user", "push the fix") in getattr(sink, "foreign", [])
+    # ...and the SAME turn path ran it, threading surface into the turn kwargs
+    steer_runs = [r for r in agent.runs if r["task"] == "push the fix"]
+    assert steer_runs and steer_runs[0]["surface"] == "telegram"
+    assert steer_runs[0]["marathon"] is True          # normal marathon turn
+    # a picked-up turn ends like any other -- end_turn fired, dock leaves busy
+    assert "answer:push the fix" in sink.turns
+    # the wiring hands the poller the agent's LIVE session id seam (gateway
+    # truth once a turn has run; webbee.steer derives the repo id before that)
+    assert captured["live_sid"] == "marathon-user-1-rab12cd34ef56"
+    assert captured["marathon"] is True
+
+
+def test_steer_poller_busy_gate_reads_sink(monkeypatch):
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, workspace, is_busy, submit, **kw):
+        captured["is_busy"] = is_busy
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+
+    class BusySink(FakeSink):
+        def is_busy(self):
+            return True
+
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent(),
+                       sink=BusySink())
+    # the poller's busy gate is the sink's live turn state (begin/end_turn)
+    assert captured["is_busy"]() is True
+
+
+def test_steer_poller_without_sink_busy_hook_defaults_idle(monkeypatch):
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, workspace, is_busy, submit, **kw):
+        captured["is_busy"] = is_busy
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent())
+    assert captured["is_busy"]() is False   # FakeSink has no is_busy -> never blocks
+
+
+def test_steer_poller_once_mode_polls_coding_session(monkeypatch):
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, workspace, marathon=True, **kw):
+        captured["marathon"] = marathon
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent(),
+                       once=True)
+    assert captured["marathon"] is False    # -> coding-{iid}-r{key} derivation
+
+
+def test_steer_poller_cancelled_on_exit(monkeypatch):
+    import webbee.steer as SP
+    fate = {}
+
+    async def hanging_poller(cfg, token_provider, **kw):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            fate["cancelled"] = True
+            raise
+
+    monkeypatch.setattr(SP, "poll_idle_steer", hanging_poller)
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent())
+    # no leaked task: the repl cancelled the poller on exit and the loop closed
+    # cleanly (asyncio.run inside _run would warn/hang otherwise)
+    assert fate.get("cancelled") is True

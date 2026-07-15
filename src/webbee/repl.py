@@ -134,6 +134,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     intel = None         # assigned by _boot -- IntelService, or None (off/base-install/boot failure)
     shadow = None        # assigned by _boot -- ShadowGit, or None (git unavailable / boot failure)
     watcher_task = None  # assigned by _boot -- background watchfiles task, cancelled on exit
+    steer_task = None    # assigned by _boot -- idle-steer poller (webbee.steer), cancelled on exit
 
     def _cycle() -> None:
         state["mode"] = next_mode(state["mode"])
@@ -269,21 +270,42 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
 
         # A task for the agent.
         _sink.user_echo(line)
+        await _run_turn(line)
+        return "continue"
+
+    async def _run_turn(line: str, surface: str = "") -> None:
+        """ONE agent turn -- the SAME path for a typed line and an idle-steer
+        pickup (liveness v2 §B), which threads the queued item's origin
+        `surface` into the turn so the kernel stamps provenance start-path.
+        Only the echo differs at the call sites: user_echo for a typed line,
+        foreign_turn for a remote one."""
         _sink.begin_turn()
+        kw = {"surface": surface} if surface else {}
         try:
-            text = await agent.run(line, _sink, marathon=not once, goal=(line if not once else ""))
+            text = await agent.run(line, _sink, marathon=not once,
+                                   goal=(line if not once else ""), **kw)
         except (KeyboardInterrupt, asyncio.CancelledError):
             _sink.abort()
             _sink.note("Interrupted.")
-            return "continue"
+            return
         except Exception as e:  # network/auth/etc — never crash the REPL
             _sink.note(f"Error: {type(e).__name__}: {e}")
-            return "continue"
+            return
         _sink.end_turn(text)
-        return "continue"
+
+    async def _steer_submit(text: str, surface: str) -> None:
+        """webbee.steer hands a drained remote instruction here: render it as
+        the remote user's own line, then run it as a normal turn."""
+        _sink.foreign_turn(surface, "user", text)
+        await _run_turn(text, surface=surface)
+
+    def _cancel_background() -> None:
+        for _t in (watcher_task, steer_task):
+            if _t is not None:
+                _t.cancel()
 
     async def _boot(s) -> None:
-        nonlocal _sink, agent, intel, watcher_task, shadow
+        nonlocal _sink, agent, intel, watcher_task, shadow, steer_task
         _sink = s
         # Cache git branch OFF the event loop (subprocess.run blocks it). Only
         # /status reads it; recomputing it per input line froze the dock.
@@ -333,6 +355,16 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         except Exception:
             shadow = None
         agent = agent_factory(cfg, token_provider, workspace, state["mode"])
+        # Liveness v2 §B: idle-steer pickup. All poll/drain logic lives in
+        # webbee.steer -- this is wiring only: the sink's live turn state
+        # gates polling, the agent's session id (once a turn has run) is the
+        # gateway truth, and _steer_submit is the normal turn path.
+        from webbee import steer as _steer
+        steer_task = asyncio.ensure_future(_steer.poll_idle_steer(
+            cfg, token_provider, workspace=workspace, marathon=not once,
+            is_busy=lambda: bool(getattr(_sink, "is_busy", None) and _sink.is_busy()),
+            live_session_id=lambda: getattr(agent, "session_id", ""),
+            submit=_steer_submit))
 
     if use_dock:
         ok = False
@@ -369,8 +401,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         stop_turn=lambda: agent.stop(),
                     )
                 finally:
-                    if watcher_task is not None:
-                        watcher_task.cancel()
+                    _cancel_background()
         except Exception:
             ok = False
         finally:
@@ -404,5 +435,4 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             if await _handle(line) == "exit":
                 return
     finally:
-        if watcher_task is not None:
-            watcher_task.cancel()
+        _cancel_background()

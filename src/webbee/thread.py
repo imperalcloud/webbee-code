@@ -6,7 +6,9 @@ before the live loop starts. House pattern = sessions.py/remote.py: (cfg,
 token_provider), lazy httpx, Bearer auth. This module does not swallow errors
 itself -- `_boot` wraps the whole replay in one try/except so a network
 failure never blocks/delays boot beyond the timeout, it just skips the
-replay (same division of labor as remote.py + the /notify call site)."""
+replay (same division of labor as remote.py + the /notify call site).
+Also home to the /thread endpoint's pending-steer sibling read (liveness v2
+§B) -- the drain webbee.steer polls while the REPL is idle."""
 from __future__ import annotations
 
 _DISPLAY_LIMIT = 400
@@ -40,6 +42,23 @@ async def fetch_recent_thread(cfg, token_provider, session_id: str) -> list[dict
                         headers={"Authorization": f"Bearer {token}"})
         r.raise_for_status()
         return (r.json() or {}).get("messages", [])
+
+
+async def fetch_pending_steer(cfg, token_provider, session_id: str) -> list[dict]:
+    """Drain this user's queued remote instructions (idle-steer pickup,
+    liveness v2 §B) -- the /thread endpoint's sibling, same auth. The gateway
+    read is DESTRUCTIVE: each queued item is returned exactly ONCE, oldest
+    first (empty when nothing is queued or remote control is disabled), so
+    the caller owns every item it receives. Non-swallowing like
+    fetch_recent_thread above: the poller (webbee.steer) wraps each tick in
+    its own try/except."""
+    import httpx
+    token = await token_provider()
+    async with httpx.AsyncClient(base_url=cfg.api_url, timeout=10) as c:
+        r = await c.get(f"/v1/agent/sessions/{session_id}/pending-steer",
+                        headers={"Authorization": f"Bearer {token}"})
+        r.raise_for_status()
+        return (r.json() or {}).get("items", [])
 
 
 def truncate_for_display(text, limit: int = _DISPLAY_LIMIT) -> str:

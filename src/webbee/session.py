@@ -218,7 +218,8 @@ class AgentSession:
         token = await self.token_provider()
         return {"Authorization": f"Bearer {token}"}
 
-    async def run(self, task: str, sink, *, marathon: bool = False, goal: str = "") -> str:
+    async def run(self, task: str, sink, *, marathon: bool = False, goal: str = "",
+                  surface: str = "") -> str:
         import httpx
 
         from webbee.tools import LocalToolExecutor
@@ -239,6 +240,12 @@ class AgentSession:
                                      shadow=self._shadow)
 
         body = {"user_id": imperal_id, "task": task, "coding_context": coding_context}
+        if surface:
+            # Liveness v2 §B: an idle-steer pickup carries the queued item's
+            # origin surface so the kernel adopts it start-path (provenance +
+            # [surface] tags). Additive-only -- a typed turn's body is
+            # byte-identical to before.
+            body["surface"] = surface
         if marathon:
             body["marathon"] = True
             body["goal"] = goal

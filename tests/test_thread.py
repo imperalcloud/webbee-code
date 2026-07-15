@@ -111,6 +111,119 @@ def test_fetch_recent_thread_raises_on_http_error(monkeypatch):
         pass
 
 
+# ── pending-steer fetcher (liveness v2 §B) ────────────────────────────────────
+
+def test_fetch_pending_steer_gets_right_path_and_bearer(monkeypatch):
+    from webbee.thread import fetch_pending_steer
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": [{"text": "push the fix", "surface": "telegram", "ts": 1}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, path, headers=None, **kw):
+            seen["path"] = path
+            seen["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    out = asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56"))
+    assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/pending-steer"
+    assert seen["headers"] == {"Authorization": "Bearer tok"}
+    assert out == [{"text": "push the fix", "surface": "telegram", "ts": 1}]
+
+
+def test_fetch_pending_steer_empty_response_returns_empty_list(monkeypatch):
+    from webbee.thread import fetch_pending_steer
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, path, headers=None, **kw):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    assert asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56")) == []
+
+
+def test_fetch_pending_steer_drain_is_gateway_side_no_client_cache(monkeypatch):
+    # The gateway read is DESTRUCTIVE (each item returned exactly once): the
+    # client must relay each response verbatim and never re-serve a previously
+    # drained item from any cache of its own.
+    from webbee.thread import fetch_pending_steer
+    payloads = [[{"text": "one", "surface": "telegram", "ts": 1}], []]
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, path, headers=None, **kw):
+            items = payloads.pop(0)
+
+            class _Resp:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"items": items}
+
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    first = asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56"))
+    second = asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56"))
+    assert first == [{"text": "one", "surface": "telegram", "ts": 1}]
+    assert second == []
+
+
+def test_fetch_pending_steer_propagates_network_error():
+    # Non-swallowing, same division of labor as fetch_recent_thread: the
+    # poller (webbee.steer) owns the per-tick try/except.
+    from webbee.thread import fetch_pending_steer
+
+    class _UnreachableCfg:
+        api_url = "http://127.0.0.1:1"
+
+    try:
+        asyncio.run(fetch_pending_steer(_UnreachableCfg(), _tp, "marathon-user-1-rab12cd34ef56"))
+        assert False, "expected a network error to propagate"
+    except Exception:
+        pass
+
+
 def test_truncate_for_display_short_text_unchanged():
     assert truncate_for_display("hello") == "hello"
 
