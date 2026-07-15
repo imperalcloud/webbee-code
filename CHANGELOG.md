@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.9
+
+- Internal restructure: the session engine was split into focused modules
+  (consent handling, coding context, boot) — no behavior change.
+
+
 ## 0.3.8
 
 - No more sign-in races: token refresh is serialized and retries once after
