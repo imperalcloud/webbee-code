@@ -1,6 +1,7 @@
 import asyncio
 import os
 import subprocess
+from dataclasses import dataclass
 
 from webbee.frames import (
     _FOREIGN_ACTIONABLE_TYPES,
@@ -14,6 +15,62 @@ from webbee.frames import (
     marathon_note,
     render_foreign_frame,
 )
+
+
+def _is_foreign_frame(frame: dict, own_task_id: str) -> bool:
+    """C7 filter predicate (extracted verbatim from run()'s inline check): a
+    frame stamped with a DIFFERENT task_id on the shared persistent stream,
+    when it is origin-stamped or actionable, belongs to another turn and is
+    DISPLAY-ONLY for this client. task_id absent (legacy kernels) -> own."""
+    ftid = frame.get("task_id", "")
+    return bool(ftid and own_task_id and ftid != own_task_id and (
+        frame.get("origin") or frame.get("type") in _FOREIGN_ACTIONABLE_TYPES))
+
+
+async def _retire(task) -> None:
+    """Cancel + drain a racing task so it never outlives the frame loop
+    (liveness A hygiene). Absorbs the loser's outcome — CancelledError, a
+    late result, StopAsyncIteration, a transport error — retirement must
+    never introduce a new failure path. An externally-delivered cancellation
+    of the CALLER (task finished before our cancel landed) still propagates."""
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        if not task.cancelled():
+            raise                       # ours was the outer cancel — propagate
+    except Exception:
+        pass
+
+
+def _dismiss_consent(sink) -> None:
+    """Tell the UI the pending consent prompt was answered on ANOTHER surface
+    (liveness A). Guarded like the other optional sink hooks — a minimal sink
+    without `consent_dismissed` (or a UI bug) must never break the frame loop."""
+    fn = getattr(sink, "consent_dismissed", None)
+    if fn is None:
+        return
+    try:
+        fn("↩ answered from another surface")
+    except Exception:
+        pass
+
+
+@dataclass
+class _ConsentRace:
+    """Outcome of racing the local consent prompt against the stream
+    (liveness A). Exactly one shape per race:
+      * out          — the prompt resolved locally (today's path): POST it; a
+                       pulled-ahead __anext__ may ride along in carry_task.
+      * carry_frame  — the stream won: the park ended elsewhere; the prompt was
+                       cancelled + dismissed, nothing is posted, and the pulled
+                       frame is handed back to the loop for normal handling.
+      * stream_ended — StopAsyncIteration mid-consent: exit as stream end.
+    """
+    out: dict | None = None
+    carry_task: asyncio.Task | None = None
+    carry_frame: dict | None = None
+    stream_ended: bool = False
 
 
 def handle_tool_request(frame: dict, executor) -> dict:
@@ -215,121 +272,208 @@ class AgentSession:
             step_labels: dict = {}
             local_ids: set = set()
             from webbee.stream import stream_frames
-            async for frame in stream_frames(
-                client, session_id, self._headers, start_id=start_id,
-            ):
-                ftype = frame.get("type")
-
-                _ftid = frame.get("task_id", "")
-                # A frame from a DIFFERENT turn on the shared persistent stream
-                # (task_id absent on legacy kernels -> treated as own). C7 safety:
-                # foreign actionable frames are NEVER executed/consented and NEVER
-                # end this turn -- but instead of vanishing they (and any origin-
-                # stamped cross-surface display frame, e.g. a Telegram-steered
-                # turn's progress) now render ONE tagged, display-only line.
-                if _ftid and self._task_id and _ftid != self._task_id and (
-                        frame.get("origin") or ftype in _FOREIGN_ACTIONABLE_TYPES):
-                    render_foreign_frame(frame, sink)
-                    continue
-
-                # Live steer topology: a Telegram/panel-steered turn keeps THIS
-                # client's task_id (the terminal stays the sole executor) with
-                # `origin` stamped -- tag the text renders below; everything
-                # else (execution, dedup, consent, accounting) is unchanged.
-                _tag = _origin_tag(frame)
-
-                if ftype == "tool_request":
-                    rid = frame.get("req_id")
-                    sid = str(rid or "")
-                    if rid in seen:
-                        out = seen[rid]
+            stream = stream_frames(client, session_id, self._headers, start_id=start_id)
+            # Liveness A: explicit __anext__ pulls (not `async for`) so a
+            # pending local consent can RACE the stream. Between iterations at
+            # most ONE of carry_task/carry_frame is set — a consent race hands
+            # ownership of its pulled-ahead pull back to this loop: a pending
+            # task when consent won, an already-pulled frame when the stream
+            # won. Everything else is byte-identical to the old async-for.
+            carry_task = None    # a still-pending __anext__ task (consent won)
+            carry_frame = None   # an already-pulled frame (the stream won)
+            try:
+                while True:
+                    if carry_frame is not None:
+                        frame, carry_frame = carry_frame, None
                     else:
-                        # UI rendering is guarded so it can never block the
-                        # result POST below (an unposted result hangs the kernel
-                        # dispatch and freezes the dock).
-                        if _first_time(sid, started):
-                            try:
-                                sink.tool_start(_tag + frame.get("tool", ""), frame.get("args", {}))
-                            except Exception:
-                                pass
-                        out = await asyncio.to_thread(handle_tool_request, frame, executor)
-                        res = out["result"]
-                        if _first_time(sid, finished):
-                            try:
-                                sink.tool_result(_tag + frame.get("tool", ""), bool(res.get("ok")), _summary(res))
-                                self.steps.append({"step_id": sid,
-                                                   "label": frame.get("tool", ""),
-                                                   "ok": bool(res.get("ok"))})
-                            except Exception:
-                                pass
-                        seen[rid] = out
-                    await self._post_result(client, session_id, out)
+                        if carry_task is not None:
+                            pull, carry_task = carry_task, None
+                        else:
+                            pull = asyncio.ensure_future(stream.__anext__())
+                        try:
+                            frame = await pull
+                        except StopAsyncIteration:
+                            break
+                    ftype = frame.get("type")
 
-                elif ftype == "confirm_request":
-                    rid = frame.get("req_id")
-                    if rid in seen:
-                        out = seen[rid]
-                    else:
-                        if self.mode == "plan":
-                            sink.plan_blocked(frame.get("tool", ""))
-                        out = await handle_confirm_request(frame, self.mode, sink.ask_consent)
-                        seen[rid] = out
-                    await self._post_result(client, session_id, out)
-
-                elif ftype == "panel_release_required":
-                    sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
-
-                elif ftype == "action":  # R2 — ext-tool call (server-side) surfaced in the feed
-                    handle_action_frame(frame, sink, started, finished, self.steps)
-
-                elif ftype == "step_started":  # v2 (Slice-5 T8 dual-emit)
-                    handle_step_started(frame, sink, started, step_labels, local_ids)
-
-                elif ftype == "step_finished":  # v2 (Slice-5 T8 dual-emit)
-                    handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
-
-                elif ftype == "thinking":  # system-driven reasoning -> the 💭 block
-                    _text = _progress_text(frame)
-                    (getattr(sink, "thinking", None) or sink.progress)(_tag + _text if _text else "")
-
-                elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
-                    _text = _progress_text(frame)
-                    sink.progress(_tag + _text if _text else "")
-
-                elif ftype == "usage":  # P2 — cumulative tokens + credits (Slice C; raw $ stays server-side)
-                    sink.usage(
-                        int(frame.get("tokens", 0) or 0),
-                        int(frame.get("credits", 0) or 0),
-                    )
-
-                elif ftype == "marathon_complete":  # U4 — the whole GOAL is done: terminal
-                    return frame.get("text", "")
-
-                elif ftype in _MARATHON_FACT_TYPES:  # U4 — marathon plan/milestone/pause
-                    # Facts-only; render ONE human-readable line. Guarded: a
-                    # minimal sink (no `note`) simply drops the fact rather than
-                    # crashing the turn (the stream reader already tolerates
-                    # unknown frame types by ignoring them).
-                    _note = getattr(sink, "note", None)
-                    if _note is not None:
-                        _note(marathon_note(frame))
-                    if ftype == "marathon_paused":
-                        # Parked (out-of-credits / consent / runaway) -> end the
-                        # turn so the dock leaves "working"; the note shows why, and
-                        # the run resumes on the user's next reply.
-                        return ""
-
-                elif ftype == "final":
-                    # In a MARATHON a `final` is a PER-MILESTONE result, NOT the end
-                    # of the run -> keep streaming (the goal ends on marathon_complete
-                    # / marathon_paused, or a user-stop `final` with stopped=true). A
-                    # non-marathon coding turn's `final` is terminal (unchanged).
-                    if marathon and not frame.get("stopped"):
+                    # A frame from a DIFFERENT turn on the shared persistent stream
+                    # (task_id absent on legacy kernels -> treated as own). C7 safety:
+                    # foreign actionable frames are NEVER executed/consented and NEVER
+                    # end this turn -- but instead of vanishing they (and any origin-
+                    # stamped cross-surface display frame, e.g. a Telegram-steered
+                    # turn's progress) now render ONE tagged, display-only line.
+                    if _is_foreign_frame(frame, self._task_id):
+                        render_foreign_frame(frame, sink)
                         continue
-                    _text = frame.get("text", "")
-                    return _tag + _text if _text else ""
+
+                    # Live steer topology: a Telegram/panel-steered turn keeps THIS
+                    # client's task_id (the terminal stays the sole executor) with
+                    # `origin` stamped -- tag the text renders below; everything
+                    # else (execution, dedup, consent, accounting) is unchanged.
+                    _tag = _origin_tag(frame)
+
+                    if ftype == "tool_request":
+                        rid = frame.get("req_id")
+                        sid = str(rid or "")
+                        if rid in seen:
+                            out = seen[rid]
+                        else:
+                            # UI rendering is guarded so it can never block the
+                            # result POST below (an unposted result hangs the kernel
+                            # dispatch and freezes the dock).
+                            if _first_time(sid, started):
+                                try:
+                                    sink.tool_start(_tag + frame.get("tool", ""), frame.get("args", {}))
+                                except Exception:
+                                    pass
+                            out = await asyncio.to_thread(handle_tool_request, frame, executor)
+                            res = out["result"]
+                            if _first_time(sid, finished):
+                                try:
+                                    sink.tool_result(_tag + frame.get("tool", ""), bool(res.get("ok")), _summary(res))
+                                    self.steps.append({"step_id": sid,
+                                                       "label": frame.get("tool", ""),
+                                                       "ok": bool(res.get("ok"))})
+                                except Exception:
+                                    pass
+                            seen[rid] = out
+                        await self._post_result(client, session_id, out)
+
+                    elif ftype == "confirm_request":
+                        rid = frame.get("req_id")
+                        if rid in seen:
+                            await self._post_result(client, session_id, seen[rid])
+                        else:
+                            if self.mode == "plan":
+                                sink.plan_blocked(frame.get("tool", ""))
+                            # Liveness A: the local prompt races the stream so a
+                            # consent answered from ANOTHER surface (Telegram
+                            # relay) unfreezes this terminal instead of leaving
+                            # the dock stuck on `approve? y/n`.
+                            race = await self._race_consent(frame, sink, stream)
+                            carry_task, carry_frame = race.carry_task, race.carry_frame
+                            if race.stream_ended:
+                                break
+                            if race.out is not None:
+                                seen[rid] = race.out
+                                await self._post_result(client, session_id, race.out)
+
+                    elif ftype == "panel_release_required":
+                        sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
+
+                    elif ftype == "action":  # R2 — ext-tool call (server-side) surfaced in the feed
+                        handle_action_frame(frame, sink, started, finished, self.steps)
+
+                    elif ftype == "step_started":  # v2 (Slice-5 T8 dual-emit)
+                        handle_step_started(frame, sink, started, step_labels, local_ids)
+
+                    elif ftype == "step_finished":  # v2 (Slice-5 T8 dual-emit)
+                        handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
+
+                    elif ftype == "thinking":  # system-driven reasoning -> the 💭 block
+                        _text = _progress_text(frame)
+                        (getattr(sink, "thinking", None) or sink.progress)(_tag + _text if _text else "")
+
+                    elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
+                        _text = _progress_text(frame)
+                        sink.progress(_tag + _text if _text else "")
+
+                    elif ftype == "usage":  # P2 — cumulative tokens + credits (Slice C; raw $ stays server-side)
+                        sink.usage(
+                            int(frame.get("tokens", 0) or 0),
+                            int(frame.get("credits", 0) or 0),
+                        )
+
+                    elif ftype == "marathon_complete":  # U4 — the whole GOAL is done: terminal
+                        return frame.get("text", "")
+
+                    elif ftype in _MARATHON_FACT_TYPES:  # U4 — marathon plan/milestone/pause
+                        # Facts-only; render ONE human-readable line. Guarded: a
+                        # minimal sink (no `note`) simply drops the fact rather than
+                        # crashing the turn (the stream reader already tolerates
+                        # unknown frame types by ignoring them).
+                        _note = getattr(sink, "note", None)
+                        if _note is not None:
+                            _note(marathon_note(frame))
+                        if ftype == "marathon_paused":
+                            # Parked (out-of-credits / consent / runaway) -> end the
+                            # turn so the dock leaves "working"; the note shows why, and
+                            # the run resumes on the user's next reply.
+                            return ""
+
+                    elif ftype == "final":
+                        # In a MARATHON a `final` is a PER-MILESTONE result, NOT the end
+                        # of the run -> keep streaming (the goal ends on marathon_complete
+                        # / marathon_paused, or a user-stop `final` with stopped=true). A
+                        # non-marathon coding turn's `final` is terminal (unchanged).
+                        if marathon and not frame.get("stopped"):
+                            continue
+                        _text = frame.get("text", "")
+                        return _tag + _text if _text else ""
+            finally:
+                # Never leak a pulled-ahead __anext__ past the loop (e.g. an
+                # exit while a consent race's carry is still pending).
+                if carry_task is not None:
+                    await _retire(carry_task)
 
         return ""
+
+    async def _race_consent(self, frame: dict, sink, stream) -> _ConsentRace:
+        """LIVE BUG fix (Valentin, 2026-07-15): a consent answered from
+        Telegram resolves the kernel park, but the frame loop used to block
+        INLINE in handle_confirm_request — the dock froze on `approve? y/n`
+        and the rest of the turn never rendered until a local keypress. The
+        local prompt now RACES the stream:
+          * the prompt resolves first -> POST it (today's path, unchanged);
+            the pulled-ahead frame rides back to the loop in carry_task.
+          * a re-published confirm_request with the SAME req_id (kernel
+            I-MARATHON-USER-WAKE presence re-publish) -> NOT an answer; the
+            prompt stays up and both racers keep going.
+          * any other OWN-turn frame -> the park ended elsewhere (answered
+            from another surface / superseded): cancel the prompt, dismiss the
+            dock, POST NOTHING (the kernel accepts only the FIRST result per
+            issued req_id), hand the frame back for normal handling.
+          * foreign frames (C7) stay display-only and never end the park.
+        Consent is never auto-approved here — autopilot/plan resolve instantly
+        inside handle_confirm_request exactly as before."""
+        rid = frame.get("req_id")
+        consent_task = asyncio.ensure_future(
+            handle_confirm_request(frame, self.mode, sink.ask_consent))
+        pull = None
+        try:
+            while True:
+                if pull is None:
+                    pull = asyncio.ensure_future(stream.__anext__())
+                await asyncio.wait({consent_task, pull},
+                                   return_when=asyncio.FIRST_COMPLETED)
+                if consent_task.done():
+                    # The local answer wins — even when both racers finished in
+                    # the same cycle the pulled frame is NOT lost: the loop owns
+                    # carry_task and processes it next.
+                    return _ConsentRace(out=consent_task.result(), carry_task=pull)
+                nxt_pull, pull = pull, None
+                try:
+                    nxt = nxt_pull.result()
+                except StopAsyncIteration:
+                    # Stream ended mid-consent: retire the prompt safely and
+                    # exit exactly as today's stream end (no result posted).
+                    await _retire(consent_task)
+                    return _ConsentRace(stream_ended=True)
+                if _is_foreign_frame(nxt, self._task_id):
+                    render_foreign_frame(nxt, sink)
+                    continue
+                if nxt.get("type") == "confirm_request" and nxt.get("req_id") == rid:
+                    continue
+                await _retire(consent_task)
+                _dismiss_consent(sink)
+                return _ConsentRace(carry_frame=nxt)
+        except BaseException:
+            # Hygiene on any unexpected exit (StreamAuthError from the pull,
+            # outer cancellation, a consent-task crash): no racer may leak.
+            for t in (consent_task, pull):
+                if t is not None and not t.done():
+                    await _retire(t)
+            raise
 
     async def _post_result(self, client, session_id: str, out: dict) -> None:
         # Best-effort: a result POST must NEVER raise into the stream loop — that

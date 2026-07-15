@@ -233,6 +233,20 @@ class RichSink:
         self.console.print(_pad(Text(f"{who}{tag}: {_clean(text)}", style=_BEE)))
         self._nudge()
 
+    def consent_dismissed(self, note: str) -> None:
+        """Liveness A: the pending consent was answered on ANOTHER surface
+        (e.g. relayed from Telegram) — the kernel park is over. Retire the
+        pinned prompt so the dock leaves `approve? y/n`: cancel the armed
+        Future (consent_pending() flips False, so the toolbar repaints out of
+        the consent state on the next _nudge) and print ONE note-style line
+        so the scrollback shows why the y/n prompt vanished."""
+        if self._consent is not None and not self._consent.done():
+            self._consent.cancel()
+        self._consent = None
+        self._consent_summary = ""
+        self.console.print(_pad(Text(_clean(note), style=_BEE)))
+        self._nudge()
+
     def clear(self) -> None:
         """/clear: wipe the pane/screen + reset the session counters."""
         self.console.clear()

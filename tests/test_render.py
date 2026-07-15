@@ -265,6 +265,24 @@ def test_foreign_turn_tagged_line_no_turn_accounting():
     assert not NO_CYRILLIC.search(out)
 
 
+def test_consent_dismissed_resets_prompt_state_and_prints_note():
+    # Liveness A: a consent answered on ANOTHER surface retires the pinned
+    # prompt — the armed Future is cancelled (consent_pending() -> False, so
+    # the toolbar leaves `approve? y/n`) and ONE note-style line explains why
+    # the prompt vanished. A late local Enter is then a harmless no-op.
+    async def _t():
+        s = _sink()
+        s._consent = asyncio.get_running_loop().create_future()
+        s._consent_summary = "bash"
+        assert s.consent_pending() is True
+        s.consent_dismissed("↩ answered from another surface")
+        assert s.consent_pending() is False
+        assert s._consent is None and s._consent_summary == ""
+        s.resolve_consent("y")   # late keypress after dismissal -> no-op
+        assert "answered from another surface" in s.console.export_text()
+    asyncio.run(_t())
+
+
 def test_foreign_turn_strips_control_bytes():
     # Kernel-relayed text is untrusted -- same _clean rule as note()/tool lines.
     s = _sink()

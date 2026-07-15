@@ -185,6 +185,7 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
         def tool_start(self, *a): ...
         def tool_result(self, *a): ...
         def ask_consent(self, *a): return "y"
+        def consent_dismissed(self, note): ...
         def panel_release(self, *a): ...
         def progress(self, text): self.progress_calls.append(text)
         def usage(self, *a): self.usage_calls.append(a)
@@ -300,6 +301,7 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
         def tool_start(self, tool, args): self.starts.append((tool, dict(args)))
         def tool_result(self, tool, ok, summary): self.results.append((tool, ok, summary))
         def ask_consent(self, *a): return "y"
+        def consent_dismissed(self, note): ...
         def panel_release(self, *a): ...
         def progress(self, text): self.progress_calls.append(text)
         def usage(self, *a): ...
@@ -390,6 +392,8 @@ class RecSink:
 
     def tool_result(self, tool, ok, summary):
         self.results.append((tool, ok, summary))
+
+    def consent_dismissed(self, note): ...
 
 
 def test_v2_step_label_matches_old_action_label_ladder():
@@ -590,6 +594,199 @@ def test_progress_dual_reads_llm_text_over_legacy_text():
     assert _progress_text({"text": "old", "llm_text": "new"}) == "new"
     assert _progress_text({"text": "legacy-only"}) == "legacy-only"
     assert _progress_text({}) == ""
+
+
+# --- Liveness A: the consent prompt races the stream --------------------------
+# LIVE BUG (Valentin, 2026-07-15): a consent answered from Telegram resolves
+# the kernel park, but the frame loop stayed blocked INLINE in
+# handle_confirm_request -- the dock froze on `approve? y/n` and the rest of
+# the turn never rendered until a local keypress. The local prompt now RACES
+# the stream; the ONLY new behavior is during a pending consent.
+
+
+class ConsentRaceSink:
+    """Sink double whose ask_consent mirrors the dock's pinned prompt: it
+    blocks on a Future-like wait (forever, or until `release` fires) and
+    records whether the race cancelled it."""
+
+    def __init__(self, reply=None, release=None):
+        self.consent_calls = []
+        self.dismissed = []
+        self.thinks = []
+        self.progress_calls = []
+        self.consent_cancelled = False
+        self._reply = reply        # None -> never answered locally
+        self._release = release    # optional Event gating the local answer
+
+    async def ask_consent(self, app_id, tool, args):
+        self.consent_calls.append((app_id, tool, args))
+        try:
+            if self._release is not None:
+                await self._release.wait()
+            elif self._reply is None:
+                await asyncio.Event().wait()   # pends forever (no local keypress)
+        except asyncio.CancelledError:
+            self.consent_cancelled = True
+            raise
+        return self._reply
+
+    def consent_dismissed(self, note):
+        self.dismissed.append(note)
+
+    def tool_start(self, *a): ...
+    def tool_result(self, *a): ...
+    def panel_release(self, *a): ...
+    def progress(self, text): self.progress_calls.append(text)
+    def thinking(self, text): self.thinks.append(text)
+    def usage(self, *a): ...
+    def foreign_turn(self, surface, role, text):
+        self.foreign = getattr(self, "foreign", []) + [(surface, role, text)]
+    def plan_blocked(self, *a): ...
+
+
+def _run_consent_race(monkeypatch, fake_stream, sink, on_result_post=None):
+    """Drive AgentSession.run() with the network faked (same style as the C7
+    tests above); returns (result, result_posts) where result_posts is every
+    JSON body POSTed to the /result endpoint."""
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+    import webbee.tools as T
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider): ...
+        async def whoami(self): return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    class _NoExecutor:
+        def __init__(self, root, indexer=None, shadow=None): ...
+        def run(self, tool, args): return {"ok": True, "content": "ran"}
+
+    monkeypatch.setattr(T, "LocalToolExecutor", _NoExecutor)
+    monkeypatch.setattr(ST, "stream_frames", fake_stream)
+
+    result_posts = []
+
+    class _SessResp:
+        def raise_for_status(self): ...
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class _ResultResp:
+        def raise_for_status(self): ...
+        def json(self): return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): ...
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, json=None, **kw):
+            if path == "/v1/agent/sessions":
+                return _SessResp()
+            result_posts.append(json)
+            if on_result_post is not None:
+                on_result_post(json)
+            return _ResultResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    async def token_provider(): return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    result = asyncio.run(sess.run("do it", sink))
+    return result, result_posts
+
+
+def test_consent_prompt_dismissed_when_turn_continues_from_another_surface(monkeypatch):
+    # Test 1: confirm_request parks the turn; a `thinking` frame arrives (the
+    # consent was answered from Telegram -- the kernel moved on). The local
+    # prompt task must be CANCELLED, the sink told via consent_dismissed, NO
+    # consent result POSTed (the kernel accepts only the FIRST result per
+    # issued req_id), the thinking frame must render, and the turn must
+    # continue to its final normally.
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+        yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
+               "app_id": "webbee", "tool": "bash", "args": {"command": "rm x"}}
+        yield {"type": "thinking", "task_id": "OURS", "llm_text": "ok, proceeding"}
+        yield {"type": "final", "task_id": "OURS", "text": "all done"}
+
+    sink = ConsentRaceSink()               # never answered locally
+    result, posts = _run_consent_race(monkeypatch, _stream, sink)
+
+    assert result == "all done"                       # turn reached its final
+    assert sink.consent_cancelled is True             # prompt task cancelled
+    assert sink.dismissed == ["↩ answered from another surface"]
+    assert posts == []                                # NO consent result POSTed
+    assert sink.thinks == ["ok, proceeding"]          # pulled-ahead frame rendered
+
+
+def test_consent_local_answer_posts_exactly_as_today(monkeypatch):
+    # Test 2: the user answers locally FIRST -- the result is POSTed exactly
+    # as today, nothing is dismissed/cancelled, and the turn ends normally.
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+        yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
+               "app_id": "webbee", "tool": "bash", "args": {"command": "ls"}}
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    sink = ConsentRaceSink(reply="да, давай")
+    result, posts = _run_consent_race(monkeypatch, _stream, sink)
+
+    assert result == "done"
+    assert posts == [{"req_id": "c1", "result": {"consent_reply": "да, давай"}}]
+    assert sink.consent_cancelled is False
+    assert sink.dismissed == []
+
+
+def test_consent_republished_same_req_id_keeps_prompt_one_post(monkeypatch):
+    # Test 3: the kernel RE-PUBLISHES the pending confirm_request with the
+    # SAME req_id on a presence flip (I-MARATHON-USER-WAKE). That is NOT an
+    # answer -- the local prompt must stay up (not cancelled, not re-prompted);
+    # the local answer then produces exactly ONE POST.
+    release = asyncio.Event()    # gates the local answer
+    answered = asyncio.Event()   # gates the stream's final
+
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+        yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
+               "tool": "bash", "args": {}}
+        yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
+               "tool": "bash", "args": {}}    # kernel re-publish, SAME req_id
+        release.set()             # both confirms delivered -> NOW answer locally
+        await answered.wait()     # hold the stream until the answer is posted
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    sink = ConsentRaceSink(reply="y", release=release)
+    result, posts = _run_consent_race(
+        monkeypatch, _stream, sink, on_result_post=lambda body: answered.set())
+
+    assert result == "done"
+    assert len(sink.consent_calls) == 1               # ONE prompt, never re-prompted
+    assert sink.consent_cancelled is False            # re-publish did NOT cancel it
+    assert sink.dismissed == []
+    assert posts == [{"req_id": "c1", "result": {"consent_reply": "y"}}]
+
+
+def test_stream_end_while_consent_pending_returns_cleanly(monkeypatch):
+    # Test 4: the stream generator ends while the consent is still pending --
+    # no hang, no unposted-result crash: the prompt task is cancelled safely
+    # and run() exits exactly as today's stream end does (returns "").
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+        yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
+               "tool": "bash", "args": {}}
+        # generator ends -> StopAsyncIteration mid-consent-wait
+
+    sink = ConsentRaceSink()               # never answered locally
+    result, posts = _run_consent_race(monkeypatch, _stream, sink)
+
+    assert result == ""                    # today's stream-end return
+    assert sink.consent_cancelled is True  # prompt retired, no leaked task
+    assert posts == []                     # nothing bogus posted
+    assert sink.dismissed == []            # nothing was answered anywhere
 
 
 # --- P5g: AgentSession.stop() — Esc/Ctrl-C server-side cancel -----------------
