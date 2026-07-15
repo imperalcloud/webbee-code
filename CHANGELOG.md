@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.5
+
+- Surface-aware conversation: turns steered from Telegram/the panel render
+  live in the terminal tagged by origin (`[telegram]` / `[web-panel]`) —
+  the terminal stays the session's sole executor, foreign turns are
+  display-only and are never executed locally.
+- Boot replay: opening the terminal replays the recent conversation
+  (including cross-surface turns) with origin tags, then a "— live —"
+  divider. Best-effort — a network failure never blocks boot.
+
 ## 0.3.4
 
 - `/notify [tg|panel|both|off]` — mirror this coding session to Telegram
