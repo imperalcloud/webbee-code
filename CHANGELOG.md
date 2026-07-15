@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.7
+
+- Terminal liveness: a consent answered from Telegram/panel no longer
+  freezes the terminal — the `approve? y/n` prompt dismisses itself
+  ("answered from another surface") and the turn keeps rendering live.
+- Idle pickup: an open, idle terminal now picks up instructions sent from
+  Telegram/panel within seconds and runs them as normal turns, tagged with
+  their origin. If no terminal is open, the instruction waits (up to an
+  hour) and Telegram says so instead of failing.
+
 ## 0.3.6
 
 - Boot replay shows only the conversation: flattened tool traffic
