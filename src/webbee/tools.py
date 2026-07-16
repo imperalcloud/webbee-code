@@ -1,11 +1,34 @@
 import os
 import re
 import subprocess
+import time
+from datetime import datetime
 
 
 # Tools that MUTATE the workspace -> auto-checkpoint before each run
 # (mirrors the kernel write tier; rollback snapshots itself, so not listed).
 _WRITE_TIER = {"write_file", "edit_file", "multi_edit", "bash"}
+
+# Informational stale-view warning appended to a SUCCESSFUL edit/write when
+# the on-disk file is newer than the agent's last read (external edit under
+# the agent). Never blocks the work -- the brain just learns to re-read.
+_STALE_NOTE = "\n⚠ file changed on disk since you last read it — re-read to be safe"
+
+
+def _relative_time(ts: float, now: float | None = None) -> str:
+    """Compact human age for the read_file header: just now / 5m ago /
+    3h ago / 2d ago / a calendar date past a week."""
+    now = time.time() if now is None else now
+    d = max(0.0, now - ts)
+    if d < 60:
+        return "just now"
+    if d < 3600:
+        return f"{int(d // 60)}m ago"
+    if d < 86400:
+        return f"{int(d // 3600)}h ago"
+    if d < 7 * 86400:
+        return f"{int(d // 86400)}d ago"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
 class OutsideWorkspaceError(Exception):
@@ -17,6 +40,10 @@ class LocalToolExecutor:
         self.root = os.path.realpath(workspace_root)
         self.indexer = indexer  # IntelService (or None on a base install) -- Task 5's _t_<verb> shims read this
         self.shadow = shadow    # ShadowGit (or None) -- the reversibility time machine
+        # abs path -> st_mtime_ns of the file as the agent last SAW it (a
+        # read_file, or this executor's own write) -- powers the stale-edit
+        # warning. In-instance only: one executor == one coding session.
+        self._read_mtimes: dict[str, int] = {}
 
     def resolve_in_workspace(self, path: str) -> str:
         full = os.path.realpath(os.path.join(self.root, path))
@@ -82,22 +109,97 @@ class LocalToolExecutor:
         raise ValueError(f"'path' argument is missing (got keys: {sorted(a.keys())})")
 
     def _t_read_file(self, a: dict) -> dict:
+        # The result travels to the brain as ONE json dict (kernel folds it
+        # verbatim via _tool_result_content_str), so metadata rides in TWO
+        # places: a compact bracketed header line PREPENDED to content (always
+        # in the brain's view -- and, being first, it survives the kernel's
+        # 50K-char tail truncation on big files) + structured fields for any
+        # programmatic consumer. The file text after the header stays
+        # byte-exact: edits re-read the DISK, so the header can never leak
+        # into an old-string match.
         rel = self._rel(a)
         p = self.resolve_in_workspace(rel)
         with open(p, "r", encoding="utf-8") as f:
-            return {"ok": True, "content": f.read()}
+            text = f.read()
+        st = os.stat(p)
+        self._read_mtimes[p] = st.st_mtime_ns
+        n = len(text.splitlines())
+        header = self._file_header(os.path.relpath(p, self.root), n, st.st_mtime)
+        return {"ok": True, "content": header + "\n" + text,
+                "total_lines": n, "modified": int(st.st_mtime),
+                "modified_iso": datetime.fromtimestamp(st.st_mtime)
+                                        .astimezone().isoformat(timespec="seconds")}
+
+    def _file_header(self, rel: str, total_lines: int, mtime: float) -> str:
+        lines = "1 line" if total_lines == 1 else f"{total_lines} lines"
+        parts = [rel, lines, f"modified {_relative_time(mtime)}"]
+        parts.extend(self._intel_file_context(rel))
+        return "⟦ " + " · ".join(parts) + " ⟧"
+
+    def _intel_file_context(self, rel: str) -> list:
+        """Graph FACTS for the read header -- what the file defines + which
+        files use it, straight from the live repo index (IntelService.index /
+        .graph). Best-effort and honest: the watcher swaps whole FileIndex /
+        graph objects (never mutates them in place), so an unlocked read sees
+        a consistent snapshot; a missing index, unindexed file, or any error
+        degrades to [] (the header keeps lines+mtime only) -- never a crash,
+        never an invented purpose the graph doesn't actually hold."""
+        try:
+            idx = getattr(self.indexer, "index", None)
+            fi = idx.files.get(rel) if idx is not None else None
+            if fi is None:
+                return []
+            names: list = []
+            for kind in ("class", "function"):
+                for s in fi.symbols:
+                    if s.kind == kind and s.name not in names:
+                        names.append(s.name)
+            parts = []
+            if names:
+                extra = f" +{len(names) - 2} more" if len(names) > 2 else ""
+                parts.append("defines " + ", ".join(names[:2]) + extra)
+            graph = getattr(self.indexer, "graph", None)
+            if graph is not None and fi.symbols:
+                deps = sorted(graph.dependents_of({s.name for s in fi.symbols},
+                                                  depth=1) - {rel})
+                if deps:
+                    extra = f" +{len(deps) - 3} more" if len(deps) > 3 else ""
+                    parts.append("↔ used by " + ", ".join(deps[:3]) + extra)
+            return parts
+        except Exception:
+            return []  # intel is advisory -- a read must never fail on it
+
+    def _stale_note(self, p: str) -> str:
+        """The stale-view warning, or "" -- fires only when the agent HAS a
+        last-seen mtime for this file and the disk is strictly newer."""
+        last = self._read_mtimes.get(p)
+        try:
+            return _STALE_NOTE if last is not None and os.stat(p).st_mtime_ns > last else ""
+        except OSError:
+            return ""
+
+    def _note_own_write(self, p: str) -> None:
+        """Our own successful write IS the agent's current view -- refresh the
+        last-seen mtime so back-to-back edits don't false-alarm."""
+        try:
+            self._read_mtimes[p] = os.stat(p).st_mtime_ns
+        except OSError:
+            pass
 
     def _t_write_file(self, a: dict) -> dict:
         rel = self._rel(a)
         p = self.resolve_in_workspace(rel)
+        stale = self._stale_note(p)
         os.makedirs(os.path.dirname(p) or self.root, exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
             f.write(a.get("content", a.get("contents", "")))
-        return {"ok": True, "content": f"wrote {rel}"}
+        self._note_own_write(p)
+        return {"ok": True, "content": f"wrote {rel}" + stale}
 
     def _t_edit_file(self, a: dict) -> dict:
         rel = self._rel(a)
         p = self.resolve_in_workspace(rel)
+        stale = self._stale_note(p)
         old = a.get("old", a.get("old_string", ""))       # accept Claude-Code names
         new = a.get("new", a.get("new_string", ""))
         if not old:
@@ -116,8 +218,9 @@ class LocalToolExecutor:
                     f"unique, or pass replace_all=true to replace every occurrence"}
         with open(p, "w", encoding="utf-8") as f:
             f.write(text.replace(old, new) if replace_all else text.replace(old, new, 1))
+        self._note_own_write(p)
         note = f" ({n} occurrences)" if replace_all and n > 1 else ""
-        return {"ok": True, "content": f"edited {rel}{note}"}
+        return {"ok": True, "content": f"edited {rel}{note}" + stale}
 
     def _t_multi_edit(self, a: dict) -> dict:
         edits = a.get("edits")
@@ -127,6 +230,7 @@ class LocalToolExecutor:
         # worse than a failed one).
         staged = []
         problems = []
+        stale_rels = []           # checked BEFORE any write of this batch
         for i, e in enumerate(edits):
             if not isinstance(e, dict):
                 problems.append(f"edit {i}: not an object")
@@ -137,6 +241,8 @@ class LocalToolExecutor:
             except (ValueError, OutsideWorkspaceError) as err:
                 problems.append(f"edit {i}: {err}")
                 continue
+            if self._stale_note(p) and rel not in stale_rels:
+                stale_rels.append(rel)
             old = e.get("old", e.get("old_string", ""))
             new = e.get("new", e.get("new_string", ""))
             if not old:
@@ -172,8 +278,12 @@ class LocalToolExecutor:
                         f"re-read the file and retry the remaining edits"}
             with open(p, "w", encoding="utf-8") as f:
                 f.write(text.replace(old, new, 1))
+            self._note_own_write(p)
             applied.append(rel)
-        return {"ok": True, "content": f"applied {len(applied)} edits: " + ", ".join(applied)}
+        stale = ("\n⚠ changed on disk since you last read: " + ", ".join(stale_rels)
+                 + " — re-read to be safe") if stale_rels else ""
+        return {"ok": True,
+                "content": f"applied {len(applied)} edits: " + ", ".join(applied) + stale}
 
     def _t_checkpoint(self, a: dict) -> dict:
         if self.shadow is None:
