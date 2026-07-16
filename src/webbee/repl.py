@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import os
 import sys
+from collections import deque
 
 from webbee import __version__
 from webbee.account import login_device_flow
@@ -80,6 +81,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     # inject sink/read_line and take the plain fallback loop.
     use_dock = sink is None and read_line is input and sys.stdin.isatty()
     state = {"mode": mode, "logged_in": False}
+    # Type-ahead queue: OWNED here and shared with tui.run_session, so /queue
+    # and /queue clear (dispatched through CommandContext.queued, same
+    # mechanism /status uses for session state) see the live deque.
+    pending_queue: deque = deque()
     _sink = None         # assigned by _boot
     agent = None         # assigned by _boot
     intel = None         # assigned by _boot -- IntelService, or None (off/base-install/boot failure)
@@ -96,7 +101,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                               surface="terminal", logged_in=state["logged_in"],
                               session_tokens=getattr(_sink, "session_tokens", 0),
                               session_credits=getattr(_sink, "session_credits", 0),
-                              git_branch=state.get("git_branch", "-"))
+                              git_branch=state.get("git_branch", "-"),
+                              queued=tuple(pending_queue))
 
     async def _handle(line: str) -> str:
         """Process one input line. Returns 'exit' or 'continue'."""
@@ -198,6 +204,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 except Exception as e:
                     _sink.note(f"Remote control unavailable: {type(e).__name__}")
                 return "continue"
+            if res.action == "queue_clear":
+                # dispatch built the message (with the drop count) from the
+                # ctx snapshot; here we drop the live deque — the toolbar
+                # count follows on the sink's redraw below.
+                pending_queue.clear()
             if res.action == "clear":
                 _sink.clear()
                 _sink.note(res.message)
@@ -314,6 +325,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                             "expand": lambda i: _handle(f"/steps {i + 1}"),
                         },
                         stop_turn=lambda: agent.stop(),
+                        pending=pending_queue, queued_echo=_sink.queued_echo,
+                        queued_run=_sink.queued_run,
                     )
                 finally:
                     _cancel_background()

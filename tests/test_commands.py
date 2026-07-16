@@ -152,3 +152,37 @@ def test_notify_command_dispatches():
 def test_help_mentions_notify():
     from webbee.commands import dispatch
     assert "/notify" in dispatch("/help", _anyctx()).message
+
+
+# ── /queue — manage the dock's type-ahead queue (0.3.12) ─────────────────────
+# The queue snapshot rides in CommandContext.queued (threaded by the repl the
+# same way /status reads session state); dispatch stays pure.
+
+
+def test_queue_lists_pending_numbered_in_order():
+    r = dispatch("/queue", _ctx(queued=("fix the tests", "deploy it")))
+    assert r.handled and r.action == "queue"
+    assert "1. fix the tests" in r.message and "2. deploy it" in r.message
+    assert r.message.index("fix the tests") < r.message.index("deploy it")
+    assert not NO_CYRILLIC.search(r.message)
+
+
+def test_queue_empty_shows_hint():
+    r = dispatch("/queue", _ctx())
+    assert r.handled and r.action == "queue" and "empty" in r.message.lower()
+
+
+def test_queue_clear_reports_drop_count():
+    r = dispatch("/queue clear", _ctx(queued=("a", "b", "c")))
+    assert r.handled and r.action == "queue_clear"
+    assert "3 dropped" in r.message
+
+
+def test_queue_clear_when_already_empty():
+    r = dispatch("/queue clear", _ctx())
+    assert r.handled and r.action == "queue_clear"
+    assert "already empty" in r.message.lower()
+
+
+def test_help_mentions_queue():
+    assert "/queue" in dispatch("/help", _ctx()).message

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.12
+
+- Queued messages are now visible — when you type while Webbee is working,
+  your message shows as `⋯ queued: …` right away, the toolbar shows the count,
+  and it runs (clearly) after the current turn. New `/queue` and `/queue clear`
+  to see and manage what's waiting — they work even mid-turn.
+- Stopping a turn (Esc/Ctrl-C) no longer auto-runs the queue: it stays put,
+  visible, until you clear it or a next turn finishes naturally.
+
 ## 0.3.11
 
 - Type-ahead queue: send follow-ups while Webbee is working — they queue and

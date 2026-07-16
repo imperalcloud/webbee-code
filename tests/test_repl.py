@@ -19,6 +19,8 @@ class FakeSink:
     def abort(self): self.aborted = True
     def welcome(self, *a, **kw): ...
     def user_echo(self, text): self.echoed = getattr(self, "echoed", []) + [text]
+    def queued_echo(self, text): self.queued_echoes = getattr(self, "queued_echoes", []) + [text]
+    def queued_run(self, remaining): self.queued_runs = getattr(self, "queued_runs", []) + [remaining]
     def sessions_table(self, rows): self.session_tables = getattr(self, "session_tables", []) + [rows]
     def foreign_turn(self, surface, role, text):
         self.foreign = getattr(self, "foreign", []) + [(surface, role, text)]
@@ -692,3 +694,12 @@ def test_steer_poller_cancelled_on_exit(monkeypatch):
     # no leaked task: the repl cancelled the poller on exit and the loop closed
     # cleanly (asyncio.run inside _run would warn/hang otherwise)
     assert fate.get("cancelled") is True
+
+
+def test_queue_command_in_fallback_loop_reports_empty_and_never_hits_agent():
+    # /queue // /queue clear are pure display: the fallback loop (no dock) has
+    # an always-empty queue — honest messages, and the agent is never invoked.
+    sink, agent = _run(read_line=_lines("/queue", "/queue clear", "/exit"))
+    assert any("empty" in n.lower() for n in sink.notes)
+    assert any("already empty" in n.lower() for n in sink.notes)
+    assert agent.tasks == []

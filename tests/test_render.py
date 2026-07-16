@@ -428,3 +428,41 @@ def test_progress_and_thinking_strip_escapes():
     s.thinking(_INJ)
     out = s.console.export_text()
     assert "\x1b[?1003h" not in out and "pwned" not in out
+
+
+# ── queued_echo / queued_run — the visible type-ahead queue (0.3.12) ──────────
+
+
+def _rec_sink():
+    from rich.console import Console
+
+    from webbee.render import RichSink
+    c = Console(record=True, width=100)
+    return RichSink(console=c, live_enabled=False, input_fn=lambda p: "", clock=lambda: 0.0), c
+
+
+def test_queued_echo_renders_the_text_as_a_transcript_line():
+    s, c = _rec_sink()
+    s.queued_echo("deploy the fix")
+    assert "⋯ queued: deploy the fix" in c.export_text()
+
+
+def test_queued_echo_strips_control_bytes():
+    s, c = _rec_sink()
+    s.queued_echo("evil\x1b[?1003htext")
+    out = c.export_text()
+    assert "\x1b[?1003h" not in out and "eviltext" in out
+
+
+def test_queued_run_marker_announces_the_drain():
+    s, c = _rec_sink()
+    s.queued_run(2)
+    out = c.export_text()
+    assert "▶ running queued message" in out and "2 still queued" in out
+
+
+def test_queued_run_marker_omits_zero_remaining():
+    s, c = _rec_sink()
+    s.queued_run(0)
+    out = c.export_text()
+    assert "▶ running queued message" in out and "still queued" not in out

@@ -631,3 +631,229 @@ def test_dock_end_to_end_type_ahead_queues_then_drains_fifo():
         assert ok is True
 
     asyncio.run(scenario())
+
+
+# ── 0.3.12: the queue is VISIBLE + managed ────────────────────────────────────
+# 0.3.11 queued mechanically but silently (only a dim toolbar count). Now:
+# queueing echoes `⋯ queued: <text>` into the transcript AT ONCE
+# (sink.queued_echo, exactly once per queue action), a drain announces itself
+# (sink.queued_run) right before the drained line's normal ❯ user-echo, the
+# toolbar segment is an ACCENT (tb.working, not dim), /queue // /queue clear
+# manage the shared deque even mid-turn, and a user STOP (Esc/Ctrl-C)
+# PRESERVES the queue — drain on natural completion only.
+
+
+def test_queue_echo_fires_exactly_once_with_the_text():
+    from webbee.tui import _submit_line
+    buf = _RecBuf()
+    pending = deque()
+    started, echoed = [], []
+    assert _submit_line("ship it", buf, pending, True, started.append, echoed.append) == "queued"
+    assert echoed == ["ship it"]                     # the #1 fix: you SEE what queued
+    assert list(pending) == ["ship it"] and started == []
+
+
+def test_idle_submit_does_not_fire_queued_echo():
+    from webbee.tui import _submit_line
+    started, echoed = [], []
+    assert _submit_line("go", _RecBuf(), deque(), False, started.append, echoed.append) == "started"
+    assert echoed == [] and started == ["go"]
+
+
+def test_whitespace_never_queues_nor_echoes():
+    from webbee.tui import _submit_line
+    buf = _RecBuf()
+    pending = deque()
+    started, echoed = [], []
+    for junk in ("", "   ", "\t \t"):
+        assert _submit_line(junk, buf, pending, True, started.append, echoed.append) == "ignored"
+        assert _submit_line(junk, buf, pending, False, started.append, echoed.append) == "ignored"
+    assert not pending and started == [] and echoed == []
+    assert buf.history.items == []                   # junk is not recallable either
+
+
+def test_drain_marks_the_start_with_remaining_depth():
+    from webbee.tui import _drain_pending
+    started, marks = [], []
+    pending = deque(["a", "b"])
+    assert _drain_pending(pending, started.append, mark=marks.append) is True
+    assert started == ["a"] and marks == [1]         # announced with what's left waiting
+    assert _drain_pending(pending, started.append, mark=marks.append) is True
+    assert started == ["a", "b"] and marks == [1, 0]
+
+
+def test_toolbar_queued_segment_is_accent_not_dim():
+    for frags in (build_toolbar("default", 0, 0, busy=True, elapsed=1.0, queued=2),
+                  build_toolbar("default", 0, 0, queued=2)):
+        styles = [style for style, seg in frags if "queued" in seg]
+        assert styles == ["class:tb.working"]        # pops in busy AND idle, never dim
+
+
+def test_is_queue_command_matches_queue_and_subcommands_only():
+    from webbee.tui import _is_queue_command
+    assert _is_queue_command("/queue")
+    assert _is_queue_command("  /QUEUE clear ")
+    assert not _is_queue_command("/queues")
+    assert not _is_queue_command("queue")
+    assert not _is_queue_command("/status")
+    assert not _is_queue_command("")
+
+
+def test_escape_stop_flags_the_turn_so_the_queue_is_preserved():
+    from webbee.tui import _escape_action
+    event = _FakeEvent()
+    task = _FakeTask()
+    turn = {"task": task}
+    _escape_action({"i": None}, turn, lambda: True, None, event, buf=_FakeBuf(""))
+    assert task.cancelled == [1] and turn.get("stopped") is True
+
+
+def test_ctrl_c_stop_flags_the_turn_so_the_queue_is_preserved():
+    from webbee.tui import _interrupt_action
+    event = _FakeEvent()
+    task = _FakeTask()
+    turn = {"task": task}
+    _interrupt_action(turn, lambda: True, None, event)
+    assert task.cancelled == [1] and turn.get("stopped") is True
+
+
+def test_dock_stop_preserves_queue_then_natural_completion_drains():
+    # THE rock-solid rule, end-to-end on the real Application: a user STOP
+    # (Ctrl-C — deterministic in a pipe, no Esc flush timeout) never auto-runs
+    # the queue; the queued line survives, and only the NEXT natural turn
+    # completion drains it (with the queued_run marker).
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        ran, echoed, markers = [], [], []
+        gate = asyncio.Event()
+        busy = {"v": False}
+
+        async def on_line(text):
+            busy["v"] = True
+            ran.append(text)
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                pass                    # repl._run_turn absorbs a user stop
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        pend = deque()
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    pending=pend, queued_echo=echoed.append, queued_run=markers.append))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")
+                await _until(lambda: ran == ["first"])         # turn 1 is running
+                pipe.send_text("queued follow-up\r")           # type-ahead while busy
+                await _until(lambda: echoed == ["queued follow-up"])   # echoed AT ONCE
+                pipe.send_text("\x03")                         # user STOP (Ctrl-C)
+                await _until(lambda: not busy["v"])
+                await asyncio.sleep(0.1)
+                assert ran == ["first"]                        # the queue did NOT auto-run
+                assert list(pend) == ["queued follow-up"]      # preserved, still visible
+                assert markers == []                           # and no drain marker fired
+                gate.set()                                     # next turns complete at once
+                pipe.send_text("resume\r")                     # a deliberate new turn
+                await _until(lambda: ran == ["first", "resume", "queued follow-up"])
+                assert markers == [0]                          # the drain announced itself
+                assert not pend
+                await _until(lambda: not busy["v"])
+                pipe.send_text("\x04")                         # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_dock_queue_command_runs_immediately_even_while_busy():
+    # /queue must manage the queue exactly when it matters — MID-TURN. It goes
+    # straight to on_line as a background task (never type-ahead-queued), so
+    # /queue clear typed while busy empties the shared deque before the turn
+    # ends, and nothing drains at completion.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        ran, echoed = [], []
+        gate = asyncio.Event()
+        busy = {"v": False}
+        pend = deque()
+
+        async def on_line(text):
+            if text.split()[0].lower() == "/queue":      # the repl handler: display-only
+                ran.append(text)
+                if "clear" in text:
+                    pend.clear()
+                return
+            busy["v"] = True
+            ran.append(text)
+            await gate.wait()
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    pending=pend, queued_echo=echoed.append))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")
+                await _until(lambda: ran == ["first"])
+                pipe.send_text("second\r")                     # queued (type-ahead)
+                await _until(lambda: list(pend) == ["second"])
+                pipe.send_text("/queue\r")                     # runs NOW, while busy
+                await _until(lambda: "/queue" in ran)
+                assert list(pend) == ["second"]                # listing didn't touch it
+                pipe.send_text("/queue clear\r")               # drops it, still mid-turn
+                await _until(lambda: not pend)
+                gate.set()                                     # turn 1 finishes naturally
+                await _until(lambda: not busy["v"])
+                await asyncio.sleep(0.1)
+                assert "second" not in ran                     # cleared → nothing drained
+                assert echoed == ["second"]                    # /queue itself never echoed
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())

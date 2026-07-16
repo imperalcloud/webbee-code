@@ -222,6 +222,29 @@ class RichSink:
         self.console.print(_pad(Text(" ❯ " + _clean(text) + " ", style="bold white on grey30")))
         self._nudge()
 
+    def queued_echo(self, text: str) -> None:
+        """Type-ahead visibility (the #1 queue fix): the line you pressed
+        Enter on while a turn was running, committed to the scrollback the
+        MOMENT it queues — so you SEE exactly what's waiting, in order.
+        Muted-but-visible (quieter than user_echo's bar, louder than dim
+        chrome). When it drains, queued_run + the normal user_echo mark it
+        as the active turn."""
+        self.console.print(_pad(Text.assemble(
+            ("⋯ queued: ", f"bold {_BEE}"),
+            (_clean(text), "italic grey66"))))
+        self._nudge()
+
+    def queued_run(self, remaining: int) -> None:
+        """The tiny lifecycle marker printed right before a drained queued
+        line starts: `▶ running queued message` (+ how many still wait) — a
+        drain is never a silent start; the drained text's normal ❯ user_echo
+        follows immediately."""
+        tail = f" · {remaining} still queued" if remaining else ""
+        self.console.print(_pad(Text.assemble(
+            ("▶ ", f"bold {_BEE}"),
+            (f"running queued message{tail}", "italic grey66"))))
+        self._nudge()
+
     def foreign_turn(self, surface: str, role: str, text: str) -> None:
         """One tagged line for a turn that lives on ANOTHER surface (a
         Telegram/panel-steered turn on the shared stream, or a replayed prior

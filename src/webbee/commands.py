@@ -10,6 +10,7 @@ _HELP = """Commands:
   /mode [default|plan|autopilot]   consent mode (no arg — show current)
   /cost  (=/usage)   tokens + credits this session
   /status            cwd · git · surface · tokens · version
+  /queue [clear]     messages queued while Webbee works (clear drops them all)
   /steps [N]         last turn's steps; N expands one (also: Up/Down + Enter)
   /checkpoints       the reversibility time machine — list workspace checkpoints
   /rollback <ref>    restore the workspace to a checkpoint (id, cp-N or N)
@@ -30,6 +31,7 @@ class CommandContext:
     session_tokens: int
     session_credits: int
     git_branch: str
+    queued: tuple = ()   # snapshot of the dock's type-ahead queue, oldest first
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,23 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         return SlashResult(handled=True, action="sessions")
     if cmd == "/logout-others":
         return SlashResult(handled=True, action="logout_others")
+    if cmd == "/queue":
+        # ctx.queued is the live deque's snapshot (threaded by the repl the
+        # same way /status reads session state); the repl clears the actual
+        # deque on action="queue_clear" — the message here already carries
+        # the honest drop count.
+        if args and args[0].lower() == "clear":
+            n = len(ctx.queued)
+            return SlashResult(handled=True, action="queue_clear",
+                               message=(f"Queue cleared ({n} dropped)." if n
+                                        else "Queue is already empty."))
+        if not ctx.queued:
+            return SlashResult(handled=True, action="queue",
+                               message="Queue is empty — press Enter while Webbee is working to queue a message.")
+        lines = "\n".join(f"  {i}. {t}" for i, t in enumerate(ctx.queued, 1))
+        return SlashResult(handled=True, action="queue",
+                           message=(f"Queued ({len(ctx.queued)}) — runs in order, "
+                                    f"one per finished turn:\n{lines}"))
     if cmd == "/steps":
         if args:
             return SlashResult(handled=True, action="step_detail", arg=args[0])
