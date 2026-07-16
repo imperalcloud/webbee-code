@@ -192,6 +192,7 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
         def progress(self, text): self.progress_calls.append(text)
         def usage(self, *a): self.usage_calls.append(a)
         def foreign_turn(self, surface, role, text): self.foreign.append((surface, role, text))
+        def todos(self, items, total, done): self.todo_lists = getattr(self, "todo_lists", []) + [(items, total, done)]
 
     async def token_provider():
         return "tok"
@@ -308,6 +309,7 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
         def progress(self, text): self.progress_calls.append(text)
         def usage(self, *a): ...
         def foreign_turn(self, surface, role, text): self.foreign.append((surface, role, text))
+        def todos(self, items, total, done): self.todo_lists = getattr(self, "todo_lists", []) + [(items, total, done)]
 
     async def token_provider():
         return "tok"
@@ -394,6 +396,9 @@ class RecSink:
 
     def tool_result(self, tool, ok, summary):
         self.results.append((tool, ok, summary))
+
+    def todos(self, items, total, done):
+        self.todo_lists = getattr(self, "todo_lists", []) + [(items, total, done)]
 
     def consent_dismissed(self, note): ...
 
@@ -643,6 +648,8 @@ class ConsentRaceSink:
     def usage(self, *a): ...
     def foreign_turn(self, surface, role, text):
         self.foreign = getattr(self, "foreign", []) + [(surface, role, text)]
+    def todos(self, items, total, done):
+        self.todo_lists = getattr(self, "todo_lists", []) + [(items, total, done)]
     def plan_blocked(self, *a): ...
 
 

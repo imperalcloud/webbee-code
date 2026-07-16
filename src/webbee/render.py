@@ -215,6 +215,40 @@ class RichSink:
         self.console.print(_pad(Text(_clean(message), style=_BEE)))
         self._nudge()
 
+    def todos(self, items: list, total: int, done: int) -> None:
+        """Claude-Code-style checklist for the coding TODO scratchpad. The
+        kernel republishes the FULL list on every todo_write, so each update
+        re-renders the whole current plan inline — the latest complete list
+        always sits in the scrollback (deliberately NOT a pinned sticky panel:
+        inline re-render can't fight the dock layout). Order preserved, one
+        line per item: ✓ completed (dim, struck) · ▶ in progress (bold, so
+        "what's happening now" pops) · ○ pending (muted). Defensive: malformed
+        items are skipped, unknown statuses render as pending, bad counts
+        degrade to a bare header — never raises."""
+        try:
+            head = f"📋 Todos ({int(done)}/{int(total)})"
+        except (TypeError, ValueError):
+            head = "📋 Todos"
+        body = Text()                          # empty base style — segments below
+        body.append(head, style=f"bold {_BEE}")   # carry their OWN, no bleed-through
+        for item in (items if isinstance(items, (list, tuple)) else ()):
+            if not isinstance(item, dict):
+                continue                       # malformed entry — skip, never raise
+            content = _clean(item.get("content", "")).strip()
+            if not content:
+                continue
+            status = str(item.get("status", "") or "")
+            if status == "completed":
+                glyph, g_style, t_style = "✓", "green", "dim strike"
+            elif status == "in_progress":
+                glyph, g_style, t_style = "▶", f"bold {_BEE}", "bold"
+            else:                              # pending / unknown -> not started yet
+                glyph, g_style, t_style = "○", "grey66", "grey66"
+            body.append(f"\n  {glyph} ", style=g_style)
+            body.append(content, style=t_style)
+        self.console.print(_pad(body))
+        self._nudge()
+
     def user_echo(self, text: str) -> None:
         """Commit the just-sent user message as its own clearly-readable line
         with a background bar (NOT boxed like the live input) so it stands out

@@ -250,3 +250,26 @@ def marathon_note(frame: dict) -> str:
         head = f"📋 Todos {done}/{total}"
         return f"{head} — now: {current}" if current else head
     return str(frame.get("type", ""))
+
+
+def render_todo_frame(frame: dict, sink) -> None:
+    """Full-checklist render for a `todo` FACT (I-WEBBEE-CODE-TODO-SCRATCHPAD).
+    The kernel republishes the WHOLE list on every todo_write, so route it to
+    sink.todos(items, total, done) — the sink redraws the complete current
+    checklist inline (Claude-Code-style: the latest full list always sits in
+    the scrollback). Guarded like the other optional sink hooks: a minimal
+    sink without `todos` degrades to the old one-line marathon_note, and a
+    render error must never break the frame loop in session.run()."""
+    todos = frame.get("todos") if isinstance(frame.get("todos"), list) else []
+    total = frame.get("total", len(todos))
+    done = frame.get("completed", 0)
+    render = getattr(sink, "todos", None)
+    try:
+        if render is not None:
+            render(todos, total, done)
+        else:
+            note = getattr(sink, "note", None)
+            if note is not None:
+                note(marathon_note(frame))
+    except Exception:
+        pass

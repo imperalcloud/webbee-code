@@ -15,6 +15,7 @@ class FakeSink:
     def begin_turn(self): ...
     def end_turn(self, text): self.turns.append(text)
     def note(self, m): self.notes.append(m)
+    def todos(self, items, total, done): self.todo_lists = getattr(self, "todo_lists", []) + [(items, total, done)]
     def clear(self): self.cleared = True
     def abort(self): self.aborted = True
     def welcome(self, *a, **kw): ...

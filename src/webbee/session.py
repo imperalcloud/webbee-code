@@ -15,6 +15,7 @@ from webbee.frames import (
     handle_tool_request,
     marathon_note,
     render_foreign_frame,
+    render_todo_frame,
 )
 
 
@@ -226,14 +227,20 @@ class AgentSession:
                     elif ftype == "marathon_complete":  # U4 — the whole GOAL is done: terminal
                         return frame.get("text", "")
 
-                    elif ftype in _MARATHON_FACT_TYPES:  # U4 — marathon plan/milestone/pause
-                        # Facts-only; render ONE human-readable line. Guarded: a
-                        # minimal sink (no `note`) simply drops the fact rather than
-                        # crashing the turn (the stream reader already tolerates
-                        # unknown frame types by ignoring them).
-                        _note = getattr(sink, "note", None)
-                        if _note is not None:
-                            _note(marathon_note(frame))
+                    elif ftype in _MARATHON_FACT_TYPES:  # U4 — marathon plan/milestone/pause/todo
+                        # Facts-only. A `todo` fact carries the FULL list -> the
+                        # dedicated full-checklist render (falls back to the old
+                        # one-line note on a minimal sink). The other facts render
+                        # ONE human-readable line. Guarded: a minimal sink (no
+                        # `note`) simply drops the fact rather than crashing the
+                        # turn (the stream reader already tolerates unknown frame
+                        # types by ignoring them).
+                        if ftype == "todo":
+                            render_todo_frame(frame, sink)
+                        else:
+                            _note = getattr(sink, "note", None)
+                            if _note is not None:
+                                _note(marathon_note(frame))
                         if ftype == "marathon_paused":
                             # Parked (out-of-credits / consent / runaway) -> end the
                             # turn so the dock leaves "working"; the note shows why, and

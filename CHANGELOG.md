@@ -8,6 +8,9 @@
   to see and manage what's waiting — they work even mid-turn.
 - Stopping a turn (Esc/Ctrl-C) no longer auto-runs the queue: it stays put,
   visible, until you clear it or a next turn finishes naturally.
+- Task lists now render in full — every to-do with its status (✓ done ·
+  ▶ doing · ○ next), redrawn on each update, so you always see the whole plan
+  and where Webbee is in it.
 
 ## 0.3.11
 

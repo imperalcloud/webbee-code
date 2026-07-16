@@ -152,8 +152,9 @@ def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X", frames=Non
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
     class NoteSink:
-        def __init__(self): self.notes = []
+        def __init__(self): self.notes = []; self.todo_lists = []
         def note(self, msg): self.notes.append(msg)
+        def todos(self, items, total, done): self.todo_lists.append((items, total, done))
         def thinking(self, msg): self.thinks = getattr(self, "thinks", []) + [msg]
         def tool_start(self, *a): ...
         def tool_result(self, *a): ...
@@ -293,6 +294,7 @@ def test_normal_run_omits_marathon_fields(monkeypatch, tmp_path):
         def panel_release(self, *a): ...
         def progress(self, *a): ...
         def usage(self, *a): ...
+        def todos(self, items, total, done): self.todo_lists = getattr(self, "todo_lists", []) + [(items, total, done)]
 
     async def token_provider(): return "tok"
 
@@ -339,3 +341,64 @@ def test_todo_fact_renders_progress_line():
 def test_todo_fact_degrades_on_missing_fields():
     from webbee.frames import marathon_note
     assert "0/0" in marathon_note({"type": "todo"})          # never crashes
+
+
+# --- todo full-checklist routing (render_todo_frame) --------------------------
+
+
+def test_todo_fact_streams_full_list_to_sink_todos(monkeypatch, tmp_path):
+    # A streamed `todo` FACT routes to sink.todos with the FULL ordered list +
+    # correct done/total — NOT the old one-line note.
+    items = [
+        {"content": "map the repo", "status": "completed"},
+        {"content": "fix the bug", "status": "in_progress"},
+        {"content": "run tests", "status": "pending"},
+    ]
+    _, _, sink = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "todo", "task_id": "OURS", "total": 3, "completed": 1, "todos": items},
+        {"type": "marathon_complete", "task_id": "OURS", "text": "done"},
+    ])
+    assert sink.todo_lists == [(items, 3, 1)]
+    assert not any("📋" in n for n in sink.notes)      # no duplicate one-liner
+
+
+def test_render_todo_frame_falls_back_to_note_without_todos_hook():
+    # Back-compat: a minimal sink WITHOUT `todos` still gets the old one-line note.
+    from webbee.frames import render_todo_frame
+
+    class NoteOnly:
+        def __init__(self): self.notes = []
+        def note(self, m): self.notes.append(m)
+
+    s = NoteOnly()
+    render_todo_frame({"type": "todo", "total": 2, "completed": 1, "todos": [
+        {"content": "x", "status": "completed"},
+        {"content": "y", "status": "in_progress"}]}, s)
+    assert s.notes == ["📋 Todos 1/2 — now: y"]
+
+
+def test_render_todo_frame_never_breaks_the_frame_loop():
+    from webbee.frames import render_todo_frame
+
+    class Boom:
+        def todos(self, *a): raise RuntimeError("ui bug")
+
+    render_todo_frame({"type": "todo"}, Boom())        # must not raise
+
+    class Bare:                                        # neither todos nor note
+        ...
+
+    render_todo_frame({"type": "todo", "todos": "junk"}, Bare())   # must not raise
+
+
+def test_marathon_plan_and_milestone_still_one_line_notes(monkeypatch, tmp_path):
+    # The split is todo-ONLY: plan/milestone/pause stay on the note path even
+    # when the sink HAS a todos hook.
+    _, _, sink = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "marathon_plan", "task_id": "OURS", "milestone_count": 1, "goal": "g"},
+        {"type": "milestone", "task_id": "OURS", "index": 1, "title": "t", "status": "done"},
+        {"type": "marathon_complete", "task_id": "OURS", "text": "done"},
+    ])
+    assert any("Marathon plan" in n for n in sink.notes)
+    assert any("Milestone" in n for n in sink.notes)
+    assert sink.todo_lists == []

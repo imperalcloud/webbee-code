@@ -466,3 +466,57 @@ def test_queued_run_marker_omits_zero_remaining():
     s.queued_run(0)
     out = c.export_text()
     assert "▶ running queued message" in out and "still queued" not in out
+
+
+# ── todos — the full Claude-Code-style checklist (0.3.12) ─────────────────────
+
+
+def test_todos_renders_full_checklist_with_status_glyphs():
+    s, c = _rec_sink()
+    s.todos([
+        {"content": "map the repo", "status": "completed"},
+        {"content": "fix the bug", "status": "in_progress"},
+        {"content": "run tests", "status": "pending"},
+    ], 3, 1)
+    out = c.export_text()
+    assert "📋 Todos (1/3)" in out
+    assert "✓" in out and "▶" in out and "○" in out       # one glyph per status
+    # every item visible, list ORDER preserved
+    assert out.index("map the repo") < out.index("fix the bug") < out.index("run tests")
+
+
+def test_todos_glyph_sits_on_its_item_line():
+    s, c = _rec_sink()
+    s.todos([{"content": "only item", "status": "in_progress"}], 1, 0)
+    lines = c.export_text().splitlines()
+    assert any("▶" in ln and "only item" in ln for ln in lines)
+    assert not NO_CYRILLIC.search(c.export_text())        # English UI only
+
+
+def test_todos_malformed_items_and_counts_never_raise():
+    s, c = _rec_sink()
+    s.todos(["garbage", None, {"status": "pending"}, {"content": "real", "status": "weird"}],
+            "x", None)                                    # bad counts too
+    out = c.export_text()
+    assert "📋 Todos" in out
+    assert "real" in out and "garbage" not in out         # malformed entries skipped
+    assert "○" in out                                     # unknown status -> pending glyph
+
+
+def test_todos_items_not_a_list_never_raises():
+    s, c = _rec_sink()
+    s.todos("nope", 2, 1)                                 # type: ignore[arg-type]
+    assert "📋 Todos (1/2)" in c.export_text()
+
+
+def test_todos_empty_list_renders_minimal_header():
+    s, c = _rec_sink()
+    s.todos([], 0, 0)
+    assert "📋 Todos (0/0)" in c.export_text()
+
+
+def test_todos_strips_control_bytes_from_content():
+    s, c = _rec_sink()
+    s.todos([{"content": "evil\x1b[?1003hitem", "status": "pending"}], 1, 0)
+    out = c.export_text()
+    assert "\x1b[?1003h" not in out and "evilitem" in out
