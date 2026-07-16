@@ -10,7 +10,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 echo "Installing webbee…"
-uv tool install webbee
+uv tool install "webbee[intel,intel-embed]"
 
 echo ""
 echo "✅ webbee installed. Start it with:  webbee"

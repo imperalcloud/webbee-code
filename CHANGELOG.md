@@ -5,6 +5,12 @@
 - See queued messages from Telegram/panel right in the terminal queue
   (tagged by origin), and set the coding mode from Telegram — switching to
   autopilot asks you to confirm in the terminal first.
+- Reading a file now shows its size and freshness up front — line count,
+  when it was last modified, what it defines, and what depends on it — so
+  Webbee reads big files smartly and never edits a stale one; an edit to a
+  file that changed on disk since it was read gets a re-read nudge.
+- The code-intelligence graph now installs by default (`webbee[intel]`) —
+  symbol awareness + repo relationships are on out of the box, not opt-in.
 
 ## 0.3.13
 
