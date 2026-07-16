@@ -2,11 +2,15 @@
 output_pane.py) fills the top; a bordered input box + toolbar are pinned at
 the very bottom and never move while the output scrolls (mouse wheel /
 PageUp). `run_session` also drives step-navigation (Up/Down + Enter) over the
-pinned box when the input is empty and no turn is running. Pure helpers
-(next_mode/build_toolbar) are unit-tested; the Application is TTY/headless-
-smoke verified. Grounded in prompt_toolkit 3.0.52."""
+pinned box when the input is empty and no turn is running; in every other
+state Up/Down recall submitted lines (readline-style), and Enter while a turn
+runs QUEUES the line (Claude-Code type-ahead: it runs after the current
+turn). Pure helpers (next_mode/build_toolbar/the *_action functions) are
+unit-tested; the Application is TTY/headless-smoke verified. Grounded in
+prompt_toolkit 3.0.52."""
 import asyncio
 import re
+from collections import deque
 
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.render import _fmt_tokens
@@ -64,13 +68,16 @@ def next_mode(mode: str) -> str:
 
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
-                  consent: bool = False) -> list:
+                  consent: bool = False, queued: int = 0) -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
     text (per-segment styled). Three states: consent (awaiting a reply), busy
     (a turn is running — an ANIMATED coloured spinner + the current action in
     accent, so it pops, not grey), and idle (mode value coloured PER MODE —
     default cyan / plan purple / autopilot yellow — + SESSION spend + the
-    Shift + TAB hint). Style classes are defined in run_session's Style."""
+    Shift + TAB hint). `queued` = type-ahead lines waiting to run after the
+    current turn; when >0 a subtle `⋯N queued` segment shows in the busy AND
+    idle states. Style classes are defined in run_session's Style."""
+    q = f" · ⋯{queued} queued" if queued else ""
     if consent:
         return [("class:tb.consent", "  approve? type y / n / a reply · Enter to send")]
     if busy:
@@ -79,13 +86,13 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         if current:
             frags += [("class:tb.dim", " · "), ("class:tb.action", current)]
         frags.append(("class:tb.dim",
-                      f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"
+                      f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok{q}"
                       f"   ·   Esc/Ctrl-C to stop"))
         return frags
     return [("class:tb.dim", "  mode: "),
             (f"class:tb.mode.{mode}", mode),
             ("class:tb.dim",
-             f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits   ·   Shift + TAB: switch mode")]
+             f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits{q}   ·   Shift + TAB: switch mode")]
 
 
 def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event, buf=None) -> None:
@@ -122,15 +129,67 @@ def _interrupt_action(turn: dict, is_busy, stop_turn, event) -> None:
         t.cancel()                          # cancel the running turn; dock survives
 
 
+def _submit_line(text: str, buf, pending, busy: bool, start) -> str:
+    """Route ONE non-empty submitted line (dependency-injected, same testing
+    philosophy as _escape_action). Records it into the buffer's history first
+    (up-arrow recall), then: busy → QUEUE it (Claude-Code type-ahead — the
+    line is never erased or dropped; it runs after the current turn); idle →
+    `start(text)` (today's normal submit). Returns "queued" | "started"."""
+    buf.history.append_string(text)
+    if busy:
+        pending.append(text)
+        return "queued"
+    start(text)
+    return "started"
+
+
+def _drain_pending(pending, start) -> bool:
+    """Turn-completion drain: pop the OLDEST queued type-ahead line and hand
+    it to `start` — the SAME path a typed line takes, so a persistent
+    marathon receives it as a `new_task` into the running session. ONE item
+    per completion; the rest stay queued FIFO (each finished turn drains the
+    next). Returns True when a drain happened."""
+    if not pending:
+        return False
+    start(pending.popleft())
+    return True
+
+
+def _arrow_up_action(event, buf, sel: dict, n: int, busy: bool) -> None:
+    """Up key. Step-navigation EXACTLY as before when steps exist + input is
+    empty + idle; in EVERY other state (busy, or text present, or no steps)
+    recall an older submitted line into the buffer (readline-style)."""
+    if n and not buf.text and not busy:
+        sel["i"] = (n - 1) if sel["i"] is None else max(0, sel["i"] - 1)
+        event.app.invalidate()
+        return
+    buf.history_backward()
+    event.app.invalidate()
+
+
+def _arrow_down_action(event, buf, sel: dict, n: int, busy: bool) -> None:
+    """Down key — mirror of _arrow_up_action: step-nav on the same exact
+    gate, otherwise cycle history forward."""
+    if n and not buf.text and not busy:
+        sel["i"] = 0 if sel["i"] is None else min(n - 1, sel["i"] + 1)
+        event.app.invalidate()
+        return
+    buf.history_forward()
+    event.app.invalidate()
+
+
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                       is_busy, consent_pending, resolve_consent, steps_nav=None,
                       stop_turn=None) -> bool:
     """The full-screen dock: `pane` fills the top (scrollable), a bordered input
     box + toolbar are FIXED at the bottom. Enter either resolves a pending
     consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
-    (the box stays fixed during it). When `steps_nav` is given and the input is
-    empty and no turn is running, Up/Down move a step selection (toolbar shows
-    `step k/N`) and Enter expands it via `steps_nav["expand"]`; Esc clears it.
+    (the box stays fixed during it); while a turn runs, Enter QUEUES the line
+    (type-ahead — it starts right after the current turn; the toolbar shows
+    `⋯N queued`). When `steps_nav` is given and the input is empty and no turn
+    is running, Up/Down move a step selection (toolbar shows `step k/N`) and
+    Enter expands it via `steps_nav["expand"]`; Esc clears it. In every other
+    state Up/Down recall submitted lines (readline-style history).
     Returns True on clean exit; False if prompt_toolkit is unavailable (caller
     uses the plain fallback loop)."""
     try:
@@ -147,12 +206,24 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     buf = Buffer(multiline=False)
     turn = {"task": None}
+    pending: deque = deque()   # type-ahead queue: lines submitted while a turn runs
+
+    def _start_turn(text):
+        turn["task"] = get_app().create_background_task(_run_turn(text))
 
     async def _run_turn(text):
+        done = False
         try:
             await on_line(text)
+            done = True
         finally:
             turn["task"] = None
+            if done:
+                # Type-ahead drain: the turn finished normally (an Esc/Ctrl-C
+                # stop counts — repl._run_turn absorbs the cancel) → submit the
+                # oldest queued line through the SAME path a typed line takes.
+                # A propagating exception (dock teardown) leaves the queue be.
+                _drain_pending(pending, _start_turn)
             get_app().invalidate()
 
     kb = KeyBindings()
@@ -178,9 +249,12 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
             idx, sel["i"] = sel["i"], None
             event.app.create_background_task(steps_nav["expand"](idx))
             return
-        if _busy_live() or not text.strip():
+        if not text.strip():
             return
-        turn["task"] = event.app.create_background_task(_run_turn(text))
+        # Non-empty line: record for up-arrow recall, then queue-while-busy
+        # (type-ahead — runs after the current turn) or start a turn now.
+        if _submit_line(text, buf, pending, _busy_live(), _start_turn) == "queued":
+            event.app.invalidate()             # toolbar shows the new depth
 
     @kb.add("s-tab")
     def _cycle(event):
@@ -206,17 +280,11 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("up")
     def _step_up(event):
-        n = _nav_count()
-        if n and not buf.text and not _busy_live():
-            sel["i"] = (n - 1) if sel["i"] is None else max(0, sel["i"] - 1)
-            event.app.invalidate()
+        _arrow_up_action(event, buf, sel, _nav_count(), _busy_live())
 
     @kb.add("down")
     def _step_down(event):
-        n = _nav_count()
-        if n and not buf.text and not _busy_live():
-            sel["i"] = 0 if sel["i"] is None else min(n - 1, sel["i"] + 1)
-            event.app.invalidate()
+        _arrow_down_action(event, buf, sel, _nav_count(), _busy_live())
 
     @kb.add("escape")
     def _step_clear(event):
@@ -239,7 +307,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         st = status()
         return build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
                              current=st["current"], elapsed=st["elapsed"],
-                             tools=st["tools"], consent=st["consent"])
+                             tools=st["tools"], consent=st["consent"],
+                             queued=len(pending))
 
     # Dynamic height: EXACTLY the rows the wrapped input needs (1→10), so the box
     # grows as you type and shrinks back — never a fixed huge block. Enter still

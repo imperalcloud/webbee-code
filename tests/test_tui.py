@@ -412,3 +412,222 @@ def test_real_escape_with_clean_buffer_still_stops_the_turn():
     turn = {"task": task}
     _escape_action({"i": None}, turn, lambda: True, None, event, buf=_FakeBuf("draft reply"))
     assert task.cancelled == [1]             # normal Esc behavior unchanged
+
+
+# ── Unit Q (0.3.11): type-ahead queue + up-arrow history recall ───────────────
+# Enter while a turn runs used to ERASE the typed line (buf.reset() before the
+# busy gate). Now it queues (Claude-Code type-ahead): the line runs after the
+# current turn, the toolbar shows the depth, and up-arrow recalls submitted
+# lines to edit/resend. Handlers delegate to module-level *_action helpers —
+# same DI testing philosophy as _escape_action/_interrupt_action above.
+
+from collections import deque   # noqa: E402
+
+
+class _RecBuf:
+    """Buffer stand-in for _submit_line: records history appends."""
+    def __init__(self, text=""):
+        self.text = text
+        class _H:
+            def __init__(self): self.items = []
+            def append_string(self, s): self.items.append(s)
+        self.history = _H()
+
+
+def test_enter_while_busy_queues_line_not_erased():
+    from webbee.tui import _submit_line
+    buf = _RecBuf()
+    pending = deque()
+    started = []
+    assert _submit_line("deploy the fix", buf, pending, True, started.append) == "queued"
+    assert list(pending) == ["deploy the fix"]      # preserved, NOT erased
+    assert started == []                             # and NOT run mid-turn
+    assert buf.history.items == ["deploy the fix"]   # recallable via up-arrow
+
+
+def test_submit_while_idle_starts_turn_immediately():
+    # Idle + non-empty = today's normal submit, byte-identical behavior.
+    from webbee.tui import _submit_line
+    buf = _RecBuf()
+    pending = deque()
+    started = []
+    assert _submit_line("hello", buf, pending, False, started.append) == "started"
+    assert started == ["hello"] and not pending
+    assert buf.history.items == ["hello"]            # typed turns are recallable too
+
+
+def test_toolbar_shows_queue_depth_busy_and_idle():
+    busy = _txt(build_toolbar("default", 0, 0, busy=True, elapsed=1.0, queued=2))
+    assert "⋯2 queued" in busy and "working" in busy
+    idle = _txt(build_toolbar("default", 0, 0, queued=1))
+    assert "⋯1 queued" in idle and "Shift + TAB" in idle
+
+
+def test_toolbar_hides_queue_segment_when_empty():
+    assert "queued" not in _txt(build_toolbar("default", 0, 0, busy=True, elapsed=1.0))
+    assert "queued" not in _txt(build_toolbar("default", 0, 0))
+
+
+def test_turn_completion_drains_oldest_queued_to_submit_path():
+    from webbee.tui import _drain_pending
+    started = []
+    pending = deque(["first", "second"])
+    assert _drain_pending(pending, started.append) is True
+    assert started == ["first"]                      # OLDEST goes out…
+    assert list(pending) == ["second"]               # …one per completion, rest stay
+
+
+def test_drain_with_empty_queue_is_a_noop():
+    from webbee.tui import _drain_pending
+    started = []
+    assert _drain_pending(deque(), started.append) is False
+    assert started == []
+
+
+def test_fifo_order_across_multiple_queued():
+    from webbee.tui import _drain_pending, _submit_line
+    buf = _RecBuf()
+    pending = deque()
+    started = []
+    for t in ("a", "b", "c"):
+        _submit_line(t, buf, pending, True, started.append)
+    assert started == []                             # nothing runs mid-turn
+    while _drain_pending(pending, started.append):   # successive turn completions
+        pass
+    assert started == ["a", "b", "c"]                # strict FIFO
+
+
+def test_up_arrow_recalls_last_submitted_line():
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import _arrow_up_action, _submit_line
+
+    async def scenario():
+        buf = Buffer(multiline=False)
+        _submit_line("fix the flaky test", buf, deque(), True, lambda t: None)
+        buf.load_history_if_not_yet_loaded()   # BufferControl does this each repaint
+        await buf._load_history_task           # loader fills the working lines
+        event = _FakeEvent()
+        sel = {"i": None}
+        _arrow_up_action(event, buf, sel, 0, True)   # busy → history, never step-nav
+        assert buf.text == "fix the flaky test"
+        assert sel["i"] is None                       # step selection untouched
+    asyncio.run(scenario())
+
+
+def test_down_arrow_cycles_history_forward():
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import _arrow_down_action, _arrow_up_action
+
+    async def scenario():
+        buf = Buffer(multiline=False)
+        buf.history.append_string("older")
+        buf.history.append_string("newer")
+        buf.load_history_if_not_yet_loaded()
+        await buf._load_history_task
+        event = _FakeEvent()
+        _arrow_up_action(event, buf, {"i": None}, 0, True)
+        _arrow_up_action(event, buf, {"i": None}, 0, True)
+        assert buf.text == "older"
+        _arrow_down_action(event, buf, {"i": None}, 0, True)
+        assert buf.text == "newer"
+    asyncio.run(scenario())
+
+
+def test_up_arrow_with_text_present_pulls_history_not_steps():
+    # The step-nav gate requires EMPTY input — with a draft in the box the
+    # arrow edits history even when idle with steps present.
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import _arrow_up_action
+
+    async def scenario():
+        buf = Buffer(multiline=False)
+        buf.history.append_string("submitted earlier")
+        buf.text = "draf"
+        buf.load_history_if_not_yet_loaded()
+        await buf._load_history_task
+        event = _FakeEvent()
+        sel = {"i": None}
+        _arrow_up_action(event, buf, sel, 3, False)   # idle + steps, but text present
+        assert buf.text == "submitted earlier"
+        assert sel["i"] is None                        # no step selection created
+    asyncio.run(scenario())
+
+
+def test_up_arrow_during_step_nav_still_navigates_steps():
+    # Idle + empty input + steps present = EXACTLY today's step-navigation.
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import _arrow_down_action, _arrow_up_action
+
+    buf = Buffer(multiline=False)                     # empty input, no history touch
+    sel = {"i": None}
+    event = _FakeEvent()
+    _arrow_up_action(event, buf, sel, 3, False)
+    assert sel["i"] == 2 and buf.text == ""           # selection moves, no history pull
+    _arrow_up_action(event, buf, sel, 3, False)
+    assert sel["i"] == 1
+    _arrow_down_action(event, buf, sel, 3, False)
+    assert sel["i"] == 2
+    assert event.app.invalidated is True
+
+
+def test_dock_end_to_end_type_ahead_queues_then_drains_fifo():
+    # Drive the REAL Application (pipe input + dummy output): Enter while a
+    # turn runs queues the lines instead of erasing them, the drain in
+    # _run_turn's finally submits them one per turn-completion, FIFO, through
+    # the SAME on_line path a typed line takes; Ctrl-D exits when idle.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        ran = []
+        gate = asyncio.Event()
+        busy = {"v": False}
+
+        async def on_line(text):
+            busy["v"] = True
+            ran.append(text)
+            await gate.wait()
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")
+                await _until(lambda: ran == ["first"])      # turn 1 is running
+                pipe.send_text("second\r")                   # typed WHILE busy → queue
+                pipe.send_text("third\r")
+                await asyncio.sleep(0.1)
+                assert ran == ["first"]                      # nothing runs mid-turn
+                gate.set()                                   # let the turns finish
+                await _until(lambda: ran == ["first", "second", "third"])   # FIFO
+                await _until(lambda: not busy["v"])
+                pipe.send_text("\x04")                       # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())

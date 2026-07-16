@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.11
+
+- Type-ahead queue: send follow-ups while Webbee is working — they queue and
+  run after the current turn; the toolbar shows how many are waiting.
+- Up-arrow recalls your last message to edit and resend.
+
 ## 0.3.10
 
 - Remote instructions picked up by an idle terminal now carry a dedup id, so
