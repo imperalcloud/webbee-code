@@ -590,10 +590,11 @@ class SurfaceAgent(FakeAgent):
     with a typed turn (the plain fallback read_line is sync)."""
     session_id = "marathon-user-1-rab12cd34ef56"
 
-    async def run(self, task, sink, *, marathon=False, goal="", surface=""):
+    async def run(self, task, sink, *, marathon=False, goal="", surface="",
+                  steer_iid=""):
         self.tasks.append(task)
         self.runs.append({"task": task, "marathon": marathon, "goal": goal,
-                          "surface": surface})
+                          "surface": surface, "steer_iid": steer_iid})
         await asyncio.sleep(0)
         return f"answer:{task}"
 
@@ -606,7 +607,7 @@ def test_steer_pickup_renders_remote_line_and_runs_tagged_turn(monkeypatch):
                          marathon=True, live_session_id=lambda: "", **kw):
         captured["marathon"] = marathon
         captured["live_sid"] = live_session_id()
-        await submit("push the fix", "telegram")
+        await submit("push the fix", "telegram", "iid-42")
 
     monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
 
@@ -617,9 +618,11 @@ def test_steer_pickup_renders_remote_line_and_runs_tagged_turn(monkeypatch):
     sink, agent = _run(read_line=_lines("hello", "again", "/exit"), agent=agent)
     # the remote user's line renders tagged with its origin surface...
     assert ("telegram", "user", "push the fix") in getattr(sink, "foreign", [])
-    # ...and the SAME turn path ran it, threading surface into the turn kwargs
+    # ...and the SAME turn path ran it, threading surface + the item's dedup
+    # iid into the turn kwargs (steer-iid-dedup pickup path)
     steer_runs = [r for r in agent.runs if r["task"] == "push the fix"]
     assert steer_runs and steer_runs[0]["surface"] == "telegram"
+    assert steer_runs[0]["steer_iid"] == "iid-42"
     assert steer_runs[0]["marathon"] is True          # normal marathon turn
     # a picked-up turn ends like any other -- end_turn fired, dock leaves busy
     assert "answer:push the fix" in sink.turns

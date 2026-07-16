@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.10
+
+- Remote instructions picked up by an idle terminal now carry a dedup id, so
+  an at-least-once delivery can never run — or bill — the same instruction
+  twice.
+
 ## 0.3.9
 
 - Internal restructure: the session engine was split into focused modules

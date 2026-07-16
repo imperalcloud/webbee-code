@@ -961,3 +961,24 @@ def test_run_omits_surface_key_for_plain_typed_turns(monkeypatch):
     # to before -- no `surface` key at all.
     body = _run_turn_capture_body(monkeypatch)
     assert "surface" not in body
+
+
+def test_run_threads_steer_iid_into_session_post_body(monkeypatch):
+    # steer-iid-dedup pickup path: a picked-up remote instruction carries the
+    # queue entry's dedup id so the kernel ring can drop an at-least-once twin.
+    body = _run_turn_capture_body(monkeypatch, surface="telegram", steer_iid="iid-42")
+    assert body["steer_iid"] == "iid-42"
+    assert body["surface"] == "telegram"
+
+
+def test_run_omits_steer_iid_key_for_plain_typed_turns(monkeypatch):
+    # A typed turn has no dedup id -- key omitted, body byte-identical to today.
+    body = _run_turn_capture_body(monkeypatch)
+    assert "steer_iid" not in body
+
+
+def test_run_omits_steer_iid_key_when_pickup_item_had_none(monkeypatch):
+    # Older gateway: /pending-steer items without `iid` -> "" -> key omitted.
+    body = _run_turn_capture_body(monkeypatch, surface="telegram", steer_iid="")
+    assert "steer_iid" not in body
+    assert body["surface"] == "telegram"

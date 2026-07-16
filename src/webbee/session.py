@@ -45,7 +45,7 @@ class AgentSession:
         return {"Authorization": f"Bearer {token}"}
 
     async def run(self, task: str, sink, *, marathon: bool = False, goal: str = "",
-                  surface: str = "") -> str:
+                  surface: str = "", steer_iid: str = "") -> str:
         import httpx
 
         from webbee.tools import LocalToolExecutor
@@ -72,6 +72,11 @@ class AgentSession:
             # [surface] tags). Additive-only -- a typed turn's body is
             # byte-identical to before.
             body["surface"] = surface
+        if steer_iid:
+            # steer-iid-dedup: a pickup also carries the queued item's dedup id
+            # so the kernel's ring can drop an at-least-once twin. Same
+            # additive-only contract -- a typed turn has none, key omitted.
+            body["steer_iid"] = steer_iid
         if marathon:
             body["marathon"] = True
             body["goal"] = goal

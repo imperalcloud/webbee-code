@@ -214,14 +214,16 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         await _run_turn(line)
         return "continue"
 
-    async def _run_turn(line: str, surface: str = "") -> None:
+    async def _run_turn(line: str, surface: str = "", steer_iid: str = "") -> None:
         """ONE agent turn -- the SAME path for a typed line and an idle-steer
         pickup (liveness v2 §B), which threads the queued item's origin
-        `surface` into the turn so the kernel stamps provenance start-path.
-        Only the echo differs at the call sites: user_echo for a typed line,
-        foreign_turn for a remote one."""
+        `surface` (provenance) and dedup `steer_iid` (kernel dedup ring) into
+        the turn start-path. Only the echo differs at the call sites:
+        user_echo for a typed line, foreign_turn for a remote one."""
         _sink.begin_turn()
         kw = {"surface": surface} if surface else {}
+        if steer_iid:
+            kw["steer_iid"] = steer_iid
         try:
             text = await agent.run(line, _sink, marathon=not once,
                                    goal=(line if not once else ""), **kw)
@@ -236,11 +238,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             return
         _sink.end_turn(text)
 
-    async def _steer_submit(text: str, surface: str) -> None:
+    async def _steer_submit(text: str, surface: str, steer_iid: str = "") -> None:
         """webbee.steer hands a drained remote instruction here: render it as
-        the remote user's own line, then run it as a normal turn."""
+        the remote user's own line, then run it as a normal turn (carrying the
+        item's dedup iid so the kernel can drop an at-least-once twin)."""
         _sink.foreign_turn(surface, "user", text)
-        await _run_turn(text, surface=surface)
+        await _run_turn(text, surface=surface, steer_iid=steer_iid)
 
     def _cancel_background() -> None:
         for _t in (watcher_task, steer_task):

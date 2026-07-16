@@ -58,8 +58,9 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                           live_session_id=lambda: "",
                           interval: float = _POLL_INTERVAL) -> None:
     """Run forever (until cancelled): every ~`interval`s of idle time, drain
-    the pending-steer queue and hand the FIRST item to `submit(text, surface)`
-    -- the repl's normal turn path. Seams (all injected by the repl wiring):
+    the pending-steer queue and hand the FIRST item to
+    `submit(text, surface, steer_iid)` -- the repl's normal turn path. Seams
+    (all injected by the repl wiring):
       * is_busy()        -- sync; True while a turn is running. Checked BEFORE
                             the destructive fetch (never drain mid-turn) and
                             AGAIN right before submit (a locally-typed line
@@ -67,9 +68,12 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                             backlog instead of being lost).
       * live_session_id()-- sync; the agent's gateway-issued session id once a
                             turn has run ("" before). Wins over derivation.
-      * submit(text, surface) -- async; renders the remote line and runs the
-                            turn. Runs INSIDE this task, so polling is
-                            naturally paused for the turn's whole duration."""
+      * submit(text, surface, steer_iid) -- async; renders the remote line and
+                            runs the turn. Runs INSIDE this task, so polling
+                            is naturally paused for the turn's whole duration.
+                            steer_iid = the queued item's dedup id ("" on an
+                            older gateway), threaded into the turn POST so the
+                            kernel's dedup ring can drop an at-least-once twin."""
     from webbee.thread import fetch_pending_steer
     derived = ""
     backlog: deque = deque()
@@ -97,7 +101,8 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
             if is_busy():
                 backlog.appendleft(item)  # a local line won the race -- defer, don't drop
                 continue
-            await submit(text, str(item.get("surface") or "telegram"))
+            await submit(text, str(item.get("surface") or "telegram"),
+                         str(item.get("iid") or ""))
             if _cancel_absorbed():
                 raise asyncio.CancelledError
         except asyncio.CancelledError:

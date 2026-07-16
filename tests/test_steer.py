@@ -85,7 +85,7 @@ def test_poll_submits_first_item_with_surface(monkeypatch):
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
 
-    async def submit(text, surface):
+    async def submit(text, surface, steer_iid=""):
         submitted.append((text, surface))
 
     _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
@@ -95,6 +95,50 @@ def test_poll_submits_first_item_with_surface(monkeypatch):
     assert submitted[0] == ("push the fix", "telegram")
     # a live agent session id wins over derivation (it IS the gateway truth)
     assert polled[0] == "marathon-user-1-rlive"
+
+
+def test_poll_passes_item_iid_to_submit(monkeypatch):
+    # steer-iid-dedup pickup path: /pending-steer items carry the queue entry's
+    # `iid`; the poller must hand it to submit so the turn POST carries
+    # steer_iid and the kernel's dedup ring can drop an at-least-once twin.
+    submitted = []
+
+    async def fake_fetch(cfg, tp, session_id):
+        return [{"text": "push the fix", "surface": "telegram", "ts": 1,
+                 "iid": "iid-42"}]
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        submitted.append((text, surface, steer_iid))
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              interval=0.01),
+           until=lambda: submitted)
+    assert submitted[0] == ("push the fix", "telegram", "iid-42")
+
+
+def test_poll_item_without_iid_submits_empty_iid(monkeypatch):
+    # An older gateway's items carry no `iid` -- submit gets "" (the turn POST
+    # then omits steer_iid entirely), never a crash.
+    submitted = []
+
+    async def fake_fetch(cfg, tp, session_id):
+        return [{"text": "resume", "surface": "telegram", "ts": 2}]
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        submitted.append((text, surface, steer_iid))
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              interval=0.01),
+           until=lambda: submitted)
+    assert submitted[0] == ("resume", "telegram", "")
 
 
 def test_poll_no_items_never_submits(monkeypatch):
@@ -108,7 +152,7 @@ def test_poll_no_items_never_submits(monkeypatch):
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
 
-    async def submit(text, surface):
+    async def submit(text, surface, steer_iid=""):
         submitted.append((text, surface))
 
     _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
@@ -132,7 +176,7 @@ def test_poll_silent_on_network_error_and_recovers(monkeypatch):
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", flaky_fetch)
 
-    async def submit(text, surface):
+    async def submit(text, surface, steer_iid=""):
         submitted.append((text, surface))
 
     # No exception escapes the poller; the tick after the blip succeeds.
@@ -156,7 +200,7 @@ def test_poll_never_fetches_while_busy(monkeypatch):
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
 
-    async def submit(text, surface):
+    async def submit(text, surface, steer_iid=""):
         submitted.append((text, surface))
 
     ticks = {"n": 0}
@@ -192,7 +236,7 @@ def test_multi_item_drain_runs_in_order_one_per_tick_nothing_lost(monkeypatch):
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
 
-    async def submit(text, surface):
+    async def submit(text, surface, steer_iid=""):
         submitted.append((text, surface))
 
     # The gateway drain returns each item exactly ONCE -- items 2..n of a batch
@@ -221,7 +265,7 @@ def test_item_deferred_not_lost_when_turn_starts_mid_tick(monkeypatch):
     def is_busy():
         return busy_answers.pop(0) if busy_answers else False
 
-    async def submit(text, surface):
+    async def submit(text, surface, steer_iid=""):
         submitted.append((text, surface))
 
     _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=is_busy,
@@ -245,7 +289,7 @@ def test_poller_exits_when_submitted_turn_absorbs_the_cancel(monkeypatch):
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
 
-    async def swallowing_submit(text, surface):
+    async def swallowing_submit(text, surface, steer_iid=""):
         in_submit.set()
         try:
             await asyncio.sleep(3600)
