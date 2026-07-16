@@ -20,7 +20,6 @@ class FakeSink:
     def abort(self): self.aborted = True
     def welcome(self, *a, **kw): ...
     def user_echo(self, text): self.echoed = getattr(self, "echoed", []) + [text]
-    def queued_echo(self, text): self.queued_echoes = getattr(self, "queued_echoes", []) + [text]
     def queued_run(self, remaining): self.queued_runs = getattr(self, "queued_runs", []) + [remaining]
     def sessions_table(self, rows): self.session_tables = getattr(self, "session_tables", []) + [rows]
     def foreign_turn(self, surface, role, text):

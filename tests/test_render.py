@@ -463,7 +463,10 @@ def test_progress_and_thinking_strip_escapes():
     assert "\x1b[?1003h" not in out and "pwned" not in out
 
 
-# ── queued_echo / queued_run — the visible type-ahead queue (0.3.12) ──────────
+# ── queued_run — the drain marker (0.3.12; the `⋯ queued:` scrollback echo was
+# replaced by the LIVE queue panel in 0.3.13 — queue visibility now lives in
+# webbee.queue_panel, tested in test_tui.py; the transcript stays real-turns-only
+# plus this one-line drain provenance mark) ────────────────────────────────────
 
 
 def _rec_sink():
@@ -474,17 +477,11 @@ def _rec_sink():
     return RichSink(console=c, live_enabled=False, input_fn=lambda p: "", clock=lambda: 0.0), c
 
 
-def test_queued_echo_renders_the_text_as_a_transcript_line():
-    s, c = _rec_sink()
-    s.queued_echo("deploy the fix")
-    assert "⋯ queued: deploy the fix" in c.export_text()
-
-
-def test_queued_echo_strips_control_bytes():
-    s, c = _rec_sink()
-    s.queued_echo("evil\x1b[?1003htext")
-    out = c.export_text()
-    assert "\x1b[?1003h" not in out and "eviltext" in out
+def test_sink_has_no_queued_echo_anymore():
+    # The static scrollback echo is GONE (it scrolled away, duplicated and went
+    # stale when edited) — the live panel above the input owns queue visibility.
+    s, _ = _rec_sink()
+    assert not hasattr(s, "queued_echo")
 
 
 def test_queued_run_marker_announces_the_drain():

@@ -4,17 +4,20 @@ the very bottom and never move while the output scrolls (mouse wheel /
 PageUp). `run_session` also drives step-navigation (Up/Down + Enter) over the
 pinned box when the input is empty and no turn is running; in every other
 state Up/Down recall submitted lines (readline-style), and Enter while a turn
-runs QUEUES the line (Claude-Code type-ahead: echoed AT ONCE as `⋯ queued:`,
-counted in the toolbar, run after the current turn — natural completion only,
-a user STOP preserves the queue; /queue lists it, /queue clear drops it).
-Pure helpers (next_mode/build_toolbar/the *_action functions) are
-unit-tested; the Application is TTY/headless-smoke verified. Grounded in
-prompt_toolkit 3.0.52."""
+runs QUEUES the line (Claude-Code type-ahead: shown LIVE in the queue panel
+pinned above the input — see queue_panel.py — counted in the toolbar, run
+after the current turn — natural completion only, a user STOP preserves the
+queue; ↑ on an empty input pulls the newest queued line back for editing, a
+click pulls that item; /queue lists it, /queue clear drops it; the transcript
+stays clean — real turns only). Pure helpers (next_mode/build_toolbar/the
+*_action functions) are unit-tested; the Application is TTY/headless-smoke
+verified. Grounded in prompt_toolkit 3.0.52."""
 import asyncio
 import re
 from collections import deque
 
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
+from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
 
 _MODES = ("default", "plan", "autopilot")
@@ -136,22 +139,21 @@ def _interrupt_action(turn: dict, is_busy, stop_turn, event) -> None:
         t.cancel()                          # cancel the running turn; dock survives
 
 
-def _submit_line(text: str, buf, pending, busy: bool, start, queued_echo=None) -> str:
+def _submit_line(text: str, buf, pending, busy: bool, start) -> str:
     """Route ONE submitted line (dependency-injected, same testing philosophy
     as _escape_action). Whitespace never queues nor starts ("ignored"). A real
     line is recorded into the buffer's history first (up-arrow recall), then:
     busy → QUEUE it (Claude-Code type-ahead — the line is never erased or
-    dropped; it runs after the current turn) and echo it into the transcript
-    via `queued_echo` (sink.queued_echo, EXACTLY once per queue action — the
-    queue must be visible, never a silent deque); idle → `start(text)`
-    (today's normal submit). Returns "ignored" | "queued" | "started"."""
+    dropped; it runs after the current turn) — the LIVE queue panel above the
+    input shows it at once (queue_panel.queue_fragments reads this deque every
+    redraw), NEVER a static scrollback echo (those scrolled away, duplicated
+    and went stale when edited); idle → `start(text)` (today's normal submit).
+    Returns "ignored" | "queued" | "started"."""
     if not text.strip():
         return "ignored"
     buf.history.append_string(text)
     if busy:
         pending.append(text)
-        if queued_echo is not None:
-            queued_echo(text)
         return "queued"
     start(text)
     return "started"
@@ -182,10 +184,22 @@ def _is_queue_command(text: str) -> bool:
     return bool(parts) and parts[0] == "/queue"
 
 
-def _arrow_up_action(event, buf, sel: dict, n: int, busy: bool) -> None:
-    """Up key. Step-navigation EXACTLY as before when steps exist + input is
-    empty + idle; in EVERY other state (busy, or text present, or no steps)
-    recall an older submitted line into the buffer (readline-style)."""
+def _arrow_up_action(event, buf, sel: dict, n: int, busy: bool, pending=None) -> None:
+    """Up key — precedence: (1) QUEUE-PULL: pending items + an EMPTY buffer
+    (busy or idle — NOT busy-gated: the queue legally survives a user STOP
+    into idle, and pulling the newest to edit is exactly what you want after
+    an Esc) pull the NEWEST queued line out of the queue into the input for
+    editing; re-submit re-queues it at the tail (busy) or runs it (idle).
+    Repeated presses walk newest→oldest, one item per press; a buffer with
+    ANY text is never clobbered (history/step-nav serve it instead).
+    (2) Step-navigation EXACTLY as before (steps + empty input + idle —
+    reachable exactly when the queue is empty, i.e. today's behavior verbatim
+    in the queue-empty world). (3) Recall an older submitted line
+    (readline-style)."""
+    if pending and not buf.text:
+        pull_item(pending, buf, len(pending) - 1)   # newest — "edit the last thing I queued"
+        event.app.invalidate()
+        return
     if n and not buf.text and not busy:
         sel["i"] = (n - 1) if sel["i"] is None else max(0, sel["i"] - 1)
         event.app.invalidate()
@@ -207,18 +221,21 @@ def _arrow_down_action(event, buf, sel: dict, n: int, busy: bool) -> None:
 
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                       is_busy, consent_pending, resolve_consent, steps_nav=None,
-                      stop_turn=None, pending=None, queued_echo=None,
-                      queued_run=None) -> bool:
+                      stop_turn=None, pending=None, queued_run=None) -> bool:
     """The full-screen dock: `pane` fills the top (scrollable), a bordered input
     box + toolbar are FIXED at the bottom. Enter either resolves a pending
     consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
     (the box stays fixed during it); while a turn runs, Enter QUEUES the line
-    (type-ahead — `queued_echo` commits it to the transcript at once, the
-    toolbar shows `⋯N queued` in accent, and it starts right after the current
-    turn with a `queued_run` marker). `pending` is the queue deque — the repl
-    passes its OWN so /queue and /queue clear (dispatched through the normal
-    command layer) see and manage the live queue; /queue itself always runs
-    immediately, even mid-turn. When `steps_nav` is given and the input is empty and no turn
+    (type-ahead — the LIVE queue panel pinned above the input shows it at
+    once and tracks every edit/drain, the toolbar shows `⋯N queued` in
+    accent, and it starts right after the current turn with a `queued_run`
+    marker — the transcript itself stays real-turns-only). ↑ on an empty
+    input pulls the newest queued line back into the box for editing (it
+    leaves the panel; re-submit re-queues/runs it); clicking a panel row
+    pulls THAT item. `pending` is the queue deque — the repl passes its OWN
+    so /queue and /queue clear (dispatched through the normal command layer)
+    see and manage the live queue; /queue itself always runs immediately,
+    even mid-turn. When `steps_nav` is given and the input is empty and no turn
     is running, Up/Down move a step selection (toolbar shows `step k/N`) and
     Enter expands it via `steps_nav["expand"]`; Esc clears it. In every other
     state Up/Down recall submitted lines (readline-style history).
@@ -227,8 +244,9 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     try:
         from prompt_toolkit.application import Application, get_app
         from prompt_toolkit.buffer import Buffer
+        from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
         from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.layout.processors import BeforeInput
         from prompt_toolkit.styles import Style
@@ -300,10 +318,10 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
             event.app.create_background_task(on_line(text))
             return
         # Non-empty line: record for up-arrow recall, then queue-while-busy
-        # (type-ahead — echoed AT ONCE as `⋯ queued:` + accent toolbar depth,
-        # runs after the current turn) or start a turn now.
-        if _submit_line(text, buf, pending, _busy_live(), _start_turn, queued_echo) == "queued":
-            event.app.invalidate()             # toolbar shows the new depth
+        # (type-ahead — appears AT ONCE in the live queue panel + accent
+        # toolbar depth, runs after the current turn) or start a turn now.
+        if _submit_line(text, buf, pending, _busy_live(), _start_turn) == "queued":
+            event.app.invalidate()             # panel + toolbar show the new depth
 
     @kb.add("s-tab")
     def _cycle(event):
@@ -329,7 +347,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("up")
     def _step_up(event):
-        _arrow_up_action(event, buf, sel, _nav_count(), _busy_live())
+        _arrow_up_action(event, buf, sel, _nav_count(), _busy_live(), pending)
 
     @kb.add("down")
     def _step_down(event):
@@ -376,11 +394,35 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         # so the mode is obvious from the input line itself, not just the toolbar.
         return [(f"class:tb.mode.{mode_getter()}", "❯ ")]
 
+    def _pull_at(index: int) -> None:
+        """Mouse pull (a panel row's MOUSE_UP handler, queue_panel._item_handler):
+        move the CLICKED queued item into the input for editing — the SAME
+        pull_item the ↑ key uses, arbitrary index instead of newest (never
+        clobbers a typed draft, ignores a stale index)."""
+        if pull_item(pending, buf, index):
+            get_app().invalidate()
+
+    def _queue_fragments():
+        # Live like _toolbar: re-invoked every redraw, reads the shared deque.
+        import shutil
+        return queue_fragments(pending, pull=_pull_at,
+                               width=shutil.get_terminal_size((100, 24)).columns)
+
+    # The LIVE pending-queue panel — pinned BETWEEN the output pane and the
+    # input box; zero rows (hidden) while the queue is empty, so the empty
+    # state is pixel-identical to the panel-less dock. focusable=False keeps
+    # focus on the input even when a row is clicked.
+    queue_panel = ConditionalContainer(
+        content=Window(FormattedTextControl(_queue_fragments, focusable=False),
+                       height=lambda: queue_height(pending),
+                       always_hide_cursor=True, wrap_lines=False),
+        filter=Condition(lambda: bool(pending)))
+
     input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)]),
         height=_input_height, wrap_lines=True)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
-    root = HSplit([pane.window, Frame(input_win), toolbar])
+    root = HSplit([pane.window, queue_panel, Frame(input_win), toolbar])
     style = Style.from_dict({
         "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
         "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
@@ -392,6 +434,9 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         "tb.mode.default": "#00afd7",        # default — cyan
         "tb.mode.plan": "#af87ff",           # plan — purple
         "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
+        "qp.header": "#e8a317 bold",         # queue-panel header — bee-yellow, pops
+        "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
+        "qp.last": "#e8a317",                # newest row — the one ↑ pulls
     })
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)

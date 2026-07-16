@@ -2,6 +2,10 @@
 
 ## 0.3.13
 
+- The message queue is now a live panel above the input — you see exactly
+  what's waiting, press ↑ to pull the last one back for editing (it leaves
+  the queue and returns when you resend), or click one to edit it. The
+  transcript stays clean.
 - Cleaner welcome screen — just the essentials (who you are, your plan, how
   to start) plus a clear word on privacy: your work is never sold and never
   used to train models, and PII is masked before it reaches the model.

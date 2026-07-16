@@ -325,8 +325,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                             "expand": lambda i: _handle(f"/steps {i + 1}"),
                         },
                         stop_turn=lambda: agent.stop(),
-                        pending=pending_queue, queued_echo=_sink.queued_echo,
-                        queued_run=_sink.queued_run,
+                        pending=pending_queue, queued_run=_sink.queued_run,
                     )
                 finally:
                     _cancel_background()

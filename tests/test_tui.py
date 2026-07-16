@@ -633,42 +633,25 @@ def test_dock_end_to_end_type_ahead_queues_then_drains_fifo():
     asyncio.run(scenario())
 
 
-# ── 0.3.12: the queue is VISIBLE + managed ────────────────────────────────────
-# 0.3.11 queued mechanically but silently (only a dim toolbar count). Now:
-# queueing echoes `⋯ queued: <text>` into the transcript AT ONCE
-# (sink.queued_echo, exactly once per queue action), a drain announces itself
+# ── 0.3.12: the queue is VISIBLE + managed (0.3.13: visibility moved from the
+# static `⋯ queued:` scrollback echo — which scrolled away, duplicated and went
+# stale — into the LIVE queue panel above the input, webbee.queue_panel; the
+# panel section below covers it). A drain still announces itself
 # (sink.queued_run) right before the drained line's normal ❯ user-echo, the
 # toolbar segment is an ACCENT (tb.working, not dim), /queue // /queue clear
 # manage the shared deque even mid-turn, and a user STOP (Esc/Ctrl-C)
 # PRESERVES the queue — drain on natural completion only.
 
 
-def test_queue_echo_fires_exactly_once_with_the_text():
+def test_whitespace_never_queues():
     from webbee.tui import _submit_line
     buf = _RecBuf()
     pending = deque()
-    started, echoed = [], []
-    assert _submit_line("ship it", buf, pending, True, started.append, echoed.append) == "queued"
-    assert echoed == ["ship it"]                     # the #1 fix: you SEE what queued
-    assert list(pending) == ["ship it"] and started == []
-
-
-def test_idle_submit_does_not_fire_queued_echo():
-    from webbee.tui import _submit_line
-    started, echoed = [], []
-    assert _submit_line("go", _RecBuf(), deque(), False, started.append, echoed.append) == "started"
-    assert echoed == [] and started == ["go"]
-
-
-def test_whitespace_never_queues_nor_echoes():
-    from webbee.tui import _submit_line
-    buf = _RecBuf()
-    pending = deque()
-    started, echoed = [], []
+    started = []
     for junk in ("", "   ", "\t \t"):
-        assert _submit_line(junk, buf, pending, True, started.append, echoed.append) == "ignored"
-        assert _submit_line(junk, buf, pending, False, started.append, echoed.append) == "ignored"
-    assert not pending and started == [] and echoed == []
+        assert _submit_line(junk, buf, pending, True, started.append) == "ignored"
+        assert _submit_line(junk, buf, pending, False, started.append) == "ignored"
+    assert not pending and started == []
     assert buf.history.items == []                   # junk is not recallable either
 
 
@@ -738,7 +721,7 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
 
     async def scenario():
         pane = tui.OutputPane(width=80)
-        ran, echoed, markers = [], [], []
+        ran, markers = [], []
         gate = asyncio.Event()
         busy = {"v": False}
 
@@ -763,12 +746,12 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
                     on_cycle=lambda: None, status=status,
                     is_busy=lambda: busy["v"],
                     consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    pending=pend, queued_echo=echoed.append, queued_run=markers.append))
+                    pending=pend, queued_run=markers.append))
                 await asyncio.sleep(0.05)
                 pipe.send_text("first\r")
                 await _until(lambda: ran == ["first"])         # turn 1 is running
                 pipe.send_text("queued follow-up\r")           # type-ahead while busy
-                await _until(lambda: echoed == ["queued follow-up"])   # echoed AT ONCE
+                await _until(lambda: list(pend) == ["queued follow-up"])   # queued AT ONCE
                 pipe.send_text("\x03")                         # user STOP (Ctrl-C)
                 await _until(lambda: not busy["v"])
                 await asyncio.sleep(0.1)
@@ -784,6 +767,7 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
                 pipe.send_text("\x04")                         # Ctrl-D exit (idle)
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
+        assert "⋯ queued" not in pane.dump()      # the transcript stays CLEAN
 
     asyncio.run(scenario())
 
@@ -809,7 +793,7 @@ def test_dock_queue_command_runs_immediately_even_while_busy():
 
     async def scenario():
         pane = tui.OutputPane(width=80)
-        ran, echoed = [], []
+        ran = []
         gate = asyncio.Event()
         busy = {"v": False}
         pend = deque()
@@ -836,7 +820,7 @@ def test_dock_queue_command_runs_immediately_even_while_busy():
                     on_cycle=lambda: None, status=status,
                     is_busy=lambda: busy["v"],
                     consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    pending=pend, queued_echo=echoed.append))
+                    pending=pend))
                 await asyncio.sleep(0.05)
                 pipe.send_text("first\r")
                 await _until(lambda: ran == ["first"])
@@ -851,9 +835,269 @@ def test_dock_queue_command_runs_immediately_even_while_busy():
                 await _until(lambda: not busy["v"])
                 await asyncio.sleep(0.1)
                 assert "second" not in ran                     # cleared → nothing drained
-                assert echoed == ["second"]                    # /queue itself never echoed
                 pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
+
+    asyncio.run(scenario())
+
+
+# ── 0.3.13: the LIVE queue panel + pull-to-edit ───────────────────────────────
+# The static `⋯ queued:` scrollback echoes are GONE (they scrolled away,
+# duplicated, and went stale when edited). The queue now lives in a panel
+# pinned ABOVE the input (webbee.queue_panel — pure fragment/height builders
+# mounted in a ConditionalContainer): it updates live on every add/edit/drain,
+# ↑ on an empty input pulls the NEWEST item back into the box for editing
+# (re-submit re-queues it), a click pulls THAT item, and the transcript stays
+# real-turns-only.
+
+from webbee.queue_panel import (  # noqa: E402
+    QP_MAX_ITEMS, one_line, pull_item, queue_fragments, queue_height)
+
+
+def _panel_text(frags):
+    return "".join(f[1] for f in frags)
+
+
+def test_empty_queue_renders_no_panel():
+    assert queue_fragments(deque()) == []
+    assert queue_height(deque()) == 0        # ConditionalContainer hides it anyway
+
+
+def test_panel_header_counts_and_orders_items_drain_first_to_newest():
+    frags = queue_fragments(deque(["first", "second"]))
+    text = _panel_text(frags)
+    assert "⋯ queued (2)" in text
+    assert text.index("first") < text.index("second")   # top row drains next (FIFO)
+    assert text.count("\n") == 2                         # header + exactly one row each
+    assert not NO_CYRILLIC.search(text)
+
+
+def test_panel_newest_item_accented_older_muted():
+    frags = queue_fragments(deque(["older", "newest"]))
+    assert [f[0] for f in frags if "older" in f[1]] == ["class:qp.item"]
+    assert [f[0] for f in frags if "newest" in f[1]] == ["class:qp.last"]
+
+
+def test_panel_caps_at_newest_five_with_a_more_row():
+    items = [f"item{i}" for i in range(8)]
+    frags = queue_fragments(deque(items))
+    text = _panel_text(frags)
+    assert "⋯ queued (8)" in text                        # header keeps the TRUE depth
+    assert "… +3 more" in text                           # the oldest 3 hide behind it
+    assert all(t in text for t in items[3:])             # newest 5 shown
+    assert all(t not in text for t in items[:3])
+
+
+def test_panel_height_is_header_plus_rows_capped():
+    assert queue_height(deque(["a"])) == 2                       # header + 1
+    assert queue_height(deque(["a"] * QP_MAX_ITEMS)) == 6        # header + 5
+    assert queue_height(deque(["a"] * 9)) == 7                   # header + 5 + more-row
+
+
+def test_panel_item_is_one_truncated_row():
+    frags = queue_fragments(deque(["x" * 500]), width=40)
+    rows = _panel_text(frags).split("\n")
+    assert len(rows) == 2                                # a huge item still costs ONE row
+    assert rows[1].endswith("…") and len(rows[1]) <= 40
+
+
+def test_panel_multiline_item_collapses_to_one_row():
+    frags = queue_fragments(deque(["line1\nline2\tline3"]))
+    text = _panel_text(frags)
+    assert text.count("\n") == 1 and "line1 line2 line3" in text
+
+
+def test_one_line_collapses_whitespace_and_truncates():
+    assert one_line("a\n  b\t c", 80) == "a b c"
+    assert one_line("abcdef", 4) == "abc…"
+    assert one_line("abcd", 4) == "abcd"
+    assert one_line("", 10) == ""
+    assert one_line("abcdef", 0) == "abcdef"             # no width → no truncation
+
+
+def test_panel_without_pull_has_no_mouse_handlers():
+    assert all(len(f) == 2 for f in queue_fragments(deque(["a", "b"])))
+
+
+def test_panel_item_mouse_up_pulls_that_item_other_events_fall_through():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    pulls = []
+    frags = queue_fragments(deque(["a", "b", "c"]), pull=pulls.append, width=80)
+    handlers = [f[2] for f in frags if len(f) == 3]
+    assert len(handlers) == 3                            # every item row is clickable
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handlers[1](up) is None and pulls == [1]      # the CLICKED item, by index
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    assert handlers[0](down) is NotImplemented           # press/drag/wheel fall through
+    assert pulls == [1]
+
+
+def test_control_dispatches_click_row_to_the_matching_item():
+    # prompt_toolkit's OWN per-fragment dispatch (FormattedTextControl.mouse_handler)
+    # routes a click at row y to that row's handler — the exact path a real SGR
+    # ?1000 button report takes after decoding. Row 0 = header (no handler).
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    pulls = []
+    pend = deque(["alpha", "beta"])
+    ctrl = FormattedTextControl(
+        lambda: queue_fragments(pend, pull=pulls.append, width=80), focusable=False)
+    ctrl.create_content(width=80, height=3)              # populates self._fragments
+    ev = lambda y: MouseEvent(position=Point(4, y), event_type=MouseEventType.MOUSE_UP,
+                              button=MouseButton.LEFT, modifiers=frozenset())
+    assert ctrl.mouse_handler(ev(2)) is None and pulls == [1]    # row 2 = "beta"
+    assert ctrl.mouse_handler(ev(1)) is None and pulls == [1, 0] # row 1 = "alpha"
+    assert ctrl.mouse_handler(ev(0)) is NotImplemented           # header: no pull
+
+
+def test_pull_item_guards_draft_and_stale_index():
+    # The ONE pull implementation behind BOTH ↑ and click: never clobbers a
+    # typed draft; a stale index (queue drained between render and click) is
+    # ignored; a valid pull moves the item out with the cursor at the end.
+    from prompt_toolkit.buffer import Buffer
+    buf = Buffer(multiline=False)
+    buf.text = "half-typed draft"
+    pend = deque(["a", "b"])
+    assert pull_item(pend, buf, 1) is False              # draft protected
+    assert buf.text == "half-typed draft" and list(pend) == ["a", "b"]
+    buf.reset()
+    assert pull_item(pend, buf, 5) is False              # stale index ignored
+    assert pull_item(pend, buf, -1) is False
+    assert pull_item(pend, buf, 0) is True               # arbitrary index (click)
+    assert buf.text == "a" and buf.cursor_position == 1
+    assert list(pend) == ["b"]
+
+
+def test_up_arrow_pulls_newest_queued_into_empty_buffer_busy_or_idle():
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import _arrow_up_action
+    for busy in (True, False):        # NOT busy-gated: the queue survives Esc into idle
+        buf = Buffer(multiline=False)
+        pend = deque(["older", "newest"])
+        event = _FakeEvent()
+        sel = {"i": None}
+        _arrow_up_action(event, buf, sel, 0, busy, pend)
+        assert buf.text == "newest"                      # the last thing queued
+        assert buf.cursor_position == len("newest")      # cursor ready at the end
+        assert list(pend) == ["older"]                   # it LEFT the queue
+        assert sel["i"] is None and event.app.invalidated is True
+
+
+def test_repeated_pulls_walk_newest_to_oldest():
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import _arrow_up_action
+    buf = Buffer(multiline=False)
+    pend = deque(["a", "b", "c"])
+    event = _FakeEvent()
+    for expected in ("c", "b", "a"):
+        buf.reset()                                      # emptied (submitted/cleared)…
+        _arrow_up_action(event, buf, {"i": None}, 0, True, pend)
+        assert buf.text == expected                      # …then the next-newest pulls
+    assert not pend
+
+
+def test_up_arrow_with_text_present_never_clobbers_the_draft():
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import _arrow_up_action
+
+    async def scenario():
+        buf = Buffer(multiline=False)
+        buf.history.append_string("submitted earlier")
+        buf.text = "half-typed draft"
+        buf.load_history_if_not_yet_loaded()
+        await buf._load_history_task
+        pend = deque(["queued line"])
+        _arrow_up_action(_FakeEvent(), buf, {"i": None}, 0, True, pend)
+        assert list(pend) == ["queued line"]             # NOT pulled — buffer has text
+        assert buf.text == "submitted earlier"           # history served instead
+    asyncio.run(scenario())
+
+
+def test_pull_queued_takes_precedence_over_step_nav():
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import _arrow_up_action
+    buf = Buffer(multiline=False)
+    pend = deque(["queued line"])
+    sel = {"i": None}
+    _arrow_up_action(_FakeEvent(), buf, sel, 3, False, pend)   # idle + steps + queue
+    assert buf.text == "queued line" and not pend        # the queued text is fresher intent
+    assert sel["i"] is None                              # steps reachable once queue empties
+
+
+def test_dock_end_to_end_panel_pull_reedit_requeue_and_clean_transcript():
+    # The full loop on the REAL Application: queue while busy → the item is in
+    # the PANEL (queue_fragments over the shared deque), NOT in the scrollback;
+    # ↑ pulls it into the input (it leaves the panel); Enter re-queues it at
+    # the tail; the natural drain announces itself (queued_run) and empties the
+    # panel; the transcript never saw a `⋯ queued` echo.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        ran, markers = [], []
+        gate = asyncio.Event()
+        busy = {"v": False}
+        pend = deque()
+
+        async def on_line(text):
+            busy["v"] = True
+            ran.append(text)
+            await gate.wait()
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    pending=pend, queued_run=markers.append))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")
+                await _until(lambda: ran == ["first"])           # turn 1 is running
+                pipe.send_text("second draft\r")                 # type-ahead → queue
+                await _until(lambda: list(pend) == ["second draft"])
+                assert "second draft" in _panel_text(queue_fragments(pend))  # in the PANEL
+                assert "⋯ queued" not in pane.dump()             # NOT in the scrollback
+                pipe.send_text("\x1b[A")                         # ↑ pulls it to edit
+                await _until(lambda: not pend)                   # it LEFT the panel
+                pipe.send_text(" v2\r")                          # edit + re-submit (busy)
+                await _until(lambda: list(pend) == ["second draft v2"])   # re-queued at tail
+                assert ran == ["first"]                          # still nothing mid-turn
+                gate.set()                                       # natural completion
+                await _until(lambda: ran == ["first", "second draft v2"])
+                assert markers == [0]                            # drain announced itself
+                await _until(lambda: not pend)                   # panel emptied
+                await _until(lambda: not busy["v"])
+                pipe.send_text("\x04")                           # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+        assert "⋯ queued" not in pane.dump()                     # transcript stayed CLEAN
 
     asyncio.run(scenario())

@@ -266,18 +266,6 @@ class RichSink:
         self.console.print(_pad(Text(" ❯ " + _clean(text) + " ", style="bold white on grey30")))
         self._nudge()
 
-    def queued_echo(self, text: str) -> None:
-        """Type-ahead visibility (the #1 queue fix): the line you pressed
-        Enter on while a turn was running, committed to the scrollback the
-        MOMENT it queues — so you SEE exactly what's waiting, in order.
-        Muted-but-visible (quieter than user_echo's bar, louder than dim
-        chrome). When it drains, queued_run + the normal user_echo mark it
-        as the active turn."""
-        self.console.print(_pad(Text.assemble(
-            ("⋯ queued: ", f"bold {_BEE}"),
-            (_clean(text), "italic grey66"))))
-        self._nudge()
-
     def queued_run(self, remaining: int) -> None:
         """The tiny lifecycle marker printed right before a drained queued
         line starts: `▶ running queued message` (+ how many still wait) — a
