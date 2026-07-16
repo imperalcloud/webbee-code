@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.13
+
+- Cleaner welcome screen — just the essentials (who you are, your plan, how
+  to start) plus a clear word on privacy: your work is never sold and never
+  used to train models, and PII is masked before it reaches the model.
+
 ## 0.3.12
 
 - Queued messages are now visible — when you type while Webbee is working,

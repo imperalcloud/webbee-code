@@ -44,6 +44,18 @@ _ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "
 _BEE = "yellow"       # bee-yellow brand accent — logo / 🐝 / notes / busy dot ONLY
 _ACCENT = "cyan"      # interactive chrome ONLY — live caret / mode / panel url
 
+# ---- welcome copy (single source of truth for the splash + its tests) ------
+# The privacy promise is claims-disciplined: every clause is TRUE and enforced
+# today — user data is never sold and never used to train any model (ours or
+# third-party; documented in the DPA), and PII is masked before tool output
+# re-enters the model (platform-enforced and covered by the platform's own
+# test suite). Deliberately NOT said: "we collect nothing" (sessions ARE
+# stored so Webbee can resume your work) and "guaranteed" (we say what is
+# enforced, not what is promised). Change the wording only with a source.
+WELCOME_PRIVACY = "🔒 Your work stays yours — never sold, never training data."
+WELCOME_PRIVACY_DETAIL = "PII is masked before it reaches the model."
+WELCOME_HINT = "Type a task — Webbee runs it to completion · /help · Ctrl-D to exit"
+
 
 def _fmt_tokens(n: int) -> str:
     """Compact count for the live toolbar: 900 -> '900', 2_100 -> '2.1k',
@@ -132,10 +144,13 @@ class RichSink:
 
     # ---- welcome ------------------------------------------------------------
     def welcome(self, account, cwd: str, surface: str) -> None:
-        """One-time launch splash: a centered WEBBEE CODE logo + imperal.io + an
-        honest account panel (who/plan/tier/member-since). Runs BEFORE the dock
-        starts. Clears the screen ONLY in the non-pane path (the full-screen
-        dock owns its own alternate screen — clearing there would corrupt it)."""
+        """One-time launch splash, trimmed to what a human actually needs:
+        the WEBBEE CODE logo (the brand), ONE identity line (who am I / plan —
+        plan status shows only when it needs attention), the privacy promise
+        (true, enforced claims only — see WELCOME_PRIVACY above), and one hint
+        line to get going. Runs BEFORE the dock starts. Clears the screen ONLY
+        in the non-pane path (the full-screen dock owns its own alternate
+        screen — clearing there would corrupt it)."""
         if self._on_output is None:
             self.console.clear()
         w = self.console.width
@@ -152,29 +167,24 @@ class RichSink:
         self.console.print(Text("ICNLI AI Cloud OS · Agent".center(w), style=f"bold {_ACCENT}"))
         self.console.print(Text("·  i m p e r a l . i o  ·".center(w), style="dim"))
         self.console.print()
-        rows = []
         if account.signed_in:
-            who = account.email + (f"   ·   @{account.nickname}" if account.nickname else "")
-            rows.append(("Signed in as", who))
+            who = account.email or ""
+            if account.nickname:
+                who += f" · @{account.nickname}"
             if account.plan:
-                plan = account.plan + (f" · {account.plan_status}" if account.plan_status else "")
-                plan += (f" · renews {account.plan_renews}" if account.plan_renews else "")
-                rows.append(("Plan", plan))
-            if account.dev_tier:
-                rows.append(("Developer", f"{account.dev_tier} tier"))
-            if account.member_since:
-                rows.append(("Member since", account.member_since))
+                who += f" · {account.plan} plan"
+                if account.plan_status and account.plan_status != "active":
+                    who += f" ({account.plan_status})"
+            label = "Signed in as "
+            pad = " " * max(0, (w - len(label) - len(who)) // 2)
+            self.console.print(Text.assemble((pad + label, "dim"), (who, "white")))
         else:
-            rows.append(("", "not signed in — /login"))
-        bw = max((len(label.ljust(14) + value) for label, value in rows), default=0)
-        pad = " " * max(0, (w - bw) // 2)
-        for label, value in rows:
-            self.console.print(Text.assemble((pad + label.ljust(14), "dim"), (value, "white")))
+            self.console.print(Text("not signed in — /login".center(w), style="dim"))
         self.console.print()
-        tip = "Type a task and Webbee runs it to completion · pauses if credits run low · --once = single turn"
-        self.console.print(Text(tip.center(w), style="dim"))
+        self.console.print(Text(WELCOME_PRIVACY.center(w), style="white"))
+        self.console.print(Text(WELCOME_PRIVACY_DETAIL.center(w), style="dim"))
         self.console.print()
-        self.console.print(Text("/help · Ctrl-D to exit".center(w), style="dim"))
+        self.console.print(Text(WELCOME_HINT.center(w), style="dim"))
         self.console.print()
         self._nudge()
 

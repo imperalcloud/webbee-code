@@ -156,7 +156,7 @@ def test_usage_and_clear_still_work():
 
 # ---- WEBBEE CODE welcome + account panel + session /cost (Chunk 1 Task 2) --
 
-def test_welcome_full_account_aligned():
+def test_welcome_full_account_essentials_only():
     from webbee.account import Account
     from webbee.banner_art import WEBBEE_CODE
     s = _sink()
@@ -169,11 +169,40 @@ def test_welcome_full_account_aligned():
     # assert a stable fragment of the actual logo constant renders instead.
     assert WEBBEE_CODE.splitlines()[2] in out                  # ascii logo present
     assert "i m p e r a l . i o" in out  # letter-spaced brand caption, per Target welcome
-    assert "v@imperal.io" in out and "notvallium" in out
-    assert "pro" in out.lower() and "active" in out
-    assert "explorer" in out and "Apr 2026" in out
+    assert "v@imperal.io" in out and "notvallium" in out and "pro plan" in out
+    # trimmed: vanity rows are gone, and a healthy plan doesn't shout "active"
+    assert "explorer" not in out and "Apr 2026" not in out
+    assert "renews" not in out and "active" not in out
     assert "/help" in out
-    assert not NO_CYRILLIC.search(out)
+    assert not NO_CYRILLIC.search(out)   # English UI only
+
+
+def test_welcome_privacy_line_and_hint():
+    from webbee.account import Account
+    from webbee.render import WELCOME_HINT, WELCOME_PRIVACY, WELCOME_PRIVACY_DETAIL
+    s = _sink()
+    s.welcome(Account(signed_in=True, email="v@imperal.io"), "/x", "terminal")
+    out = s.console.export_text()
+    # the privacy promise renders verbatim (claims-disciplined copy, see render.py)
+    assert "🔒" in out
+    assert "Your work stays yours — never sold, never training data." in out
+    assert "PII is masked before it reaches the model." in out
+    # the old verbose tip collapsed into ONE crisp hint line
+    assert "Type a task" in out and "/help" in out and "Ctrl-D" in out
+    assert "credits run low" not in out and "--once" not in out
+    # constants stay in sync with what actually renders
+    for const in (WELCOME_PRIVACY, WELCOME_PRIVACY_DETAIL, WELCOME_HINT):
+        assert const.strip() in out
+    assert not NO_CYRILLIC.search(out)   # English UI only
+
+
+def test_welcome_plan_status_shown_only_when_abnormal():
+    from webbee.account import Account
+    s = _sink()
+    s.welcome(Account(signed_in=True, email="v@imperal.io", plan="pro",
+                      plan_status="past_due"), "/x", "terminal")
+    out = s.console.export_text()
+    assert "pro plan (past_due)" in out
 
 
 def test_welcome_signed_out_minimal():
@@ -181,7 +210,11 @@ def test_welcome_signed_out_minimal():
     s = _sink()
     s.welcome(Account(signed_in=False), "/x", "terminal")
     out = s.console.export_text()
-    assert "i m p e r a l . i o" in out  # letter-spaced brand caption, per Target welcome and "/login" in out
+    assert "i m p e r a l . i o" in out  # letter-spaced brand caption, per Target welcome
+    assert "/login" in out
+    # trust line shows for everyone, signed in or not
+    assert "never sold, never training data" in out
+    assert not NO_CYRILLIC.search(out)   # English UI only
 
 
 def test_session_credits_accumulates_across_turns():
