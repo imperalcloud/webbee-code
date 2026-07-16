@@ -9,7 +9,7 @@ from webbee.account import login_device_flow
 from webbee.boot import _git_branch, _open_dock_stderr_log, replay_thread, start_intel, start_shadow
 from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
-from webbee.tui import next_mode
+from webbee.tui import _MODES, next_mode
 
 
 async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
@@ -256,6 +256,59 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         _sink.foreign_turn(surface, "user", text)
         await _run_turn(text, surface=surface, steer_iid=steer_iid)
 
+    def _poller_busy() -> bool:
+        """The idle-steer poller's busy gate: the sink's live turn state PLUS
+        an armed local prompt (the autopilot confirm arms the same pinned-
+        input future a consent uses) -- submitting a steer turn under an
+        armed prompt could double-prompt the input, so the poller holds off
+        until it resolves. Both hooks getattr-guarded (minimal test sinks)."""
+        if bool(getattr(_sink, "is_busy", None) and _sink.is_busy()):
+            return True
+        cp = getattr(_sink, "consent_pending", None)
+        return bool(cp and cp())
+
+    def _on_mode(mode: str, surface: str) -> None:
+        """Remote coding-mode request (TG/panel → gateway one-shot req_mode →
+        the pending-steer poll). AUTOPILOT SAFE ASYMMETRY (Valentin-chosen):
+        a downgrade or lateral move (→ default/plan) applies INSTANTLY with a
+        visible audited note; the upgrade → autopilot NEVER applies silently —
+        a terminal-local y/n confirm must approve it (the person physically
+        at the terminal is the risk bearer; a remote surface must not disarm
+        the consent prompt it is about to exploit). Unknown modes and no-ops
+        are dropped. Sync + non-blocking by contract (the poller calls it):
+        the confirm runs as its own background task."""
+        surface = surface or "remote"
+        if mode not in _MODES or mode == state["mode"]:
+            return
+        if mode != "autopilot":
+            state["mode"] = mode
+            agent.mode = mode
+            _sink.note(f"mode → {mode} [{surface}]")
+            return
+        asyncio.ensure_future(_confirm_autopilot(surface))
+
+    async def _confirm_autopilot(surface: str) -> None:
+        """The terminal-local one-tap confirm for a remote autopilot upgrade.
+        Fail-safe in every direction: no confirm affordance, a turn/prompt
+        already live, anything but an explicit local yes, or the prompt
+        timeout all KEEP the current mode — and both outcomes leave an
+        audited note in the transcript. While the prompt is armed the steer
+        poller holds off (_poller_busy gates it), so it can never collide
+        with a real kernel consent (those only exist mid-turn, when the
+        poller does not fetch at all)."""
+        ask = getattr(_sink, "ask_yes_no", None)
+        if ask is None or _poller_busy():
+            _sink.note(f"autopilot request from {surface} not applied — mode stays {state['mode']}")
+            return
+        ok = await ask(f"{surface} asks to switch to autopilot "
+                       f"(auto-approve everything) — allow? [y/n]")
+        if ok:
+            state["mode"] = "autopilot"
+            agent.mode = "autopilot"
+            _sink.note(f"mode → autopilot [{surface}] — approved at this terminal")
+        else:
+            _sink.note(f"autopilot request from {surface} declined — mode stays {state['mode']}")
+
     def _cancel_background() -> None:
         for _t in (watcher_task, steer_task):
             if _t is not None:
@@ -283,14 +336,16 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         agent = agent_factory(cfg, token_provider, workspace, state["mode"])
         # Liveness v2 §B: idle-steer pickup. All poll/drain logic lives in
         # webbee.steer -- this is wiring only: the sink's live turn state
-        # gates polling, the agent's session id (once a turn has run) is the
-        # gateway truth, and _steer_submit is the normal turn path.
+        # (+ an armed local prompt) gates polling, the agent's session id
+        # (once a turn has run) is the gateway truth, _steer_submit is the
+        # normal turn path, and _on_mode adopts a remote mode request
+        # (autopilot safe-asymmetry).
         from webbee import steer as _steer
         steer_task = asyncio.ensure_future(_steer.poll_idle_steer(
             cfg, token_provider, workspace=workspace, marathon=not once,
-            is_busy=lambda: bool(getattr(_sink, "is_busy", None) and _sink.is_busy()),
+            is_busy=_poller_busy,
             live_session_id=lambda: getattr(agent, "session_id", ""),
-            submit=_steer_submit))
+            submit=_steer_submit, on_mode=_on_mode))
 
     if use_dock:
         ok = False
@@ -326,6 +381,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         },
                         stop_turn=lambda: agent.stop(),
                         pending=pending_queue, queued_run=_sink.queued_run,
+                        remote_pending=getattr(_sink, "remote_pending", None),
                     )
                 finally:
                     _cancel_background()

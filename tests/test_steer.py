@@ -80,7 +80,7 @@ def test_poll_submits_first_item_with_surface(monkeypatch):
 
     async def fake_fetch(cfg, tp, session_id):
         polled.append(session_id)
-        return [{"text": "push the fix", "surface": "telegram", "ts": 1}]
+        return {"items": [{"text": "push the fix", "surface": "telegram", "ts": 1}]}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
@@ -104,8 +104,8 @@ def test_poll_passes_item_iid_to_submit(monkeypatch):
     submitted = []
 
     async def fake_fetch(cfg, tp, session_id):
-        return [{"text": "push the fix", "surface": "telegram", "ts": 1,
-                 "iid": "iid-42"}]
+        return {"items": [{"text": "push the fix", "surface": "telegram", "ts": 1,
+                           "iid": "iid-42"}]}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
@@ -126,7 +126,7 @@ def test_poll_item_without_iid_submits_empty_iid(monkeypatch):
     submitted = []
 
     async def fake_fetch(cfg, tp, session_id):
-        return [{"text": "resume", "surface": "telegram", "ts": 2}]
+        return {"items": [{"text": "resume", "surface": "telegram", "ts": 2}]}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
@@ -147,7 +147,7 @@ def test_poll_no_items_never_submits(monkeypatch):
 
     async def fake_fetch(cfg, tp, session_id):
         polled.append(session_id)
-        return []
+        return {"items": []}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
@@ -171,7 +171,7 @@ def test_poll_silent_on_network_error_and_recovers(monkeypatch):
         calls.append(1)
         if len(calls) < 3:
             raise RuntimeError("connection refused")
-        return [{"text": "resume", "surface": "telegram", "ts": 2}]
+        return {"items": [{"text": "resume", "surface": "telegram", "ts": 2}]}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", flaky_fetch)
@@ -195,7 +195,7 @@ def test_poll_never_fetches_while_busy(monkeypatch):
 
     async def fake_fetch(cfg, tp, session_id):
         fetched.append(1)
-        return [{"text": "steer", "surface": "telegram", "ts": 3}]
+        return {"items": [{"text": "steer", "surface": "telegram", "ts": 3}]}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
@@ -228,10 +228,10 @@ def test_multi_item_drain_runs_in_order_one_per_tick_nothing_lost(monkeypatch):
     async def fake_fetch(cfg, tp, session_id):
         fetches.append(1)
         if len(fetches) == 1:
-            return [{"text": "first", "surface": "telegram", "ts": 1},
-                    {"text": "second", "surface": "panel", "ts": 2},
-                    {"text": "third", "surface": "telegram", "ts": 3}]
-        return []
+            return {"items": [{"text": "first", "surface": "telegram", "ts": 1},
+                              {"text": "second", "surface": "panel", "ts": 2},
+                              {"text": "third", "surface": "telegram", "ts": 3}]}
+        return {"items": []}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
@@ -257,7 +257,7 @@ def test_item_deferred_not_lost_when_turn_starts_mid_tick(monkeypatch):
     busy_answers = [False, True, False, False]   # gate, pre-submit(busy!), gate, pre-submit
 
     async def fake_fetch(cfg, tp, session_id):
-        return [{"text": "later", "surface": "telegram", "ts": 4}]
+        return {"items": [{"text": "later", "surface": "telegram", "ts": 4}]}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
@@ -284,7 +284,7 @@ def test_poller_exits_when_submitted_turn_absorbs_the_cancel(monkeypatch):
     in_submit = asyncio.Event()
 
     async def fake_fetch(cfg, tp, session_id):
-        return [{"text": "long job", "surface": "telegram", "ts": 5}]
+        return {"items": [{"text": "long job", "surface": "telegram", "ts": 5}]}
 
     import webbee.thread as TH
     monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
@@ -308,3 +308,107 @@ def test_poller_exits_when_submitted_turn_absorbs_the_cancel(monkeypatch):
         assert task.done()
 
     asyncio.run(main())
+
+
+# ── requested_mode → on_mode seam (full-queue-layer mode adoption) ────────────
+# The SAME pending-steer fetch carries the gateway's one-shot requested_mode
+# (GETDEL server-side). The poller hands it to the injected on_mode(mode,
+# surface) seam BEFORE any fetched item submits (the flip governs the turn it
+# rode in with) and stays alive whatever the seam or the payload does.
+
+def test_requested_mode_handed_to_on_mode_before_items_submit(monkeypatch):
+    events = []
+
+    async def fake_fetch(cfg, tp, session_id):
+        return {"items": [{"text": "do it", "surface": "telegram", "ts": 1}],
+                "requested_mode": {"mode": "plan", "surface": "telegram"}}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        events.append(("submit", text))
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              on_mode=lambda m, s: events.append(("mode", m, s)),
+                              interval=0.01),
+           until=lambda: ("submit", "do it") in events)
+    assert events[0] == ("mode", "plan", "telegram")   # mode first, then the turn
+    assert events[1] == ("submit", "do it")
+
+
+def test_requested_mode_absent_or_malformed_never_calls_on_mode(monkeypatch):
+    fetches = []
+    modes = []
+    payloads = [{"items": []},                                   # old gateway shape
+                {"items": [], "requested_mode": None},           # explicit null
+                {"items": [], "requested_mode": "autopilot"},    # not a dict
+                {"items": [], "requested_mode": {"surface": "telegram"}},  # no mode
+                {"items": [{"text": "go", "surface": "telegram", "ts": 1}]}]
+
+    async def fake_fetch(cfg, tp, session_id):
+        fetches.append(1)
+        return payloads[min(len(fetches), len(payloads)) - 1]
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+    submitted = []
+
+    async def submit(text, surface, steer_iid=""):
+        submitted.append(text)
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              on_mode=lambda m, s: modes.append((m, s)),
+                              interval=0.01),
+           until=lambda: submitted)
+    assert modes == []                                 # nothing well-formed arrived
+    assert submitted == ["go"]                         # items still flow
+
+
+def test_on_mode_error_never_kills_the_poller(monkeypatch):
+    fetches = []
+
+    async def fake_fetch(cfg, tp, session_id):
+        fetches.append(1)
+        if len(fetches) == 1:
+            return {"items": [], "requested_mode": {"mode": "plan", "surface": "telegram"}}
+        return {"items": [{"text": "still alive", "surface": "telegram", "ts": 2}]}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+    submitted = []
+
+    async def submit(text, surface, steer_iid=""):
+        submitted.append(text)
+
+    def bad_on_mode(mode, surface):
+        raise RuntimeError("ui bug")
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              on_mode=bad_on_mode, interval=0.01),
+           until=lambda: submitted)
+    assert submitted == ["still alive"]                # the seam error cost one tick, not the poller
+
+
+def test_requested_mode_without_on_mode_seam_is_ignored(monkeypatch):
+    # Old wiring (no on_mode kwarg) against a new gateway: the request is
+    # dropped silently — items keep flowing exactly as before.
+    async def fake_fetch(cfg, tp, session_id):
+        return {"items": [{"text": "go", "surface": "telegram", "ts": 1}],
+                "requested_mode": {"mode": "autopilot", "surface": "telegram"}}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+    submitted = []
+
+    async def submit(text, surface, steer_iid=""):
+        submitted.append(text)
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              interval=0.01),
+           until=lambda: submitted)
+    assert submitted == ["go"]

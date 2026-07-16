@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.14
+
+- See queued messages from Telegram/panel right in the terminal queue
+  (tagged by origin), and set the coding mode from Telegram — switching to
+  autopilot asks you to confirm in the terminal first.
+
 ## 0.3.13
 
 - The message queue is now a live panel above the input — you see exactly

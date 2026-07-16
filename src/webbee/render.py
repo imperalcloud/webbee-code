@@ -134,6 +134,11 @@ class RichSink:
         self._pending = ("", "")
         self._consent = None            # asyncio.Future while awaiting a reply
         self._consent_summary = ""
+        # Cross-surface items already queued in the RUNNING kernel session
+        # (full-queue-layer K1: task_queued/task_dequeued frames). The dock's
+        # queue panel reads THIS list object every redraw — mutate in place
+        # only (append/del/clear), never rebind.
+        self.remote_pending: list = []
 
     def _nudge(self) -> None:
         """After output/state changes: let the pane follow the tail + redraw."""
@@ -202,6 +207,12 @@ class RichSink:
 
     def end_turn(self, final_text: str) -> None:
         self._busy = False
+        # The kernel session's own queue only exists while a run is live —
+        # once this turn returns (complete / stopped / parked) the terminal
+        # no longer streams its dequeue frames, so any leftover remote rows
+        # would linger as phantoms. Clear them (in place — the panel holds
+        # this list object).
+        self.remote_pending.clear()
         final_text = _clean(final_text)
         if final_text:
             self.console.print()   # separation before the focus block
@@ -266,6 +277,38 @@ class RichSink:
         self.console.print(_pad(Text(" ❯ " + _clean(text) + " ", style="bold white on grey30")))
         self._nudge()
 
+    def remote_queued(self, origin: str, text: str, iid: str) -> None:
+        """Full-queue-layer K1 (`task_queued` frame): a follow-up queued into
+        the RUNNING kernel session from another surface shows in the live
+        queue panel the instant it queues — tagged `[origin]`, "as if typed".
+        DISPLAY-ONLY: it renders above the local rows but is never pullable
+        (↑/click) — the kernel owns it; only a `task_dequeued` (or turn end)
+        removes it."""
+        self.remote_pending.append({"origin": _clean(str(origin or "")),
+                                    "text": _clean(str(text or "")),
+                                    "iid": str(iid or "")})
+        self._nudge()
+
+    def remote_dequeued(self, origin: str, iid: str) -> None:
+        """The kernel drained (or dedup-dropped) one queued item
+        (`task_dequeued` frame): remove its panel row — by `iid` when it
+        matches, else the OLDEST row of that origin (the kernel queue is
+        FIFO, so when an iid is missing/lost the oldest same-origin row is
+        the one that just started). Nothing matched → no-op (the row was
+        already cleared or its announce was never seen)."""
+        iid = str(iid or "")
+        origin = _clean(str(origin or ""))
+        rows = self.remote_pending
+        idx = next((i for i, r in enumerate(rows) if iid and r.get("iid") == iid),
+                   None)
+        if idx is None:
+            idx = next((i for i, r in enumerate(rows) if r.get("origin") == origin),
+                       None)
+        if idx is None:
+            return
+        del rows[idx]
+        self._nudge()
+
     def queued_run(self, remaining: int) -> None:
         """The tiny lifecycle marker printed right before a drained queued
         line starts: `▶ running queued message` (+ how many still wait) — a
@@ -315,8 +358,10 @@ class RichSink:
 
     def abort(self) -> None:
         """Ctrl-C mid-turn: clear busy so the toolbar drops back to idle. No
-        printing — the caller (repl.py) prints the note."""
+        printing — the caller (repl.py) prints the note. Remote rows clear
+        too — the stream is gone, their dequeue frames can never arrive."""
         self._busy = False
+        self.remote_pending.clear()
         self._nudge()
 
     # ---- TurnSink -------------------------------------------------------
@@ -367,6 +412,35 @@ class RichSink:
         self.console.print(Text("  ↳ " + raw, style="dim"))   # quiet echo of the reply
         self._nudge()
         return raw
+
+    async def ask_yes_no(self, question: str, timeout: float = 60.0) -> bool:
+        """Terminal-LOCAL one-tap confirm for a remotely-requested privilege
+        upgrade (the autopilot safe-asymmetry): print the question and arm
+        the SAME pinned-input future the consent prompt uses (the dock's
+        Enter handler routes the raw reply here; the toolbar flips to the
+        reply state). STRICT gate — True only on an explicit local yes
+        (y/yes); n, an empty reply, no dock, a prompt error or the timeout
+        all return False, so the caller keeps the current mode. This is a
+        LOCAL policy decision, not a kernel consent, so the reply is
+        interpreted here rather than relayed (ICNLI raw-relay applies to
+        kernel consents only)."""
+        self.console.print(_pad(Text("⚠ " + _clean(question), style=f"bold {_BEE}")))
+        fut = self._arm_consent(question, question)
+        try:
+            if fut is None:                    # non-tty / no dock → sync reader
+                raw = self._input("     allow? [y/n] ")
+            else:
+                self._nudge()
+                raw = await asyncio.wait_for(fut, timeout)
+        except Exception:                      # timeout / prompt error → decline
+            raw = ""
+        finally:
+            self._consent = None
+            self._consent_summary = ""
+        raw = (raw or "").strip().lower()
+        self.console.print(Text("  ↳ " + (raw or "(no reply)"), style="dim"))
+        self._nudge()
+        return raw in ("y", "yes")
 
     def panel_release(self, panel_url: str, summary: str) -> None:
         body = Text.assemble(

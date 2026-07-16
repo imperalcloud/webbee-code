@@ -24,16 +24,23 @@ def one_line(text: str, width: int) -> str:
     return t
 
 
-def queue_height(pending) -> int:
+def queue_height(pending, remote=None) -> int:
     """PURE. Rows the panel needs: 1 header + one per SHOWN item + one
-    `… +K more` row when the queue is deeper than QP_MAX_ITEMS. 0 when empty
-    (the ConditionalContainer hides the panel then anyway). The cap keeps the
-    output pane dominant on small terminals; the toolbar's `⋯N queued`
-    segment stays the truth-teller for the full depth."""
+    `… +K more` row when a queue is deeper than QP_MAX_ITEMS (each of the
+    two sections — remote rows and local rows — caps independently). 0 when
+    both are empty (the ConditionalContainer hides the panel then anyway).
+    The cap keeps the output pane dominant on small terminals; the toolbar's
+    `⋯N queued` segment stays the truth-teller for the full depth."""
     n = len(pending)
-    if not n:
+    r = len(remote or ())
+    if not n and not r:
         return 0
-    return 1 + min(n, QP_MAX_ITEMS) + (1 if n > QP_MAX_ITEMS else 0)
+    rows = 1
+    if r:
+        rows += min(r, QP_MAX_ITEMS) + (1 if r > QP_MAX_ITEMS else 0)
+    if n:
+        rows += min(n, QP_MAX_ITEMS) + (1 if n > QP_MAX_ITEMS else 0)
+    return rows
 
 
 def pull_item(pending, buf, index: int) -> bool:
@@ -67,7 +74,7 @@ def _item_handler(pull, index: int):
     return _h
 
 
-def queue_fragments(pending, pull=None, width: int = 0):
+def queue_fragments(pending, pull=None, width: int = 0, remote=None):
     """PURE builder: the panel as prompt_toolkit formatted text, re-invoked
     every redraw (same live mechanics as the toolbar) so every queue
     add/edit/drain shows at once. Layout, top→bottom = drain order (FIFO —
@@ -75,19 +82,38 @@ def queue_fragments(pending, pull=None, width: int = 0):
     sitting right above the input):
 
         ⋯ queued (N) · ↑ edit last · click to edit
+        [telegram] remote item   ← remote rows ABOVE local (qp.remote)
         … +K more            ← only when N > QP_MAX_ITEMS (the OLDEST hide)
         older item           ← muted (qp.item)
         newest item          ← accent (qp.last)
 
-    When `pull` is given each item row is a 3-tuple fragment carrying a
-    mouse handler that pulls exactly that item (see _item_handler). Empty
-    queue → [] (the panel is hidden)."""
+    `remote` (full-queue-layer K1) = cross-surface items already queued in
+    the RUNNING kernel session ([{origin, text, iid}]); the kernel drains
+    its own queue first, mid-run, while local type-ahead only runs after the
+    whole turn returns — so remote rows render ABOVE local and top→bottom
+    stays drain order. They are DISPLAY-ONLY: tagged `[origin]`, plain
+    2-tuple fragments (never a mouse handler) and never part of the pull
+    index space — you can't pull a kernel-queued item into the local input.
+    The header counts both; the `↑ edit last` hint shows only when there is
+    a local (pullable) item. When `pull` is given each LOCAL item row is a
+    3-tuple fragment carrying a mouse handler that pulls exactly that item
+    (see _item_handler). Both queues empty → [] (the panel is hidden)."""
     items = list(pending)
+    rem = [r for r in (remote or ()) if isinstance(r, dict)]
     n = len(items)
-    if not n:
+    if not n and not rem:
         return []
-    frags = [("class:qp.header", f" ⋯ queued ({n})"),
-             ("class:qp.item", " · ↑ edit last · click to edit")]
+    frags = [("class:qp.header", f" ⋯ queued ({n + len(rem)})")]
+    if n:
+        frags.append(("class:qp.item", " · ↑ edit last · click to edit"))
+    rstart = max(0, len(rem) - QP_MAX_ITEMS)
+    if rstart:
+        frags.append(("class:qp.remote", f"\n   … +{rstart} more"))
+    for r in rem[rstart:]:
+        origin = str(r.get("origin") or "") or "remote"
+        row = "\n   " + one_line(f"[{origin}] {r.get('text') or ''}",
+                                 width - 4 if width > 0 else 0)
+        frags.append(("class:qp.remote", row))
     start = max(0, n - QP_MAX_ITEMS)
     if start:
         frags.append(("class:qp.item", f"\n   … +{start} more"))

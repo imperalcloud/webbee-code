@@ -221,7 +221,8 @@ def _arrow_down_action(event, buf, sel: dict, n: int, busy: bool) -> None:
 
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                       is_busy, consent_pending, resolve_consent, steps_nav=None,
-                      stop_turn=None, pending=None, queued_run=None) -> bool:
+                      stop_turn=None, pending=None, queued_run=None,
+                      remote_pending=None) -> bool:
     """The full-screen dock: `pane` fills the top (scrollable), a bordered input
     box + toolbar are FIXED at the bottom. Enter either resolves a pending
     consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
@@ -239,6 +240,10 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     is running, Up/Down move a step selection (toolbar shows `step k/N`) and
     Enter expands it via `steps_nav["expand"]`; Esc clears it. In every other
     state Up/Down recall submitted lines (readline-style history).
+    `remote_pending` (full-queue-layer K1) is the sink-owned list of items
+    already queued in the RUNNING kernel session from other surfaces — the
+    panel renders them ABOVE the local rows, tagged `[origin]`, DISPLAY-ONLY
+    (never pullable via ↑/click; the kernel owns their drain).
     Returns True on clean exit; False if prompt_toolkit is unavailable (caller
     uses the plain fallback loop)."""
     try:
@@ -258,6 +263,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     turn = {"task": None}
     if pending is None:
         pending = deque()   # type-ahead queue: lines submitted while a turn runs
+    if remote_pending is None:
+        remote_pending = []   # cross-surface kernel-queued items (display-only)
 
     def _start_turn(text):
         turn.pop("stopped", None)   # a stale stop flag must never eat the next natural drain
@@ -375,7 +382,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         return build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
                              current=st["current"], elapsed=st["elapsed"],
                              tools=st["tools"], consent=st["consent"],
-                             queued=len(pending))
+                             queued=len(pending) + len(remote_pending))
 
     # Dynamic height: EXACTLY the rows the wrapped input needs (1→10), so the box
     # grows as you type and shrinks back — never a fixed huge block. Enter still
@@ -403,10 +410,13 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
             get_app().invalidate()
 
     def _queue_fragments():
-        # Live like _toolbar: re-invoked every redraw, reads the shared deque.
+        # Live like _toolbar: re-invoked every redraw, reads the shared deque
+        # + the sink-owned remote list (pull serves the LOCAL rows only —
+        # remote rows are display-only by construction in queue_fragments).
         import shutil
         return queue_fragments(pending, pull=_pull_at,
-                               width=shutil.get_terminal_size((100, 24)).columns)
+                               width=shutil.get_terminal_size((100, 24)).columns,
+                               remote=remote_pending)
 
     # The LIVE pending-queue panel — pinned BETWEEN the output pane and the
     # input box; zero rows (hidden) while the queue is empty, so the empty
@@ -414,9 +424,9 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # focus on the input even when a row is clicked.
     queue_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_queue_fragments, focusable=False),
-                       height=lambda: queue_height(pending),
+                       height=lambda: queue_height(pending, remote_pending),
                        always_hide_cursor=True, wrap_lines=False),
-        filter=Condition(lambda: bool(pending)))
+        filter=Condition(lambda: bool(pending) or bool(remote_pending)))
 
     input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)]),
@@ -437,6 +447,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         "qp.header": "#e8a317 bold",         # queue-panel header — bee-yellow, pops
         "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
         "qp.last": "#e8a317",                # newest row — the one ↑ pulls
+        "qp.remote": "#af87ff italic",       # cross-surface rows — purple (not yours to pull)
     })
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)

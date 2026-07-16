@@ -44,6 +44,30 @@ async def derive_session_id(cfg, token_provider, workspace: str, *,
     return f"{prefix}-{imperal_id}-r{await asyncio.to_thread(_repo_key)}"
 
 
+def _consume_mode(payload, on_mode) -> bool:
+    """Hand the fetch's one-shot `requested_mode` ({mode, surface} -- GETDEL
+    on the gateway, delivered exactly once) to the injected
+    `on_mode(mode, surface)` seam. Fail-soft and guarded like every other
+    seam: a missing/malformed field, an old gateway (no key) or a seam error
+    never kills the poller -- a lost mode flip is safe (the mode simply
+    stays), a dead poller is not. Returns True when a request was handed
+    off, so the caller can yield once and let a just-spawned local confirm
+    (the autopilot upgrade prompt) arm before any queued item submits."""
+    if on_mode is None or not isinstance(payload, dict):
+        return False
+    req = payload.get("requested_mode")
+    if not isinstance(req, dict):
+        return False
+    mode = str(req.get("mode") or "").strip().lower()
+    if not mode:
+        return False
+    try:
+        on_mode(mode, str(req.get("surface") or "").strip() or "remote")
+    except Exception:
+        return False
+    return True
+
+
 def _cancel_absorbed() -> bool:
     """True when this task received a cancel that a submitted turn swallowed
     (repl._run_turn treats CancelledError as a user interrupt). Without this
@@ -56,6 +80,7 @@ def _cancel_absorbed() -> bool:
 async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                           submit, marathon: bool = True,
                           live_session_id=lambda: "",
+                          on_mode=None,
                           interval: float = _POLL_INTERVAL) -> None:
     """Run forever (until cancelled): every ~`interval`s of idle time, drain
     the pending-steer queue and hand the FIRST item to
@@ -73,7 +98,14 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                             is naturally paused for the turn's whole duration.
                             steer_iid = the queued item's dedup id ("" on an
                             older gateway), threaded into the turn POST so the
-                            kernel's dedup ring can drop an at-least-once twin."""
+                            kernel's dedup ring can drop an at-least-once twin.
+      * on_mode(mode, surface) -- sync, optional; receives the payload's
+                            one-shot `requested_mode` (a coding-mode flip
+                            asked from TG/panel) BEFORE any fetched item is
+                            submitted, so the flip governs the turn it rode
+                            in with. Must never block the poller: the repl's
+                            wiring applies downgrades instantly and spawns
+                            the autopilot local-confirm as its own task."""
     from webbee.thread import fetch_pending_steer
     derived = ""
     backlog: deque = deque()
@@ -91,7 +123,14 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                         derived = await derive_session_id(
                             cfg, token_provider, workspace, marathon=marathon)
                     sid = derived
-                backlog.extend(await fetch_pending_steer(cfg, token_provider, sid))
+                payload = await fetch_pending_steer(cfg, token_provider, sid) or {}
+                backlog.extend(payload.get("items") or [])
+                if _consume_mode(payload, on_mode):
+                    # Yield ONE loop cycle so a just-spawned local confirm
+                    # (autopilot upgrade) arms its prompt before the
+                    # pre-submit busy re-check below -- a fetched item then
+                    # defers until the person at the terminal has answered.
+                    await asyncio.sleep(0)
             if not backlog:
                 continue
             item = backlog.popleft()

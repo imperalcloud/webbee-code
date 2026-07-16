@@ -224,6 +224,30 @@ class AgentSession:
                             int(frame.get("credits", 0) or 0),
                         )
 
+                    elif ftype in ("task_queued", "task_dequeued"):
+                        # Full-queue-layer K1: a follow-up queued into the RUNNING
+                        # kernel session from another surface shows in the live
+                        # queue panel the instant it queues (tagged by origin) and
+                        # leaves the panel when the kernel drains it. These frames
+                        # carry NO task_id (they belong to the session, not a
+                        # turn), so the C7 filter never eats them; getattr-guarded
+                        # like todos/queued_run — a minimal sink drops them, a
+                        # render error never breaks the loop. The terminal's own
+                        # follow-ups already sit in the LOCAL panel — skip
+                        # terminal-origin twins.
+                        _origin = str(frame.get("origin", "") or "")
+                        _hook = getattr(sink, "remote_queued" if ftype == "task_queued"
+                                        else "remote_dequeued", None)
+                        if _hook is not None and _origin != "terminal":
+                            _iid = str(frame.get("steer_iid", "") or "")
+                            try:
+                                if ftype == "task_queued":
+                                    _hook(_origin, str(frame.get("text", "") or ""), _iid)
+                                else:
+                                    _hook(_origin, _iid)
+                            except Exception:
+                                pass
+
                     elif ftype == "marathon_complete":  # U4 — the whole GOAL is done: terminal
                         return frame.get("text", "")
 

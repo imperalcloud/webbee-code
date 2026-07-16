@@ -989,3 +989,105 @@ def test_run_omits_steer_iid_key_when_pickup_item_had_none(monkeypatch):
     body = _run_turn_capture_body(monkeypatch, surface="telegram", steer_iid="")
     assert "steer_iid" not in body
     assert body["surface"] == "telegram"
+
+
+# ── 0.3.14: cross-surface queued visibility (task_queued / task_dequeued) ─────
+# Full-queue-layer K1: the kernel announces a follow-up queued into the RUNNING
+# session from another surface (task_queued{origin, steer_iid, text,
+# queue_depth}) and its drain (task_dequeued{origin, steer_iid}) on the SAME
+# stream. NO task_id on either frame (they belong to the session, not a turn),
+# so the C7 foreign filter never eats them; the client routes them to two
+# getattr-guarded DISPLAY-ONLY sink hooks that feed the live queue panel.
+
+def _run_queue_frames_stream(monkeypatch, frames, sink):
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+    import webbee.tools as T
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider): pass
+        async def whoami(self): return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    class _NoExecutor:
+        def __init__(self, root, indexer=None, shadow=None): pass
+        def run(self, tool, args): raise AssertionError("no tools in this test")
+
+    monkeypatch.setattr(T, "LocalToolExecutor", _NoExecutor)
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+        for f in frames:
+            yield f
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    class _SessResp:
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, headers=None, **kw): return _SessResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    return asyncio.run(sess.run("do it", sink))
+
+
+def test_task_queued_and_dequeued_route_to_sink_hooks_skipping_terminal(monkeypatch):
+    class _QueueSink(RecSink):
+        def __init__(self):
+            super().__init__()
+            self.queued = []; self.dequeued = []
+            self.progress_calls = []; self.foreign = []
+        def remote_queued(self, origin, text, iid): self.queued.append((origin, text, iid))
+        def remote_dequeued(self, origin, iid): self.dequeued.append((origin, iid))
+        def progress(self, text): self.progress_calls.append(text)
+        def foreign_turn(self, surface, role, text): self.foreign.append((surface, role, text))
+
+    sink = _QueueSink()
+    result = _run_queue_frames_stream(monkeypatch, [
+        # no task_id on queue frames — never foreign, own elif branch handles them
+        {"type": "task_queued", "origin": "telegram", "steer_iid": "i1",
+         "text": "fix the tests", "queue_depth": 1},
+        {"type": "task_queued", "origin": "terminal", "steer_iid": "i2",
+         "text": "own follow-up", "queue_depth": 2},   # already in the LOCAL panel — skipped
+        {"type": "task_dequeued", "origin": "telegram", "steer_iid": "i1"},
+        {"type": "task_dequeued", "origin": "terminal", "steer_iid": "i2"},  # skipped too
+        {"type": "final", "task_id": "OURS", "text": "done"},
+    ], sink)
+    assert result == "done"
+    assert sink.queued == [("telegram", "fix the tests", "i1")]
+    assert sink.dequeued == [("telegram", "i1")]
+    # display-only: nothing leaked into the turn's other render paths
+    assert sink.progress_calls == [] and sink.foreign == []
+
+
+def test_task_queue_frames_ignored_by_minimal_or_crashing_sink(monkeypatch):
+    # Backward/limp-mode safety: a sink WITHOUT the hooks (older embedder,
+    # minimal test sink) silently drops the frames, and a hook that CRASHES
+    # never breaks the frame loop — the turn still ends on its own final.
+    class _CrashSink(RecSink):
+        def remote_queued(self, origin, text, iid): raise RuntimeError("ui bug")
+
+    frames = [
+        {"type": "task_queued", "origin": "telegram", "steer_iid": "i1",
+         "text": "fix", "queue_depth": 1},
+        {"type": "task_dequeued", "origin": "telegram", "steer_iid": "i1"},
+        {"type": "final", "task_id": "OURS", "text": "done"},
+    ]
+    assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == "done"
+    assert _run_queue_frames_stream(monkeypatch, frames, _CrashSink()) == "done"

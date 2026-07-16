@@ -703,3 +703,98 @@ def test_queue_command_in_fallback_loop_reports_empty_and_never_hits_agent():
     assert any("empty" in n.lower() for n in sink.notes)
     assert any("already empty" in n.lower() for n in sink.notes)
     assert agent.tasks == []
+
+
+# ── remote mode adoption wiring (autopilot safe-asymmetry, 0.3.14) ────────────
+# webbee.steer hands requested_mode to the repl's on_mode seam. Repl policy
+# (Valentin-chosen): a downgrade/lateral (→ default/plan) applies INSTANTLY
+# with an audited note; the upgrade → autopilot NEVER applies silently — a
+# terminal-local y/n confirm (sink.ask_yes_no) must approve it, and anything
+# short of an explicit local yes keeps the current mode with an audited note.
+
+def _spy_on_mode(monkeypatch, *calls, settle_ticks=4):
+    """Capture the repl's injected on_mode seam and feed it `calls`; each call
+    is followed by a few loop ticks so a spawned confirm task can finish."""
+    import webbee.steer as SP
+
+    async def spy_poller(cfg, token_provider, *, on_mode=None, **kw):
+        for mode, surface in calls:
+            on_mode(mode, surface)
+            for _ in range(settle_ticks):
+                await asyncio.sleep(0)
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+
+
+def test_remote_downgrade_applies_instantly_with_note(monkeypatch):
+    _spy_on_mode(monkeypatch, ("plan", "telegram"))
+    agent = SurfaceAgent()
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=agent)
+    assert agent.mode == "plan"                       # applied, no prompt needed
+    assert any(n == "mode → plan [telegram]" for n in sink.notes)
+
+
+def test_remote_autopilot_applies_only_on_local_yes(monkeypatch):
+    _spy_on_mode(monkeypatch, ("autopilot", "telegram"))
+
+    class ConfirmSink(FakeSink):
+        def __init__(self):
+            super().__init__()
+            self.questions = []
+        async def ask_yes_no(self, question, timeout=60.0):
+            self.questions.append(question)
+            return True
+
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent(),
+                       sink=ConfirmSink())
+    assert agent.mode == "autopilot"                  # flipped only AFTER the local yes
+    assert sink.questions and "autopilot" in sink.questions[0]
+    assert "telegram" in sink.questions[0] and "allow?" in sink.questions[0]
+    assert any("approved at this terminal" in n for n in sink.notes)
+
+
+def test_remote_autopilot_declined_or_unconfirmable_keeps_mode(monkeypatch):
+    _spy_on_mode(monkeypatch, ("autopilot", "telegram"))
+
+    class DeclineSink(FakeSink):
+        async def ask_yes_no(self, question, timeout=60.0):
+            return False                              # n / timeout / no reply
+
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent(),
+                       sink=DeclineSink())
+    assert agent.mode == "default"                    # unchanged
+    assert any("declined" in n and "default" in n for n in sink.notes)
+
+    # No confirm affordance at all (minimal sink) -> fail-safe, audited.
+    _spy_on_mode(monkeypatch, ("autopilot", "telegram"))
+    sink2, agent2 = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent())
+    assert agent2.mode == "default"
+    assert any("not applied" in n for n in sink2.notes)
+
+
+def test_remote_mode_unknown_or_noop_is_dropped(monkeypatch):
+    _spy_on_mode(monkeypatch, ("turbo", "telegram"), ("default", "telegram"))
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent())
+    assert agent.mode == "default"                    # unknown dropped; no-op silent
+    assert not any(n.startswith("mode →") for n in sink.notes)
+
+
+def test_steer_poller_busy_gate_also_holds_while_local_prompt_armed(monkeypatch):
+    # The autopilot confirm arms the same pinned-input future a consent uses;
+    # the poller must hold off then (a steer turn under an armed prompt could
+    # double-prompt the input).
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, is_busy, **kw):
+        captured["is_busy"] = is_busy
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+
+    class ArmedSink(FakeSink):
+        def is_busy(self): return False
+        def consent_pending(self): return True
+
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent(),
+                       sink=ArmedSink())
+    assert captured["is_busy"]() is True

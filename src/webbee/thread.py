@@ -44,21 +44,27 @@ async def fetch_recent_thread(cfg, token_provider, session_id: str) -> list[dict
         return (r.json() or {}).get("messages", [])
 
 
-async def fetch_pending_steer(cfg, token_provider, session_id: str) -> list[dict]:
-    """Drain this user's queued remote instructions (idle-steer pickup,
-    liveness v2 §B) -- the /thread endpoint's sibling, same auth. The gateway
-    read is DESTRUCTIVE: each queued item is returned exactly ONCE, oldest
-    first (empty when nothing is queued or remote control is disabled), so
-    the caller owns every item it receives. Non-swallowing like
-    fetch_recent_thread above: the poller (webbee.steer) wraps each tick in
-    its own try/except."""
+async def fetch_pending_steer(cfg, token_provider, session_id: str) -> dict:
+    """Drain this user's pending-steer state (idle-steer pickup, liveness v2
+    §B + full-queue-layer mode adoption) -- the /thread endpoint's sibling,
+    same auth. Returns the gateway payload verbatim:
+      * "items"          -- queued remote instructions. The gateway read is
+                            DESTRUCTIVE: each item is returned exactly ONCE,
+                            oldest first (empty when nothing is queued or
+                            remote control is disabled), so the caller owns
+                            every item it receives.
+      * "requested_mode" -- one-shot remote mode request {mode, surface} or
+                            null (GETDEL on the gateway -- delivered exactly
+                            once; older gateways omit the key entirely).
+    Non-swallowing like fetch_recent_thread above: the poller (webbee.steer)
+    wraps each tick in its own try/except."""
     import httpx
     token = await token_provider()
     async with httpx.AsyncClient(base_url=cfg.api_url, timeout=10) as c:
         r = await c.get(f"/v1/agent/sessions/{session_id}/pending-steer",
                         headers={"Authorization": f"Bearer {token}"})
         r.raise_for_status()
-        return (r.json() or {}).get("items", [])
+        return r.json() or {}
 
 
 def truncate_for_display(text, limit: int = _DISPLAY_LIMIT) -> str:

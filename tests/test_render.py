@@ -550,3 +550,110 @@ def test_todos_strips_control_bytes_from_content():
     s.todos([{"content": "evil\x1b[?1003hitem", "status": "pending"}], 1, 0)
     out = c.export_text()
     assert "\x1b[?1003h" not in out and "evilitem" in out
+
+
+# ── 0.3.14: remote-queued panel state (task_queued/task_dequeued hooks) ───────
+# The sink OWNS the cross-surface queue-panel state: remote_queued appends a
+# tagged display-only row, remote_dequeued removes it (iid first, oldest
+# same-origin fallback), and turn end / abort clears the lot -- the kernel
+# session's queue only exists while a run is live, so leftovers would be
+# phantom rows. Always mutate IN PLACE: the dock panel holds this list object.
+
+def test_remote_queued_appends_and_dequeued_removes_by_iid():
+    s = _sink()
+    rows = s.remote_pending                       # the panel's list object
+    s.remote_queued("telegram", "fix the tests", "i1")
+    s.remote_queued("web-panel", "then docs", "i2")
+    assert rows == [{"origin": "telegram", "text": "fix the tests", "iid": "i1"},
+                    {"origin": "web-panel", "text": "then docs", "iid": "i2"}]
+    s.remote_dequeued("telegram", "i1")
+    assert rows == [{"origin": "web-panel", "text": "then docs", "iid": "i2"}]
+    assert s.remote_pending is rows               # never rebound
+
+
+def test_remote_dequeued_falls_back_to_oldest_same_origin():
+    # An older kernel / a lost announce can leave the iid unmatched: the
+    # kernel queue is FIFO, so the OLDEST same-origin row is the one that
+    # just started. Nothing matched at all -> no-op (never a crash).
+    s = _sink()
+    s.remote_queued("telegram", "first", "i1")
+    s.remote_queued("web-panel", "other", "i2")
+    s.remote_queued("telegram", "second", "i3")
+    s.remote_dequeued("telegram", "")             # no iid -> oldest telegram row
+    assert [r["iid"] for r in s.remote_pending] == ["i2", "i3"]
+    s.remote_dequeued("discord", "zzz")           # nothing matches -> no-op
+    assert [r["iid"] for r in s.remote_pending] == ["i2", "i3"]
+
+
+def test_remote_rows_sanitized_like_all_untrusted_text():
+    s = _sink()
+    s.remote_queued("tele\x1b[2Jgram", "do\x1b]0;pwned\x07 it", "i1")
+    row = s.remote_pending[0]
+    assert row["origin"] == "telegram" and row["text"] == "do it"
+
+
+def test_end_turn_and_abort_clear_remote_rows_in_place():
+    s = _sink()
+    rows = s.remote_pending
+    s.begin_turn(); s.remote_queued("telegram", "queued", "i1")
+    s.end_turn("done")
+    assert rows == [] and s.remote_pending is rows
+    s.begin_turn(); s.remote_queued("telegram", "queued again", "i2")
+    s.abort()
+    assert rows == [] and s.remote_pending is rows
+
+
+# ── 0.3.14: the terminal-local yes/no confirm (autopilot safe-asymmetry) ──────
+
+def test_ask_yes_no_sync_fallback_strict_yes_only():
+    # No dock -> the injected sync reader answers. STRICT: only y/yes is True.
+    for reply, want in (("y", True), ("YES", True), ("n", False),
+                        ("", False), ("да", False), ("approve", False)):
+        s = RichSink(console=Console(record=True, width=80, force_terminal=False),
+                     live_enabled=False, input_fn=lambda p, r=reply: r,
+                     clock=lambda: 0.0)
+        assert asyncio.run(s.ask_yes_no("switch to autopilot — allow? [y/n]")) is want
+        assert s.consent_pending() is False
+    out = s.console.export_text()
+    assert "allow?" in out and not NO_CYRILLIC.search(out)
+
+
+def test_ask_yes_no_dock_path_resolves_via_the_pinned_input(monkeypatch):
+    # With a dock running, ask_yes_no arms the SAME future the consent prompt
+    # uses -- the Enter handler's resolve_consent() is the answer path.
+    import prompt_toolkit.application as PA
+    monkeypatch.setattr(PA, "get_app_or_none", lambda: object())
+    s = _sink()
+
+    async def _t():
+        task = asyncio.ensure_future(s.ask_yes_no("telegram asks — allow? [y/n]"))
+        await asyncio.sleep(0)
+        assert s.consent_pending() is True     # toolbar flips to the reply state
+        s.resolve_consent("y")
+        return await task
+
+    assert asyncio.run(_t()) is True
+    assert s.consent_pending() is False and s._consent is None
+
+
+def test_ask_yes_no_timeout_declines_and_disarms(monkeypatch):
+    # The person may simply be away (that IS the remote-control scenario):
+    # the prompt times out to a DECLINE and fully disarms the input.
+    import prompt_toolkit.application as PA
+    monkeypatch.setattr(PA, "get_app_or_none", lambda: object())
+    s = _sink()
+
+    async def _t():
+        return await s.ask_yes_no("allow? [y/n]", timeout=0.01)
+
+    assert asyncio.run(_t()) is False
+    assert s.consent_pending() is False and s._consent is None
+
+
+def test_ask_yes_no_input_error_declines():
+    # A broken reader (or ^C at the sync prompt) must decline, never raise.
+    def _boom(p):
+        raise RuntimeError("tty gone")
+    s = RichSink(console=Console(record=True, width=80, force_terminal=False),
+                 live_enabled=False, input_fn=_boom, clock=lambda: 0.0)
+    assert asyncio.run(s.ask_yes_no("allow? [y/n]")) is False

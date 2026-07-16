@@ -1101,3 +1101,75 @@ def test_dock_end_to_end_panel_pull_reedit_requeue_and_clean_transcript():
         assert "⋯ queued" not in pane.dump()                     # transcript stayed CLEAN
 
     asyncio.run(scenario())
+
+
+# ── 0.3.14: cross-surface (remote-queued) rows in the live panel ─────────────
+# Full-queue-layer K1: a Telegram/panel follow-up queued into the RUNNING
+# kernel session shows in the SAME live panel the instant the kernel announces
+# it (task_queued) — rendered ABOVE the local rows (the kernel drains its own
+# queue first, mid-run), tagged [origin], and DISPLAY-ONLY: never a mouse
+# handler, never part of the ↑/click pull index space (you can't pull a
+# kernel-queued item into the local input buffer).
+
+def _remote(origin, text, iid=""):
+    return {"origin": origin, "text": text, "iid": iid}
+
+
+def test_remote_rows_render_above_local_tagged_by_origin():
+    frags = queue_fragments(deque(["local line"]),
+                            remote=[_remote("telegram", "fix the tests", "i1"),
+                                    _remote("web-panel", "then the docs", "i2")])
+    text = _panel_text(frags)
+    assert "⋯ queued (3)" in text                       # header counts BOTH queues
+    assert "[telegram] fix the tests" in text
+    assert "[web-panel] then the docs" in text
+    # remote rows sit ABOVE the local ones — top→bottom stays drain order
+    assert text.index("[telegram]") < text.index("[web-panel]") < text.index("local line")
+    assert not NO_CYRILLIC.search(text)
+
+
+def test_remote_rows_are_display_only_never_pullable():
+    pulls = []
+    frags = queue_fragments(deque(["mine"]), pull=pulls.append, width=80,
+                            remote=[_remote("telegram", "remote thing", "i1")])
+    # every remote row is a plain 2-tuple (no mouse handler); local rows keep
+    # their handler and their LOCAL index (remote rows never shift pull math)
+    remote_frags = [f for f in frags if "[telegram]" in f[1]]
+    assert remote_frags and all(len(f) == 2 for f in remote_frags)
+    handlers = [f[2] for f in frags if len(f) == 3]
+    assert len(handlers) == 1                           # only the local row is clickable
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    handlers[0](up)
+    assert pulls == [0]                                 # pending[0] == "mine", not the remote row
+
+
+def test_remote_only_queue_renders_panel_without_pull_hint():
+    frags = queue_fragments(deque(), remote=[_remote("telegram", "go", "i1")])
+    text = _panel_text(frags)
+    assert "⋯ queued (1)" in text and "[telegram] go" in text
+    assert "↑ edit last" not in text                    # nothing local to pull/edit
+    assert all(len(f) == 2 for f in frags)              # nothing clickable at all
+
+
+def test_remote_rows_styled_distinct_and_one_line_truncated():
+    frags = queue_fragments(deque(), width=40,
+                            remote=[_remote("telegram", "x" * 500, "i1")])
+    row = [f for f in frags if "[telegram]" in f[1]][0]
+    assert row[0] == "class:qp.remote"
+    line = row[1].lstrip("\n")
+    assert line.endswith("…") and len(line) <= 40       # one panel row, hard-capped
+
+
+def test_remote_rows_cap_with_a_more_row_and_height_counts_both():
+    rem = [_remote("telegram", f"r{i}", f"i{i}") for i in range(7)]
+    frags = queue_fragments(deque(["a"]), remote=rem)
+    text = _panel_text(frags)
+    assert "… +2 more" in text                          # oldest 2 remote hide
+    assert "[telegram] r6" in text and "[telegram] r1" not in text
+    assert queue_height(deque(["a"]), rem) == 1 + (QP_MAX_ITEMS + 1) + 1  # hdr + remote(5+more) + local
+    assert queue_height(deque(), [_remote("telegram", "go")]) == 2        # hdr + 1 remote
+    assert queue_height(deque(), []) == 0               # both empty → hidden
+    assert queue_height(deque(["a"]))  == 2             # remote omitted → exactly as before

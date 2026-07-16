@@ -143,10 +143,11 @@ def test_fetch_pending_steer_gets_right_path_and_bearer(monkeypatch):
     out = asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56"))
     assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/pending-steer"
     assert seen["headers"] == {"Authorization": "Bearer tok"}
-    assert out == [{"text": "push the fix", "surface": "telegram", "ts": 1}]
+    # Full payload verbatim: items + (absent here) requested_mode ride together.
+    assert out == {"items": [{"text": "push the fix", "surface": "telegram", "ts": 1}]}
 
 
-def test_fetch_pending_steer_empty_response_returns_empty_list(monkeypatch):
+def test_fetch_pending_steer_empty_response_returns_empty_payload(monkeypatch):
     from webbee.thread import fetch_pending_steer
 
     class _Resp:
@@ -170,7 +171,41 @@ def test_fetch_pending_steer_empty_response_returns_empty_list(monkeypatch):
             return _Resp()
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
-    assert asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56")) == []
+    # A null body degrades to {} — the poller's .get("items")/.get(
+    # "requested_mode") reads then see nothing, never a crash.
+    assert asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56")) == {}
+
+
+def test_fetch_pending_steer_returns_requested_mode_verbatim(monkeypatch):
+    # Full-queue-layer mode adoption: the gateway's one-shot requested_mode
+    # (GETDEL server-side — delivered exactly once) rides the SAME payload;
+    # the client must relay it verbatim for webbee.steer to consume.
+    from webbee.thread import fetch_pending_steer
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": [],
+                    "requested_mode": {"mode": "autopilot", "surface": "telegram"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, path, headers=None, **kw):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    out = asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56"))
+    assert out["requested_mode"] == {"mode": "autopilot", "surface": "telegram"}
 
 
 def test_fetch_pending_steer_drain_is_gateway_side_no_client_cache(monkeypatch):
@@ -205,8 +240,8 @@ def test_fetch_pending_steer_drain_is_gateway_side_no_client_cache(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
     first = asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56"))
     second = asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56"))
-    assert first == [{"text": "one", "surface": "telegram", "ts": 1}]
-    assert second == []
+    assert first == {"items": [{"text": "one", "surface": "telegram", "ts": 1}]}
+    assert second == {"items": []}
 
 
 def test_fetch_pending_steer_propagates_network_error():
