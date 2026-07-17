@@ -139,6 +139,14 @@ class RichSink:
         # queue panel reads THIS list object every redraw — mutate in place
         # only (append/del/clear), never rebind.
         self.remote_pending: list = []
+        # The current coding checklist (sticky todo panel, 0.3.15) — the twin
+        # of remote_pending: todos() replaces its contents in place on every
+        # todo frame; the dock's todo panel reads THIS list object every
+        # redraw. Sticky: it persists across turn ends (the panel stays up)
+        # and clears only on /clear.
+        self.current_todos: list = []
+        self._todo_counts = (0, 0)      # kernel-reported (done, total)
+        self._todos_dirty = False       # a turn touched the list -> end_turn records it
 
     def _nudge(self) -> None:
         """After output/state changes: let the pane follow the tail + redraw."""
@@ -213,6 +221,14 @@ class RichSink:
         # would linger as phantoms. Clear them (in place — the panel holds
         # this list object).
         self.remote_pending.clear()
+        # Sticky-todo scrollback record (0.3.15): in the dock the live panel
+        # replaced the inline re-renders, so print the FINAL checklist state
+        # ONCE per turn that touched it — the transcript keeps the history
+        # while the panel itself persists (sticky) into idle.
+        if self._on_output is not None and self._todos_dirty and self.current_todos:
+            done, total = self._todo_counts
+            self._todos_inline(self.current_todos, total, done)
+        self._todos_dirty = False
         final_text = _clean(final_text)
         if final_text:
             self.console.print()   # separation before the focus block
@@ -237,15 +253,41 @@ class RichSink:
         self._nudge()
 
     def todos(self, items: list, total: int, done: int) -> None:
-        """Claude-Code-style checklist for the coding TODO scratchpad. The
-        kernel republishes the FULL list on every todo_write, so each update
-        re-renders the whole current plan inline — the latest complete list
-        always sits in the scrollback (deliberately NOT a pinned sticky panel:
-        inline re-render can't fight the dock layout). Order preserved, one
-        line per item: ✓ completed (dim, struck) · ▶ in progress (bold, so
-        "what's happening now" pops) · ○ pending (muted). Defensive: malformed
-        items are skipped, unknown statuses render as pending, bad counts
-        degrade to a bare header — never raises."""
+        """Checklist state for the coding TODO scratchpad. The kernel
+        republishes the FULL list on every todo_write; each update replaces
+        `current_todos` IN PLACE (the dock's sticky todo panel holds this
+        list object and re-reads it every redraw — 0.3.15, no more inline
+        scroll-away in the dock; end_turn prints the final checklist ONCE as
+        the scrollback record). Headless / non-dock sinks (no on_output pane)
+        keep today's full inline render. Defensive both ways: malformed items
+        are skipped, bad counts degrade, never raises."""
+        rows = []
+        for item in (items if isinstance(items, (list, tuple)) else ()):
+            if not isinstance(item, dict):
+                continue                       # malformed entry — skip, never raise
+            content = _clean(item.get("content", "")).strip()
+            if not content:
+                continue
+            rows.append({"content": content,
+                         "status": str(item.get("status", "") or "")})
+        self.current_todos[:] = rows           # in place — the panel holds this list
+        try:
+            self._todo_counts = (int(done), int(total))
+        except (TypeError, ValueError):
+            self._todo_counts = (sum(1 for r in rows if r["status"] == "completed"),
+                                 len(rows))
+        self._todos_dirty = True
+        if self._on_output is not None:        # dock: the sticky panel renders it live
+            self._nudge()
+            return
+        self._todos_inline(items, total, done)
+
+    def _todos_inline(self, items, total, done) -> None:
+        """The Claude-Code-style INLINE checklist render (the pre-0.3.15
+        behavior, verbatim): one line per item — ✓ completed (dim, struck) ·
+        ▶ in progress (bold, so "what's happening now" pops) · ○ pending
+        (muted), order preserved. Used by the headless/non-dock path on every
+        todo frame and by end_turn's one-shot scrollback record in the dock."""
         try:
             head = f"📋 Todos ({int(done)}/{int(total)})"
         except (TypeError, ValueError):
@@ -346,7 +388,10 @@ class RichSink:
         self._nudge()
 
     def clear(self) -> None:
-        """/clear: wipe the pane/screen + reset the session counters."""
+        """/clear: wipe the pane/screen + reset the session counters. The
+        sticky todo panel resets with it (in place — the panel holds the
+        list object); a mid-run abort deliberately does NOT (the last known
+        plan state is still true and the panel is always-on)."""
         self.console.clear()
         self.tokens = 0
         self.credits = 0
@@ -354,6 +399,8 @@ class RichSink:
         self.session_credits = 0
         self._tools = 0
         self._current = ""
+        self.current_todos.clear()
+        self._todos_dirty = False
         self._nudge()
 
     def abort(self) -> None:

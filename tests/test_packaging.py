@@ -25,4 +25,5 @@ def test_readme_exists_and_mentions_install():
 def test_install_script_is_posix_and_uses_uv():
     txt = (ROOT / "install.sh").read_text()
     assert txt.startswith("#!/bin/sh")
-    assert "uv tool install webbee" in txt
+    # 0.3.14: the intel graph extras install by default
+    assert 'uv tool install "webbee[intel,intel-embed]"' in txt

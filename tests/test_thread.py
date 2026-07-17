@@ -299,3 +299,74 @@ def test_conversational_text_narration_kept_tool_tail_cut():
 def test_conversational_text_none_is_empty():
     from webbee.thread import conversational_text
     assert conversational_text(None) == ""
+
+
+# ── 0.3.15: mid-turn inject POST (the /thread family's write sibling) ─────────
+# inject_to_session is the gateway leg the dock fires on Enter-while-busy:
+# POST /v1/agent/sessions/{id}/inject {text, steer_iid} → task_id-LESS
+# new_task into the user's own RUNNING session. Non-swallowing like its
+# siblings — repl._inject_via_gateway wraps it (local-queue fallback).
+
+def test_inject_to_session_posts_right_path_bearer_and_body(monkeypatch):
+    from webbee.thread import inject_to_session
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": True, "steer_iid": "iid-1"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): seen["base_url"] = kw.get("base_url")
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, json=None, headers=None):
+            seen["path"] = path; seen["json"] = json; seen["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    ok = asyncio.run(inject_to_session(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56",
+                                       "fly this in", "iid-1"))
+    assert ok is True
+    assert seen["base_url"] == "http://x"
+    assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/inject"
+    assert seen["json"] == {"text": "fly this in", "steer_iid": "iid-1"}
+    assert seen["headers"] == {"Authorization": "Bearer tok"}
+
+
+def test_inject_to_session_gateway_refusal_returns_false(monkeypatch):
+    from webbee.thread import inject_to_session
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": False}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, json=None, headers=None): return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    assert asyncio.run(inject_to_session(_Cfg(), _tp, "s1", "x", "i")) is False
+
+
+def test_inject_to_session_raises_on_http_error_non_swallowing(monkeypatch):
+    from webbee.thread import inject_to_session
+
+    class _Resp:
+        def raise_for_status(self): raise httpx.HTTPStatusError("401", request=None, response=None)
+        def json(self): return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, json=None, headers=None): return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    try:
+        asyncio.run(inject_to_session(_Cfg(), _tp, "s1", "x", "i"))
+        raised = False
+    except httpx.HTTPStatusError:
+        raised = True
+    assert raised    # the caller (repl wiring) owns the fallback

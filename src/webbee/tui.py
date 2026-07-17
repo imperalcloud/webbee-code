@@ -4,14 +4,19 @@ the very bottom and never move while the output scrolls (mouse wheel /
 PageUp). `run_session` also drives step-navigation (Up/Down + Enter) over the
 pinned box when the input is empty and no turn is running; in every other
 state Up/Down recall submitted lines (readline-style), and Enter while a turn
-runs QUEUES the line (Claude-Code type-ahead: shown LIVE in the queue panel
-pinned above the input — see queue_panel.py — counted in the toolbar, run
-after the current turn — natural completion only, a user STOP preserves the
-queue; ↑ on an empty input pulls the newest queued line back for editing, a
-click pulls that item; /queue lists it, /queue clear drops it; the transcript
-stays clean — real turns only). Pure helpers (next_mode/build_toolbar/the
-*_action functions) are unit-tested; the Application is TTY/headless-smoke
-verified. Grounded in prompt_toolkit 3.0.52."""
+runs FLIES the line into the RUNNING turn (mid-turn inject, 0.3.15 — the
+kernel absorbs it at the next brain step; its task_queued[terminal] echo
+shows the panel row) with the local type-ahead queue as the fallback when no
+inject leg is wired or it fails (shown LIVE in the queue panel pinned above
+the input — see queue_panel.py — counted in the toolbar, run after the
+current turn — natural completion only, a user STOP preserves the queue;
+↑ on an empty input pulls the newest queued line back for editing, a click
+pulls that item; /queue lists it, /queue clear drops it; the transcript
+stays clean — real turns only). A STICKY todo panel (todo_panel.py) sits
+above the queue panel and tracks the current checklist live. Pure helpers
+(next_mode/build_toolbar/the *_action functions) are unit-tested; the
+Application is TTY/headless-smoke verified. Grounded in prompt_toolkit
+3.0.52."""
 import asyncio
 import re
 from collections import deque
@@ -19,6 +24,7 @@ from collections import deque
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
+from webbee.todo_panel import todo_fragments, todo_height
 
 _MODES = ("default", "plan", "autopilot")
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # braille frames — animated while a turn runs
@@ -139,20 +145,66 @@ def _interrupt_action(turn: dict, is_busy, stop_turn, event) -> None:
         t.cancel()                          # cancel the running turn; dock survives
 
 
-def _submit_line(text: str, buf, pending, busy: bool, start) -> str:
+class QueuedLine(str):
+    """A locally-queued type-ahead line that remembers the steer_iid minted at
+    enqueue time (mid-turn inject fallback, 0.3.15). A plain str everywhere it
+    already flows (panel one_line, pull_item→buffer, history, dispatch) — the
+    iid rides along ONLY so the turn-end drain re-submits under the SAME dedup
+    id: if a failed-looking inject actually landed server-side, the kernel's
+    steer-iid ring drops the twin instead of running it twice."""
+    iid = ""
+
+    def __new__(cls, text: str, iid: str = ""):
+        s = str.__new__(cls, text)
+        s.iid = str(iid or "")
+        return s
+
+
+async def _inject_or_queue(inject, text: str, pending, invalidate=None) -> bool:
+    """Enter-while-busy fly-in (mid-turn inject, 0.3.15): mint the steer_iid
+    HERE — one id for both legs — and POST immediately via `inject(text, iid)`
+    (the repl's gateway leg). On ok the line is KERNEL-owned: nothing is queued
+    locally — the kernel's task_queued{origin:terminal} echo renders the panel
+    row and task_dequeued clears it when the running turn absorbs it (seconds,
+    the next brain step). On ANY failure (no live session yet, offline, gateway
+    refusal) fall back to today's local queue: the row — carrying the SAME
+    iid — drains at turn end through _drain_pending, stays ↑/click-pullable,
+    and the kernel ring dedups the twin if the inject landed after all.
+    Returns True when the line flew in (the caller's tests read it)."""
+    from uuid import uuid4
+    iid = uuid4().hex
+    try:
+        ok = bool(await inject(text, iid))
+    except Exception:
+        ok = False
+    if not ok:
+        pending.append(QueuedLine(text, iid))
+    if invalidate is not None:
+        invalidate()
+    return ok
+
+
+def _submit_line(text: str, buf, pending, busy: bool, start, inject=None) -> str:
     """Route ONE submitted line (dependency-injected, same testing philosophy
     as _escape_action). Whitespace never queues nor starts ("ignored"). A real
     line is recorded into the buffer's history first (up-arrow recall), then:
-    busy → QUEUE it (Claude-Code type-ahead — the line is never erased or
-    dropped; it runs after the current turn) — the LIVE queue panel above the
-    input shows it at once (queue_panel.queue_fragments reads this deque every
-    redraw), NEVER a static scrollback echo (those scrolled away, duplicated
-    and went stale when edited); idle → `start(text)` (today's normal submit).
-    Returns "ignored" | "queued" | "started"."""
+    busy + an `inject` launcher wired → fly it into the RUNNING turn NOW
+    (mid-turn inject, 0.3.15 — the launcher fires _inject_or_queue as a
+    background task; a failed inject falls back to the local queue there);
+    busy without a launcher → QUEUE it (Claude-Code type-ahead — the line is
+    never erased or dropped; it runs after the current turn) — the LIVE queue
+    panel above the input shows it at once (queue_panel.queue_fragments reads
+    this deque every redraw), NEVER a static scrollback echo (those scrolled
+    away, duplicated and went stale when edited); idle → `start(text)`
+    (today's normal submit, unchanged).
+    Returns "ignored" | "injected" | "queued" | "started"."""
     if not text.strip():
         return "ignored"
     buf.history.append_string(text)
     if busy:
+        if inject is not None:
+            inject(text)
+            return "injected"
         pending.append(text)
         return "queued"
     start(text)
@@ -222,7 +274,7 @@ def _arrow_down_action(event, buf, sel: dict, n: int, busy: bool) -> None:
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                       is_busy, consent_pending, resolve_consent, steps_nav=None,
                       stop_turn=None, pending=None, queued_run=None,
-                      remote_pending=None) -> bool:
+                      remote_pending=None, todos=None, inject=None) -> bool:
     """The full-screen dock: `pane` fills the top (scrollable), a bordered input
     box + toolbar are FIXED at the bottom. Enter either resolves a pending
     consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
@@ -243,7 +295,13 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     `remote_pending` (full-queue-layer K1) is the sink-owned list of items
     already queued in the RUNNING kernel session from other surfaces — the
     panel renders them ABOVE the local rows, tagged `[origin]`, DISPLAY-ONLY
-    (never pullable via ↑/click; the kernel owns their drain).
+    (never pullable via ↑/click; the kernel owns their drain). `inject`
+    (mid-turn inject, 0.3.15) is the repl's async `inject(text, iid) -> bool`
+    gateway leg: when wired, Enter-while-busy flies the line into the RUNNING
+    turn immediately instead of holding it locally (fallback to the local
+    queue on failure — see _inject_or_queue). `todos` is the sink-owned
+    current-checklist list (RichSink.current_todos): a STICKY panel above the
+    queue panel renders it live (todo_panel builders), zero rows when empty.
     Returns True on clean exit; False if prompt_toolkit is unavailable (caller
     uses the plain fallback loop)."""
     try:
@@ -265,6 +323,15 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         pending = deque()   # type-ahead queue: lines submitted while a turn runs
     if remote_pending is None:
         remote_pending = []   # cross-surface kernel-queued items (display-only)
+    if todos is None:
+        todos = []            # sink-less callers: the todo panel never shows
+
+    def _launch_inject(text):
+        # Fire the fly-in as a background task (a key handler can't await):
+        # _inject_or_queue owns the iid mint + the local-queue fallback.
+        app = get_app()
+        app.create_background_task(
+            _inject_or_queue(inject, text, pending, invalidate=app.invalidate))
 
     def _start_turn(text):
         turn.pop("stopped", None)   # a stale stop flag must never eat the next natural drain
@@ -324,10 +391,14 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
             buf.history.append_string(text)
             event.app.create_background_task(on_line(text))
             return
-        # Non-empty line: record for up-arrow recall, then queue-while-busy
-        # (type-ahead — appears AT ONCE in the live queue panel + accent
-        # toolbar depth, runs after the current turn) or start a turn now.
-        if _submit_line(text, buf, pending, _busy_live(), _start_turn) == "queued":
+        # Non-empty line: record for up-arrow recall, then fly-while-busy
+        # (mid-turn inject — the line reaches the RUNNING turn within one
+        # brain step; the kernel's task_queued[terminal] echo shows the panel
+        # row) with local type-ahead as the no-inject/failure fallback, or
+        # start a turn now (idle — unchanged).
+        if _submit_line(text, buf, pending, _busy_live(), _start_turn,
+                        inject=None if inject is None else _launch_inject
+                        ) in ("queued", "injected"):
             event.app.invalidate()             # panel + toolbar show the new depth
 
     @kb.add("s-tab")
@@ -428,11 +499,27 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(pending) or bool(remote_pending)))
 
+    def _todo_fragments():
+        # Live like _queue_fragments: re-invoked every redraw, reads the
+        # sink-owned current_todos list in place (todo frames mutate it).
+        import shutil
+        return todo_fragments(todos, width=shutil.get_terminal_size((100, 24)).columns)
+
+    # The STICKY todo panel — pinned ABOVE the queue panel (the queue stays
+    # adjacent to the input; its bottom row is the ↑-pullable newest). Same
+    # proven stacked-ConditionalContainer pattern: zero rows while the list
+    # is empty, focusable=False keeps focus on the input.
+    todo_panel = ConditionalContainer(
+        content=Window(FormattedTextControl(_todo_fragments, focusable=False),
+                       height=lambda: todo_height(todos),
+                       always_hide_cursor=True, wrap_lines=False),
+        filter=Condition(lambda: bool(todos)))
+
     input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)]),
         height=_input_height, wrap_lines=True)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
-    root = HSplit([pane.window, queue_panel, Frame(input_win), toolbar])
+    root = HSplit([pane.window, todo_panel, queue_panel, Frame(input_win), toolbar])
     style = Style.from_dict({
         "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
         "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
@@ -448,6 +535,11 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
         "qp.last": "#e8a317",                # newest row — the one ↑ pulls
         "qp.remote": "#af87ff italic",       # cross-surface rows — purple (not yours to pull)
+        "tp.header": "#e8a317 bold",         # todo-panel header — bee-yellow, pops
+        "tp.done": "#5faf5f",                # ✓ glyph — green
+        "tp.done.text": "#8a8a8a strike",    # completed text — dim + struck
+        "tp.now": "#e8a317 bold",            # ▶ current item — bee-yellow, always pops
+        "tp.item": "#8a8a8a",                # pending rows / overflow — muted
     })
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)

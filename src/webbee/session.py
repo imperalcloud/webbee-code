@@ -226,19 +226,20 @@ class AgentSession:
 
                     elif ftype in ("task_queued", "task_dequeued"):
                         # Full-queue-layer K1: a follow-up queued into the RUNNING
-                        # kernel session from another surface shows in the live
-                        # queue panel the instant it queues (tagged by origin) and
-                        # leaves the panel when the kernel drains it. These frames
-                        # carry NO task_id (they belong to the session, not a
-                        # turn), so the C7 filter never eats them; getattr-guarded
-                        # like todos/queued_run — a minimal sink drops them, a
-                        # render error never breaks the loop. The terminal's own
-                        # follow-ups already sit in the LOCAL panel — skip
-                        # terminal-origin twins.
+                        # kernel session shows in the live queue panel the instant
+                        # it queues (tagged by origin) and leaves the panel when
+                        # the kernel drains it. These frames carry NO task_id
+                        # (they belong to the session, not a turn), so the C7
+                        # filter never eats them; getattr-guarded like todos/
+                        # queued_run — a minimal sink drops them, a render error
+                        # never breaks the loop. Terminal-origin rows render TOO
+                        # (mid-turn inject, 0.3.15): an injected line never sits
+                        # in the LOCAL panel — the kernel's echo is its only row,
+                        # and task_dequeued clears it when the turn absorbs it.
                         _origin = str(frame.get("origin", "") or "")
                         _hook = getattr(sink, "remote_queued" if ftype == "task_queued"
                                         else "remote_dequeued", None)
-                        if _hook is not None and _origin != "terminal":
+                        if _hook is not None:
                             _iid = str(frame.get("steer_iid", "") or "")
                             try:
                                 if ftype == "task_queued":

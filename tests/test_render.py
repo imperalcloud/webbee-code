@@ -657,3 +657,85 @@ def test_ask_yes_no_input_error_declines():
     s = RichSink(console=Console(record=True, width=80, force_terminal=False),
                  live_enabled=False, input_fn=_boom, clock=lambda: 0.0)
     assert asyncio.run(s.ask_yes_no("allow? [y/n]")) is False
+
+
+# ── 0.3.15: sticky todo panel state (RichSink.current_todos) ──────────────────
+# The sink OWNS the checklist state the dock's sticky todo panel renders:
+# todos() replaces `current_todos` IN PLACE (the panel holds the list object)
+# on every todo frame. In the DOCK (on_output wired) the inline scroll-away
+# render is gone — the live panel is the renderer and end_turn prints the
+# final checklist ONCE per touching turn as the scrollback record, after
+# which the panel PERSISTS (sticky, always-on) into idle. Headless/non-dock
+# sinks keep the full inline render (they have no panel). /clear resets it.
+
+def _dock_sink():
+    from rich.console import Console
+
+    from webbee.render import RichSink
+    c = Console(record=True, width=100)
+    return RichSink(console=c, live_enabled=False, input_fn=lambda p: "",
+                    clock=lambda: 0.0, on_output=lambda: None), c
+
+
+def test_dock_todos_update_panel_state_in_place_without_inline_print():
+    s, c = _dock_sink()
+    rows = s.current_todos                        # the panel's list object
+    s.todos([{"content": "map the repo", "status": "completed"},
+             {"content": "fix the bug", "status": "in_progress"}], 2, 1)
+    assert rows == [{"content": "map the repo", "status": "completed"},
+                    {"content": "fix the bug", "status": "in_progress"}]
+    s.todos([{"content": "fix the bug", "status": "completed"}], 2, 2)
+    assert rows == [{"content": "fix the bug", "status": "completed"}]
+    assert s.current_todos is rows                # never rebound — mutated in place
+    assert "📋 Todos" not in c.export_text()      # the panel renders it, not the feed
+
+
+def test_dock_todos_sanitize_and_skip_malformed_before_the_panel():
+    s, _ = _dock_sink()
+    s.todos(["garbage", None, {"status": "pending"},
+             {"content": "evil\x1b[?1003hitem", "status": "pending"}], "x", None)
+    assert s.current_todos == [{"content": "evilitem", "status": "pending"}]
+
+
+def test_dock_end_turn_records_checklist_once_then_panel_persists():
+    s, c = _dock_sink()
+    rows = s.current_todos
+    s.begin_turn()
+    s.todos([{"content": "ship it", "status": "in_progress"}], 3, 1)
+    s.end_turn("done")
+    out = c.export_text(clear=False)
+    assert "📋 Todos (1/3)" in out and "▶" in out    # ONE scrollback record
+    assert rows and s.current_todos is rows          # STICKY — panel survives idle
+    # a later turn that never touches the list re-records NOTHING
+    s.begin_turn(); s.end_turn("again")
+    assert c.export_text().count("📋 Todos") == 1
+
+
+def test_dock_interrupted_turn_still_records_the_checklist():
+    # Ctrl-C path: repl calls abort() then end_turn("") — the record must
+    # still land in the scrollback and the panel must survive (always-on).
+    s, c = _dock_sink()
+    s.begin_turn()
+    s.todos([{"content": "half done", "status": "in_progress"}], 2, 0)
+    s.abort()
+    s.end_turn("")
+    assert "📋 Todos (0/2)" in c.export_text()
+    assert s.current_todos                            # abort never wipes the plan
+
+
+def test_clear_resets_todo_panel_state_in_place():
+    s, _ = _dock_sink()
+    rows = s.current_todos
+    s.todos([{"content": "x", "status": "pending"}], 1, 0)
+    s.clear()
+    assert rows == [] and s.current_todos is rows
+    s.begin_turn(); s.end_turn("t")                   # cleared list → no stale record
+
+
+def test_headless_todos_keep_the_full_inline_render():
+    s, c = _rec_sink()                                # no on_output → no dock panel
+    s.todos([{"content": "fix the bug", "status": "in_progress"}], 1, 0)
+    out = c.export_text()
+    assert "📋 Todos (0/1)" in out and "▶" in out     # inline render as before
+    assert s.current_todos == [{"content": "fix the bug",
+                                "status": "in_progress"}]   # twin state still kept

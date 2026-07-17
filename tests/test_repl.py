@@ -798,3 +798,76 @@ def test_steer_poller_busy_gate_also_holds_while_local_prompt_armed(monkeypatch)
     sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent(),
                        sink=ArmedSink())
     assert captured["is_busy"]() is True
+
+
+# ── 0.3.15: mid-turn inject wiring ────────────────────────────────────────────
+# _inject_via_gateway is the dock's Enter-while-busy gateway leg (module-level
+# so it's driven directly): it POSTs into the agent's LIVE session, echoes the
+# sent line on ok, and returns False on EVERY failure path so the dock falls
+# back to the local type-ahead queue. The drained fallback row (tui.QueuedLine)
+# then threads its minted steer_iid into the normal turn path — the kernel's
+# dedup ring drops the twin if the inject landed after all.
+
+def test_inject_via_gateway_posts_and_echoes_on_ok(monkeypatch):
+    import webbee.thread as TH
+    from webbee.config import Config
+    from webbee.repl import _inject_via_gateway
+    seen = {}
+
+    async def fake_inject(cfg, token_provider, session_id, text, steer_iid):
+        seen.update(sid=session_id, text=text, iid=steer_iid)
+        return True
+
+    monkeypatch.setattr(TH, "inject_to_session", fake_inject)
+    sink, agent = FakeSink(), SurfaceAgent()
+
+    async def _tp(): return "tok"
+    ok = asyncio.run(_inject_via_gateway(Config(api_url="http://x", panel_url="http://p"),
+                                         _tp, agent, sink, "fly this", "iid-9"))
+    assert ok is True
+    assert seen == {"sid": "marathon-user-1-rab12cd34ef56",
+                    "text": "fly this", "iid": "iid-9"}
+    assert sink.echoed == ["fly this"]        # the transcript records it as sent
+
+
+def test_inject_via_gateway_false_without_live_session_or_on_error(monkeypatch):
+    import webbee.thread as TH
+    from webbee.config import Config
+    from webbee.repl import _inject_via_gateway
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def _tp(): return "tok"
+
+    # no live session yet → False, and the gateway is never called
+    called = []
+
+    async def spy_inject(*a, **kw):
+        called.append(a)
+        return True
+
+    monkeypatch.setattr(TH, "inject_to_session", spy_inject)
+    sink = FakeSink()
+    assert asyncio.run(_inject_via_gateway(cfg, _tp, FakeAgent(), sink, "x", "i")) is False
+    assert called == []
+
+    # a network/auth error → False (fail-soft, the local queue takes over)
+    async def boom(*a, **kw):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(TH, "inject_to_session", boom)
+    assert asyncio.run(_inject_via_gateway(cfg, _tp, SurfaceAgent(), sink, "x", "i")) is False
+    assert getattr(sink, "echoed", []) == []  # nothing echoed on any failure
+
+
+def test_drained_queued_line_threads_its_steer_iid_into_the_turn():
+    # A failed-inject fallback row drains at turn end through the SAME _handle
+    # path a typed line takes — its QueuedLine iid must ride into the turn
+    # POST (kernel dedup ring), while a plain typed line threads none.
+    from webbee.tui import QueuedLine
+    agent = SurfaceAgent()
+    sink, agent = _run(read_line=_lines(QueuedLine("run the fallback", "iid-77"),
+                                        "plain typed", "/exit"), agent=agent)
+    runs = {r["task"]: r for r in agent.runs}
+    assert runs["run the fallback"]["steer_iid"] == "iid-77"
+    assert runs["plain typed"]["steer_iid"] == ""
+    assert "run the fallback" in getattr(sink, "echoed", [])   # normal ❯ echo path

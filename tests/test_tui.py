@@ -1173,3 +1173,225 @@ def test_remote_rows_cap_with_a_more_row_and_height_counts_both():
     assert queue_height(deque(), [_remote("telegram", "go")]) == 2        # hdr + 1 remote
     assert queue_height(deque(), []) == 0               # both empty → hidden
     assert queue_height(deque(["a"]))  == 2             # remote omitted → exactly as before
+
+
+# ── 0.3.15: mid-turn inject — Enter-while-busy FLIES into the RUNNING turn ────
+# The type-ahead used to hold every busy-typed line client-side until turn end
+# (_drain_pending), so a running marathon never saw it mid-turn. Now the enter
+# handler routes the busy path through an inject launcher: _inject_or_queue
+# mints the steer_iid, POSTs immediately (repl._inject_via_gateway → gateway
+# /inject → kernel task_id-less new_task → K2 fly-in at the next brain step)
+# and falls back to today's local queue — carrying the SAME iid so the kernel
+# dedup ring drops the twin — only when the inject fails. Idle Enter and the
+# no-launcher path (fallback loop) are byte-identical to before.
+
+def test_enter_while_busy_with_inject_wired_flies_not_queues():
+    from webbee.tui import _submit_line
+    buf = _RecBuf()
+    pending = deque()
+    started, injected = [], []
+    res = _submit_line("deploy the fix", buf, pending, True, started.append,
+                       inject=injected.append)
+    assert res == "injected"
+    assert injected == ["deploy the fix"]            # flew to the launcher NOW
+    assert not pending and started == []             # never held locally, never a new turn
+    assert buf.history.items == ["deploy the fix"]   # ↑-recall unchanged
+
+
+def test_idle_enter_with_inject_wired_still_starts_normally():
+    from webbee.tui import _submit_line
+    buf = _RecBuf()
+    pending = deque()
+    started, injected = [], []
+    res = _submit_line("hello", buf, pending, False, started.append,
+                       inject=injected.append)
+    assert res == "started" and started == ["hello"]
+    assert injected == [] and not pending            # idle path byte-identical
+
+
+def test_inject_ok_is_kernel_owned_nothing_queued_locally():
+    from webbee.tui import _inject_or_queue
+
+    async def scenario():
+        pending = deque()
+        calls = []
+
+        async def inject(text, iid):
+            calls.append((text, iid))
+            return True
+
+        ok = await _inject_or_queue(inject, "fly this in", pending)
+        assert ok is True
+        assert not pending                            # kernel-owned — no local row
+        (text, iid), = calls
+        assert text == "fly this in"
+        assert re.fullmatch(r"[0-9a-f]{32}", iid)     # uuid4 hex, minted at enqueue
+    asyncio.run(scenario())
+
+
+def test_inject_failure_falls_back_to_local_queue_with_same_iid():
+    from webbee.tui import QueuedLine, _inject_or_queue
+
+    async def scenario():
+        for failing in (
+            lambda text, iid: _false(),               # gateway said no / no session
+            lambda text, iid: _boom(),                # network error raised
+        ):
+            pending = deque()
+            seen = {}
+
+            async def inject(text, iid, f=failing):
+                seen["iid"] = iid
+                return await f()
+
+            ok = await _inject_or_queue(inject, "queued instead", pending)
+            assert ok is False
+            assert list(pending) == ["queued instead"]   # today's local fallback
+            item = pending[0]
+            assert isinstance(item, QueuedLine)
+            # the SAME iid rides the fallback row → the turn-end drain re-submits
+            # under it and the kernel ring dedups if the inject landed after all
+            assert item.iid == seen["iid"]
+
+    async def _false():
+        return False
+
+    async def _boom():
+        raise RuntimeError("offline")
+
+    asyncio.run(scenario())
+
+
+def test_queued_line_is_a_plain_str_everywhere_it_flows():
+    from webbee.tui import QueuedLine
+    from webbee.queue_panel import one_line
+    q = QueuedLine("fix the  tests", "i1")
+    assert q == "fix the  tests" and isinstance(q, str)
+    assert q.iid == "i1"
+    assert one_line(q, 80) == "fix the tests"         # panel row unchanged
+    assert getattr("plain", "iid", "") == ""          # a typed line has none
+
+
+def test_dock_end_to_end_busy_enter_injects_ok_and_failure_falls_back():
+    # Drive the REAL Application: while turn 1 runs, the first busy Enter
+    # flies through the inject leg (nothing queued locally, no drain later);
+    # the second busy Enter hits a failing inject and falls back to the local
+    # queue, draining at turn end through the SAME on_line path — its
+    # QueuedLine still carrying the minted iid.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        ran, injected = [], []
+        pending = deque()
+        gate = asyncio.Event()
+        busy = {"v": False}
+
+        async def on_line(text):
+            busy["v"] = True
+            ran.append(text)
+            await gate.wait()
+            busy["v"] = False
+
+        async def inject(text, iid):
+            injected.append((text, iid))
+            return text == "flies in"                 # the second line fails
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    pending=pending, inject=inject))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")
+                await _until(lambda: ran == ["first"])          # turn 1 running
+                pipe.send_text("flies in\r")                     # busy → inject ok
+                await _until(lambda: len(injected) == 1)
+                assert injected[0][0] == "flies in"
+                assert re.fullmatch(r"[0-9a-f]{32}", injected[0][1])
+                assert not pending                               # kernel-owned
+                pipe.send_text("falls back\r")                   # busy → inject FAILS
+                await _until(lambda: list(pending) == ["falls back"])
+                fallback_iid = pending[0].iid
+                assert injected[1][1] == fallback_iid            # same iid, both legs
+                assert ran == ["first"]                          # nothing ran mid-turn
+                gate.set()                                       # finish the turns
+                await _until(lambda: ran == ["first", "falls back"])
+                assert getattr(ran[1], "iid", "") == fallback_iid  # iid rode the drain
+                await _until(lambda: not busy["v"] and not pending)
+                pipe.send_text("\x04")                           # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_dock_mounts_sticky_todo_panel_above_queue_panel():
+    # The layout contract: root HSplit = [pane, TODO panel, QUEUE panel,
+    # input, toolbar]. Both are ConditionalContainers occupying ZERO rows when
+    # empty (pixel-identical empty dock); the todo panel shows the moment the
+    # sink-owned list fills, updates height in place, and STAYS visible while
+    # the queue panel independently tracks the pending deque.
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.containers import ConditionalContainer
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        todos, pending = [], deque()
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": False, "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status, is_busy=lambda: False,
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    pending=pending, todos=todos))
+                await asyncio.sleep(0.05)
+                conds = [c for c in get_app().layout.container.children
+                         if isinstance(c, ConditionalContainer)]
+                assert len(conds) == 2
+                todo_cc, queue_cc = conds                # todo mounts ABOVE queue
+                assert not todo_cc.filter() and not queue_cc.filter()   # empty dock
+                todos.append({"content": "fix the bug", "status": "in_progress"})
+                assert todo_cc.filter() and not queue_cc.filter()       # todo only
+                assert todo_cc.content.height() == 2     # header + the ▶ row
+                todos.append({"content": "run tests", "status": "pending"})
+                assert todo_cc.content.height() == 3     # updates in place
+                pending.append("queued line")
+                assert queue_cc.filter()                 # queue joins independently
+                todos.clear()
+                assert not todo_cc.filter()              # /clear empties → hidden
+                pipe.send_text("\x04")                   # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())

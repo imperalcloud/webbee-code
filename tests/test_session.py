@@ -993,11 +993,13 @@ def test_run_omits_steer_iid_key_when_pickup_item_had_none(monkeypatch):
 
 # ── 0.3.14: cross-surface queued visibility (task_queued / task_dequeued) ─────
 # Full-queue-layer K1: the kernel announces a follow-up queued into the RUNNING
-# session from another surface (task_queued{origin, steer_iid, text,
-# queue_depth}) and its drain (task_dequeued{origin, steer_iid}) on the SAME
-# stream. NO task_id on either frame (they belong to the session, not a turn),
-# so the C7 foreign filter never eats them; the client routes them to two
-# getattr-guarded DISPLAY-ONLY sink hooks that feed the live queue panel.
+# session (task_queued{origin, steer_iid, text, queue_depth}) and its drain
+# (task_dequeued{origin, steer_iid}) on the SAME stream. NO task_id on either
+# frame (they belong to the session, not a turn), so the C7 foreign filter
+# never eats them; the client routes them to two getattr-guarded DISPLAY-ONLY
+# sink hooks that feed the live queue panel. 0.3.15: terminal-origin frames
+# route TOO — an Enter-while-busy line is injected into the kernel (never held
+# in the local panel), so the kernel echo is its ONLY panel row.
 
 def _run_queue_frames_stream(monkeypatch, frames, sink):
     import httpx
@@ -1047,7 +1049,11 @@ def _run_queue_frames_stream(monkeypatch, frames, sink):
     return asyncio.run(sess.run("do it", sink))
 
 
-def test_task_queued_and_dequeued_route_to_sink_hooks_skipping_terminal(monkeypatch):
+def test_task_queued_and_dequeued_route_to_sink_hooks_including_terminal(monkeypatch):
+    # 0.3.15 (mid-turn inject): the old terminal-origin skip is GONE — an
+    # injected Enter-while-busy line never sits in the local panel, so the
+    # kernel's task_queued{origin:terminal} echo is its ONLY row and its
+    # task_dequeued clears it when the running turn absorbs it.
     class _QueueSink(RecSink):
         def __init__(self):
             super().__init__()
@@ -1064,14 +1070,15 @@ def test_task_queued_and_dequeued_route_to_sink_hooks_skipping_terminal(monkeypa
         {"type": "task_queued", "origin": "telegram", "steer_iid": "i1",
          "text": "fix the tests", "queue_depth": 1},
         {"type": "task_queued", "origin": "terminal", "steer_iid": "i2",
-         "text": "own follow-up", "queue_depth": 2},   # already in the LOCAL panel — skipped
+         "text": "own follow-up", "queue_depth": 2},   # injected line's ONLY row
         {"type": "task_dequeued", "origin": "telegram", "steer_iid": "i1"},
-        {"type": "task_dequeued", "origin": "terminal", "steer_iid": "i2"},  # skipped too
+        {"type": "task_dequeued", "origin": "terminal", "steer_iid": "i2"},
         {"type": "final", "task_id": "OURS", "text": "done"},
     ], sink)
     assert result == "done"
-    assert sink.queued == [("telegram", "fix the tests", "i1")]
-    assert sink.dequeued == [("telegram", "i1")]
+    assert sink.queued == [("telegram", "fix the tests", "i1"),
+                           ("terminal", "own follow-up", "i2")]
+    assert sink.dequeued == [("telegram", "i1"), ("terminal", "i2")]
     # display-only: nothing leaked into the turn's other render paths
     assert sink.progress_calls == [] and sink.foreign == []
 

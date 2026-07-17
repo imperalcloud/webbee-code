@@ -8,7 +8,8 @@ itself -- `_boot` wraps the whole replay in one try/except so a network
 failure never blocks/delays boot beyond the timeout, it just skips the
 replay (same division of labor as remote.py + the /notify call site).
 Also home to the /thread endpoint's pending-steer sibling read (liveness v2
-§B) -- the drain webbee.steer polls while the REPL is idle."""
+§B) -- the drain webbee.steer polls while the REPL is idle -- and the
+mid-turn inject POST (0.3.15) the dock fires on Enter-while-busy."""
 from __future__ import annotations
 
 _DISPLAY_LIMIT = 400
@@ -65,6 +66,27 @@ async def fetch_pending_steer(cfg, token_provider, session_id: str) -> dict:
                         headers={"Authorization": f"Bearer {token}"})
         r.raise_for_status()
         return r.json() or {}
+
+
+async def inject_to_session(cfg, token_provider, session_id: str, text: str,
+                            steer_iid: str) -> bool:
+    """Mid-turn inject (0.3.15): POST an Enter-while-busy line straight into
+    the user's OWN running session — `/v1/agent/sessions/{id}/inject`, body
+    `{text, steer_iid}`. The gateway signals a task_id-LESS new_task, so the
+    kernel's mid-turn fly-in absorbs it at the next brain step under the
+    running turn's own task_id (frames stay visible in this terminal), and
+    the given steer_iid rides the kernel's dedup ring. Returns True only when
+    the gateway accepted it ({ok: true}). Non-swallowing like its siblings
+    above — the repl wiring wraps it and falls back to the local type-ahead
+    queue on any failure."""
+    import httpx
+    token = await token_provider()
+    async with httpx.AsyncClient(base_url=cfg.api_url, timeout=10) as c:
+        r = await c.post(f"/v1/agent/sessions/{session_id}/inject",
+                         json={"text": text, "steer_iid": steer_iid},
+                         headers={"Authorization": f"Bearer {token}"})
+        r.raise_for_status()
+        return bool((r.json() or {}).get("ok"))
 
 
 def truncate_for_display(text, limit: int = _DISPLAY_LIMIT) -> str:

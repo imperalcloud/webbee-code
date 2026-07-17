@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.15
+
+- Type a follow-up while Webbee is working and it now flies into the current
+  run within seconds (not after it finishes), shown in the queue tagged by
+  where it came from. The task list is now a pinned panel that stays visible
+  and updates live.
+
 ## 0.3.14
 
 - See queued messages from Telegram/panel right in the terminal queue

@@ -54,6 +54,30 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
     return text
 
 
+async def _inject_via_gateway(cfg, token_provider, agent, sink,
+                              text: str, steer_iid: str) -> bool:
+    """The gateway leg of the dock's Enter-while-busy fly-in (mid-turn inject,
+    0.3.15): POST the line straight into the agent's LIVE running session so
+    the marathon absorbs it at the next brain step (seconds), instead of
+    holding it client-side until the turn ends. On ok the line is kernel-owned
+    — the ❯ echo records it as sent and the kernel's task_queued[terminal]
+    echo drives the panel row. False on ANY failure (no live session yet,
+    network, auth, gateway refusal) — the dock then falls back to today's
+    local type-ahead queue (tui._inject_or_queue), carrying the same iid so
+    the kernel ring dedups a twin. Module-level so tests drive it directly."""
+    sid = getattr(agent, "session_id", "")
+    if not sid:
+        return False
+    try:
+        from webbee.thread import inject_to_session
+        ok = await inject_to_session(cfg, token_provider, sid, text, steer_iid)
+    except Exception:
+        return False
+    if ok:
+        sink.user_echo(text)   # the transcript records the message as sent
+    return ok
+
+
 async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None, read_line=input,
                    agent_factory=None, auth=None, account_fetcher=None,
                    sessions_client=None, intel_factory=None, shadow_factory=None) -> None:
@@ -220,9 +244,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 _sink.note(res.message)
             return "continue"
 
-        # A task for the agent.
+        # A task for the agent. A drained type-ahead line minted for a
+        # failed mid-turn inject still carries its steer_iid (tui.QueuedLine)
+        # -- thread it so the kernel's dedup ring drops the twin if the
+        # inject actually landed server-side (a plain typed line has none).
         _sink.user_echo(line)
-        await _run_turn(line)
+        await _run_turn(line, steer_iid=getattr(line, "iid", ""))
         return "continue"
 
     async def _run_turn(line: str, surface: str = "", steer_iid: str = "") -> None:
@@ -382,6 +409,9 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         stop_turn=lambda: agent.stop(),
                         pending=pending_queue, queued_run=_sink.queued_run,
                         remote_pending=getattr(_sink, "remote_pending", None),
+                        todos=getattr(_sink, "current_todos", None),
+                        inject=lambda text, iid: _inject_via_gateway(
+                            cfg, token_provider, agent, _sink, text, iid),
                     )
                 finally:
                     _cancel_background()
