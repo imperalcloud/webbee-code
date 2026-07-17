@@ -139,6 +139,13 @@ class RichSink:
         # queue panel reads THIS list object every redraw — mutate in place
         # only (append/del/clear), never rebind.
         self.remote_pending: list = []
+        # The repl's OWN type-ahead deque (the SAME object tui mutates),
+        # shared by reference at boot. remote_queued reconciles against it:
+        # a kernel task_queued echo carrying a local QueuedLine's steer_iid
+        # is positive proof the inject landed — the local twin is removed so
+        # one message is one row with ONE owner (the kernel). None until the
+        # repl wires it (minimal sinks / unit tests without a queue).
+        self.local_pending = None
         # The current coding checklist (sticky todo panel, 0.3.15) — the twin
         # of remote_pending: todos() replaces its contents in place on every
         # todo frame; the dock's todo panel reads THIS list object every
@@ -325,25 +332,46 @@ class RichSink:
         queue panel the instant it queues — tagged `[origin]`, "as if typed".
         DISPLAY-ONLY: it renders above the local rows but is never pullable
         (↑/click) — the kernel owns it; only a `task_dequeued` (or turn end)
-        removes it."""
+        removes it. This is the ONE reconciliation chokepoint (0.3.16): the
+        steer_iid minted at enqueue time dedups the display too — a frame
+        delivered twice (publish retry / SSE resume) never doubles a row, and
+        the echo of a terminal-injected line whose POST merely LOOKED failed
+        removes its local fallback twin (the echo is positive proof it
+        landed; kernel-owned = one row). Empty iid (legacy kernels) always
+        appends — text is never a dedup key."""
+        iid = str(iid or "")
+        if iid:
+            if any(r.get("iid") == iid for r in self.remote_pending):
+                self._nudge()
+                return
+            lp = self.local_pending
+            if lp is not None:
+                twin = next((q for q in lp if getattr(q, "iid", "") == iid), None)
+                if twin is not None:
+                    try:
+                        lp.remove(twin)
+                    except ValueError:
+                        pass
         self.remote_pending.append({"origin": _clean(str(origin or "")),
                                     "text": _clean(str(text or "")),
-                                    "iid": str(iid or "")})
+                                    "iid": iid})
         self._nudge()
 
     def remote_dequeued(self, origin: str, iid: str) -> None:
         """The kernel drained (or dedup-dropped) one queued item
-        (`task_dequeued` frame): remove its panel row — by `iid` when it
-        matches, else the OLDEST row of that origin (the kernel queue is
-        FIFO, so when an iid is missing/lost the oldest same-origin row is
-        the one that just started). Nothing matched → no-op (the row was
-        already cleared or its announce was never seen)."""
+        (`task_dequeued` frame): remove its panel row by `iid`. The
+        oldest-same-origin fallback is LEGACY-ONLY (empty iid — the kernel
+        queue is FIFO, so the oldest row of that origin is the one that just
+        started): a NON-empty unmatched iid is a no-op, because the kernel
+        emits one dequeue per pop INCLUDING dedup-dropped twins, and a twin's
+        second dequeue must never eat a different same-origin row. Nothing
+        matched → no-op (the row was already cleared or never announced)."""
         iid = str(iid or "")
         origin = _clean(str(origin or ""))
         rows = self.remote_pending
         idx = next((i for i, r in enumerate(rows) if iid and r.get("iid") == iid),
                    None)
-        if idx is None:
+        if idx is None and not iid:
             idx = next((i for i, r in enumerate(rows) if r.get("origin") == origin),
                        None)
         if idx is None:

@@ -344,6 +344,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     async def _boot(s) -> None:
         nonlocal _sink, agent, intel, watcher_task, shadow, steer_task
         _sink = s
+        # Queue-panel single-source dedup (0.3.16): hand the sink the SAME
+        # type-ahead deque tui mutates, so a kernel task_queued echo can
+        # promote a landed local twin (matched by steer_iid) into the one
+        # kernel-owned row. Reference share — never a copy.
+        s.local_pending = pending_queue
         # Cache git branch OFF the event loop (subprocess.run blocks it). Only
         # /status reads it; recomputing it per input line froze the dock.
         state["git_branch"] = await asyncio.to_thread(_git_branch, workspace)

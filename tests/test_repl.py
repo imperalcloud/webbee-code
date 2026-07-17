@@ -395,6 +395,15 @@ def test_boot_survives_intel_import_failure_base_install(monkeypatch):
     assert sink.turns == []  # boot completed cleanly, no crash mid-boot
 
 
+def test_boot_shares_local_queue_with_sink():
+    # The repl hands the sink the SAME type-ahead deque tui mutates, so the
+    # kernel's task_queued echo can promote a local twin into the single
+    # kernel-owned row (queue-panel single-source dedup, 0.3.16).
+    from collections import deque
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert isinstance(getattr(sink, "local_pending", None), deque)
+
+
 def test_boot_skips_intel_when_disabled_in_config(monkeypatch):
     monkeypatch.setattr("webbee.repl.AgentSession", _SpyAgent)
     called = []

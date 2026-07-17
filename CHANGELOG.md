@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.16
+
+- A message typed while Webbee is working now shows in the queue panel
+  exactly once: the queue reconciles every entry by its id, so a retried
+  delivery or a send that only looked failed no longer produces a duplicate
+  row.
+
 ## 0.3.15
 
 - Type a follow-up while Webbee is working and it now flies into the current

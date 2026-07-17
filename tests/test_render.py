@@ -603,6 +603,55 @@ def test_end_turn_and_abort_clear_remote_rows_in_place():
     assert rows == [] and s.remote_pending is rows
 
 
+# ── 0.3.16: queue-panel single-source dedup (steer_iid reconciliation) ────────
+# The steer_iid minted at enqueue time is the ONE key both legs carry; the
+# display layer now consumes it too: a duplicated task_queued frame
+# (at-least-once delivery) never doubles a row, and the kernel echo of a
+# terminal-injected line REPLACES its local fallback twin — one message,
+# one owner (the kernel), one panel row.
+
+def test_remote_queued_ignores_duplicate_frame_same_iid():
+    s = _sink()
+    s.remote_queued("terminal", "ship it", "i1")
+    s.remote_queued("terminal", "ship it", "i1")   # publish retry / SSE resume
+    assert [r["iid"] for r in s.remote_pending] == ["i1"]
+
+
+def test_remote_queued_empty_iid_never_dedups():
+    # Legacy kernels emit steer_iid="" — identical re-typed lines must keep
+    # appending (text is NOT a dedup key).
+    s = _sink()
+    s.remote_queued("telegram", "same text", "")
+    s.remote_queued("telegram", "same text", "")
+    assert len(s.remote_pending) == 2
+
+
+def test_remote_queued_promotes_local_twin_to_kernel_owned():
+    # A failed-LOOKING inject that actually landed leaves a local QueuedLine
+    # twin; the kernel echo (same iid) is positive proof it landed — the
+    # local row goes, the message shows exactly once (kernel-owned).
+    from collections import deque
+
+    from webbee.tui import QueuedLine
+    s = _sink()
+    lp = deque([QueuedLine("ship it", "i1"), QueuedLine("other", "i9")])
+    s.local_pending = lp
+    s.remote_queued("terminal", "ship it", "i1")
+    assert [str(x) for x in lp] == ["other"]
+    assert [r["iid"] for r in s.remote_pending] == ["i1"]
+
+
+def test_remote_dequeued_nonempty_iid_unmatched_is_noop():
+    # task_dequeued twins (the kernel emits one per pop, dedup-dropped twins
+    # included) must never eat a DIFFERENT same-origin row: the origin-FIFO
+    # fallback is legacy-only (empty iid).
+    s = _sink()
+    s.remote_queued("terminal", "a", "i1")
+    s.remote_queued("terminal", "b", "i2")
+    s.remote_dequeued("terminal", "i-unknown")
+    assert [r["iid"] for r in s.remote_pending] == ["i1", "i2"]
+
+
 # ── 0.3.14: the terminal-local yes/no confirm (autopilot safe-asymmetry) ──────
 
 def test_ask_yes_no_sync_fallback_strict_yes_only():
