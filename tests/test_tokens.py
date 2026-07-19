@@ -55,3 +55,33 @@ def test_true_logged_out_still_fails(monkeypatch):
     with pytest.raises(RuntimeError):
         asyncio.run(tp())
     assert auth.calls == 2                   # exactly one retry, no hammering
+
+
+def test_force_refresh_passes_force_and_serializes(monkeypatch):
+    import asyncio
+    from webbee.tokens import make_token_provider
+
+    calls = []
+
+    class _Auth:
+        @staticmethod
+        async def ensure_access_token(cfg, force=False):
+            calls.append(force)
+            return "tok"
+
+    tp = make_token_provider(object(), _Auth)
+    out = asyncio.run(tp.force_refresh())
+    assert out == "tok" and calls == [True]
+
+
+def test_force_refresh_degrades_on_old_imperal_mcp():
+    import asyncio
+    from webbee.tokens import make_token_provider
+
+    class _OldAuth:
+        @staticmethod
+        async def ensure_access_token(cfg):   # no force= (imperal-mcp < 0.5.2)
+            return "tok-old"
+
+    tp = make_token_provider(object(), _OldAuth)
+    assert asyncio.run(tp.force_refresh()) == "tok-old"
