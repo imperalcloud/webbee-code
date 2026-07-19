@@ -9,10 +9,13 @@ left-drag copies the covered text to the real local clipboard
 both files under the file-size ceiling. Grounded in prompt_toolkit 3.0.52
 (verified in venv)."""
 
+_MAX_RECORDS = 4000     # RecordingConsole ring bound (W2 front-2: replay material for reflow)
+
 
 class OutputPane:
     def __init__(self, width: int = 100) -> None:
         import io
+        from collections import deque
 
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.layout.containers import Window
@@ -21,8 +24,43 @@ class OutputPane:
         from rich.console import Console
 
         self._io = io.StringIO()
-        self.console = Console(file=self._io, force_terminal=True,
-                               color_system="truecolor", width=width, highlight=False)
+        pane = self
+        pane_records: deque = deque(maxlen=_MAX_RECORDS)
+
+        class _RecordingConsole(Console):
+            """Captures every printed renderable so a terminal-width change can
+            REPLAY the transcript at the new width (W2 front-2: true reflow —
+            the old pane kept only baked ANSI, which can never re-wrap). The
+            ring is bounded: a >4000-record session replays only the newest
+            4000 records (older scrollback keeps its last-rendered width —
+            the honest trade the spec accepted)."""
+
+            def print(self, *objects, **kw):        # noqa: A003
+                pane_records.append((objects, kw))
+                pane._all_lines()                    # sync the W1 cache to the pre-write pos
+                pos = pane._io.tell()
+                result = super().print(*objects, **kw)
+                pane._io.seek(pos)
+                delta = pane._io.read()              # leaves position at EOF again
+                parts = delta.split("\n")
+                rl = pane._record_lines
+                if rl:
+                    rl[-1] += parts[0]
+                    rl.extend(parts[1:])
+                else:
+                    rl.extend(parts)
+                return result
+
+            def clear(self, *a, **kw):
+                pane_records.clear()
+                pane._reset_buffer()                # StringIO + caches reset (Task 3 builds on it)
+
+        self._records = pane_records
+        self._record_lines: list = []      # Task 3: flat transcript mirror, same delta arithmetic
+        self._replaying = False            # Task 3: True while a width-reflow replay is in flight
+        self.console = _RecordingConsole(file=self._io, force_terminal=True,
+                                         color_system="truecolor", width=width,
+                                         highlight=False)
         self._ANSI = ANSI
         self._lines_cache = (0, [""])      # (write-pos, split-lines) — memoize the split
         self._offset = 0                   # index of the top visible line
@@ -32,7 +70,6 @@ class OutputPane:
         self._plain_cache = (0, [""])      # (write-pos, ANSI-stripped lines) for select/highlight
         self.copy_flash = ""               # transient toolbar note after a copy
         self._flash_until = 0.0
-        pane = self
 
         # Content fed to the control is only the visible slice, so the mouse row
         # is a VIEWPORT row (0..view_h-1) — add `_offset` for the absolute line.
@@ -193,6 +230,22 @@ class OutputPane:
         # dropped count is subtracted from `_offset` so the viewport doesn't
         # silently jump when the buffer is rewritten underneath it.
         self._offset = max(0, self._offset - dropped)
+
+    def _reset_buffer(self) -> None:
+        """`/clear` in the PANE path (RichSink.clear() → console.clear(), see
+        `_RecordingConsole.clear` above): wipe the transcript back to empty
+        instead of writing Rich's real clear escape — the pane owns the alt
+        screen, so an emptied buffer IS the cleared state. Same StringIO
+        repoint `_trim` uses, but to zero instead of a kept tail. `_record_lines`
+        resets alongside the W1 caches it mirrors (Task 3 builds the reflow
+        replay on top of this)."""
+        import io
+        self._io = io.StringIO()
+        self.console.file = self._io
+        self._lines_cache = (0, [""])
+        self._plain_cache = (0, [""])
+        self._record_lines = []
+        self._offset = 0
 
     def dump(self) -> str:
         """The full session transcript (ANSI). Printed to real stdout on exit so

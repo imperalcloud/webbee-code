@@ -255,6 +255,41 @@ def test_trim_keep_floor_not_over_aggressive():
     assert len(lines) >= 14000
 
 
+# ── W2 Task 2: RecordingConsole — bounded ring of every printed renderable ──
+# The old pane kept only baked ANSI, which can never re-wrap on a width
+# change. Every console.print() now also appends (objects, kw) to a bounded
+# ring so a future terminal-width change can REPLAY the transcript at the
+# new width (Task 3). The ring is bounded (_MAX_RECORDS=4000) — the honest
+# trade the spec accepted: a session past that only replays the newest tail.
+
+def test_recording_console_captures_renderables():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=60)
+    p.console.print("hello")
+    from rich.text import Text
+    p.console.print(Text("styled"), style="bold")
+    assert len(p._records) == 2
+    assert p._records[0][0] == ("hello",)
+    assert p._records[1][1].get("style") == "bold"
+
+
+def test_recording_console_clear_resets_ring_and_buffer():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=60)
+    p.console.print("x")
+    p.console.clear()
+    assert len(p._records) == 0
+    assert p._all_lines() == [""]
+
+
+def test_record_ring_bounded():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=60)
+    for i in range(4100):
+        p.console.print(str(i))
+    assert len(p._records) == 4000          # oldest fell off — replay covers the tail
+
+
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
 # Previously Ctrl-C only cancelled the local asyncio task while the cloud
 # brain kept running server-side; Esc did nothing while busy. Both key
