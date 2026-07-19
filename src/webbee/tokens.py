@@ -19,6 +19,7 @@ Two-layer guard:
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 _RETRY_DELAY_S = 0.6
 
@@ -36,4 +37,17 @@ def make_token_provider(cfg, auth):
                 await asyncio.sleep(_RETRY_DELAY_S)
                 return await auth.ensure_access_token(cfg)
 
+    _has_force = "force" in inspect.signature(auth.ensure_access_token).parameters
+
+    async def force_refresh() -> str:
+        """ONE serialized forced refresh — the stream's 401 path (an access
+        token that looks locally valid but the gateway already revoked/rotated
+        it). Same lock as every acquisition; imperal-mcp < 0.5.2 (no force=)
+        degrades to a normal acquisition, which is still the pre-W1 behavior."""
+        async with _lock:
+            if _has_force:
+                return await auth.ensure_access_token(cfg, force=True)
+            return await auth.ensure_access_token(cfg)
+
+    token_provider.force_refresh = force_refresh
     return token_provider

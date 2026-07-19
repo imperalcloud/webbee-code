@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.17
+
+Bulletproof core (W1): a marathon can no longer be killed by transport, the
+queue survives every error class, and the client stops leaking memory.
+
+- A gateway blip mid-run (502, deploy, network drop) no longer kills the turn:
+  the stream patiently reconnects and resumes exactly where it left off, the
+  toolbar shows an honest `⟳ reconnecting` state, and only a real sign-out
+  ends the run — with a clear "run /login" message instead of a raw error.
+- A stream 401 gets ONE forced token refresh before it counts as a sign-out,
+  and a refresh that fails because the gateway was mid-deploy no longer burns
+  that chance.
+- Every message now carries a dedup key end-to-end, so a retried send after an
+  ambiguous network failure can never execute the same instruction twice.
+- The turn-start and result posts retry transient failures too — outage
+  recovery drops from minutes to seconds.
+- A turn that ends in an error HOLDS the queued messages (with an honest note)
+  instead of burning them one failing turn at a time; a parked marathon keeps
+  its queued rows visible, tagged ⏸.
+- A stuck busy flag can no longer starve remote-message pickup; a message the
+  kernel deduplicated ends its wait honestly instead of spinning forever.
+- Pull a queued message to edit and resubmit it unchanged — it keeps its dedup
+  identity.
+- Click the queue or todo panel header to collapse it to one row (▸/▾).
+- Performance: one keep-alive connection replaces a TLS handshake every 4s;
+  the idle poll relaxes to 30s after 5 quiet minutes; hours-long marathons no
+  longer grow memory without bound; transcript rendering is O(new output) per
+  print; embedding vectors load memory-mapped.
+- Windows groundwork: `.git` filters now match Windows paths (no reindex
+  storms).
+
+Companion release: imperal-mcp 0.5.2 — only a real 401 means "signed out";
+gateway 5xx/network errors during a token refresh are retryable.
+
 ## 0.3.16
 
 - A message typed while Webbee is working now shows in the queue panel

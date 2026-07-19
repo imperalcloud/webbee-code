@@ -47,7 +47,10 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
         sink.end_turn("")   # clear busy (poller starvation guard)
         return ""
     except Exception as e:  # network/auth/etc — never crash
-        sink.note(f"Error: {type(e).__name__}: {e}")
+        if type(e).__name__ in ("StreamAuthError", "NotLoggedInError"):
+            sink.note("Session expired or access revoked — run /login to sign in again.")
+        else:
+            sink.note(f"Error: {type(e).__name__}: {e}")
         sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
         return ""
     sink.end_turn(text)
@@ -55,7 +58,7 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
 
 
 async def _inject_via_gateway(cfg, token_provider, agent, sink,
-                              text: str, steer_iid: str) -> bool:
+                              text: str, steer_iid: str, client=None) -> bool:
     """The gateway leg of the dock's Enter-while-busy fly-in (mid-turn inject,
     0.3.15): POST the line straight into the agent's LIVE running session so
     the marathon absorbs it at the next brain step (seconds), instead of
@@ -64,18 +67,43 @@ async def _inject_via_gateway(cfg, token_provider, agent, sink,
     echo drives the panel row. False on ANY failure (no live session yet,
     network, auth, gateway refusal) — the dock then falls back to today's
     local type-ahead queue (tui._inject_or_queue), carrying the same iid so
-    the kernel ring dedups a twin. Module-level so tests drive it directly."""
+    the kernel ring dedups a twin. Module-level so tests drive it directly.
+    `client=` (Task 12) reuses the repl's shared keep-alive AsyncClient; None
+    keeps the per-call client (existing direct tests of this function)."""
     sid = getattr(agent, "session_id", "")
     if not sid:
         return False
     try:
         from webbee.thread import inject_to_session
-        ok = await inject_to_session(cfg, token_provider, sid, text, steer_iid)
+        # Old-style test doubles for inject_to_session don't accept a client
+        # kwarg -- only pass it when the repl actually gave us one.
+        inject_kw = {"client": client} if client is not None else {}
+        ok = await inject_to_session(cfg, token_provider, sid, text, steer_iid, **inject_kw)
     except Exception:
         return False
     if ok:
         sink.user_echo(text)   # the transcript records the message as sent
     return ok
+
+
+def _gate_busy(sink, turn_ref: dict) -> bool:
+    """Pure predicate behind `_poller_busy` (module-level so tests drive it
+    directly, unlike the run_repl closure) -- LOCKOUT-PROOF like
+    tui._busy_live: busy counts only while the turn TASK recorded in
+    `turn_ref` is genuinely alive. A BaseException-class escape (or a raise
+    inside end_turn) that leaves the sink's _busy flag stuck must no longer
+    starve the idle-steer poller. `turn_ref` is populated ONLY on the dock
+    path (the SAME dict object shared into tui.run_session); the fallback
+    loop leaves it at {"task": None} forever, so the raw flag governs there
+    (its end_turn paths are deterministic)."""
+    busy = bool(getattr(sink, "is_busy", None) and sink.is_busy())
+    t = turn_ref.get("task")
+    if busy and t is not None and t.done():
+        busy = False
+    if busy:
+        return True
+    cp = getattr(sink, "consent_pending", None)
+    return bool(cp and cp())
 
 
 async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None, read_line=input,
@@ -101,6 +129,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     from webbee.tokens import make_token_provider
     token_provider = make_token_provider(cfg, auth)
 
+    from webbee import http as _http
+    shared_client = None  # created in _boot (needs the running loop); Task 12:
+                          # ONE keep-alive AsyncClient for the poller/inject/
+                          # thread-replay calls instead of a fresh TCP+TLS
+                          # handshake per call.
+
     # Prod dock path = the default reader + a real tty + no injected sink; tests
     # inject sink/read_line and take the plain fallback loop.
     use_dock = sink is None and read_line is input and sys.stdin.isatty()
@@ -109,6 +143,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     # and /queue clear (dispatched through CommandContext.queued, same
     # mechanism /status uses for session state) see the live deque.
     pending_queue: deque = deque()
+    # Shared with tui.run_session on the dock path ONLY (same dict object):
+    # the poller's lockout-proof busy gate reads whether the turn TASK
+    # recorded here is genuinely alive, mirroring tui._busy_live. The
+    # fallback loop never touches this -- it stays {"task": None} and
+    # _gate_busy falls back to the raw sink flag there.
+    turn_ref: dict = {"task": None}
     _sink = None         # assigned by _boot
     agent = None         # assigned by _boot
     intel = None         # assigned by _boot -- IntelService, or None (off/base-install/boot failure)
@@ -271,8 +311,21 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             _sink.end_turn("")   # clear busy (poller starvation guard)
             return
         except Exception as e:  # network/auth/etc — never crash the REPL
-            _sink.note(f"Error: {type(e).__name__}: {e}")
+            # W1 task 6: flag the sink so the dock's drain rule HOLDS the
+            # type-ahead queue instead of burning one queued line into this
+            # failing turn (getattr-guarded — minimal sinks in tests/headless
+            # callers may not implement it).
+            _mark = getattr(_sink, "mark_turn_failed", None)
+            if _mark is not None:
+                _mark()
+            if type(e).__name__ in ("StreamAuthError", "NotLoggedInError"):
+                _sink.note("Session expired or access revoked — run /login to sign in again.")
+            else:
+                _sink.note(f"Error: {type(e).__name__}: {e}")
             _sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
+            if pending_queue:
+                _sink.note(f"⏸ queue held: {len(pending_queue)} queued message(s) wait "
+                           "— ↑ pulls the next into the input, /queue clear drops them")
             return
         _sink.end_turn(text)
 
@@ -284,15 +337,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         await _run_turn(text, surface=surface, steer_iid=steer_iid)
 
     def _poller_busy() -> bool:
-        """The idle-steer poller's busy gate: the sink's live turn state PLUS
-        an armed local prompt (the autopilot confirm arms the same pinned-
-        input future a consent uses) -- submitting a steer turn under an
-        armed prompt could double-prompt the input, so the poller holds off
-        until it resolves. Both hooks getattr-guarded (minimal test sinks)."""
-        if bool(getattr(_sink, "is_busy", None) and _sink.is_busy()):
-            return True
-        cp = getattr(_sink, "consent_pending", None)
-        return bool(cp and cp())
+        """The idle-steer poller's busy gate: the sink's live turn state
+        (now LOCKOUT-PROOF via _gate_busy -- a dead turn task overrides a
+        stuck busy flag) PLUS an armed local prompt (the autopilot confirm
+        arms the same pinned-input future a consent uses) -- submitting a
+        steer turn under an armed prompt could double-prompt the input, so
+        the poller holds off until it resolves. Both hooks getattr-guarded
+        (minimal test sinks)."""
+        return _gate_busy(_sink, turn_ref)
 
     def _on_mode(mode: str, surface: str) -> None:
         """Remote coding-mode request (TG/panel → gateway one-shot req_mode →
@@ -342,8 +394,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 _t.cancel()
 
     async def _boot(s) -> None:
-        nonlocal _sink, agent, intel, watcher_task, shadow, steer_task
+        nonlocal _sink, agent, intel, watcher_task, shadow, steer_task, shared_client
         _sink = s
+        # Task 12: the repl-lifetime keep-alive client (needs the running
+        # loop, hence created here rather than at the top of run_repl).
+        shared_client = _http.make_client(cfg)
         # Queue-panel single-source dedup (0.3.16): hand the sink the SAME
         # type-ahead deque tui mutates, so a kernel task_queued echo can
         # promote a landed local twin (matched by steer_iid) into the one
@@ -377,7 +432,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             cfg, token_provider, workspace=workspace, marathon=not once,
             is_busy=_poller_busy,
             live_session_id=lambda: getattr(agent, "session_id", ""),
-            submit=_steer_submit, on_mode=_on_mode))
+            submit=_steer_submit, on_mode=_on_mode, client=shared_client))
 
     if use_dock:
         ok = False
@@ -416,10 +471,17 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         remote_pending=getattr(_sink, "remote_pending", None),
                         todos=getattr(_sink, "current_todos", None),
                         inject=lambda text, iid: _inject_via_gateway(
-                            cfg, token_provider, agent, _sink, text, iid),
+                            cfg, token_provider, agent, _sink, text, iid,
+                            client=shared_client),
+                        turn=turn_ref,
                     )
                 finally:
                     _cancel_background()
+                    if shared_client is not None:
+                        try:
+                            await shared_client.aclose()
+                        except Exception:
+                            pass
         except Exception:
             ok = False
         finally:
@@ -454,3 +516,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 return
     finally:
         _cancel_background()
+        if shared_client is not None:
+            try:
+                await shared_client.aclose()
+            except Exception:
+                pass

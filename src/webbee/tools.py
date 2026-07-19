@@ -31,6 +31,15 @@ def _relative_time(ts: float, now: float | None = None) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
+def _is_git_dir(dp: str) -> bool:
+    """PURE. True if dp is (or is under) a .git directory. Normalized to
+    forward slashes so the skip works on Windows too, where os.walk yields
+    backslash paths (an un-normalized "/.git" check never matched there,
+    so grep walked .git's object store on every call)."""
+    p = dp.replace(os.sep, "/").replace("\\", "/")
+    return "/.git" in p
+
+
 class OutsideWorkspaceError(Exception):
     pass
 
@@ -322,7 +331,7 @@ class LocalToolExecutor:
         base = self.resolve_in_workspace(a.get("path", "."))
         hits = []
         for dp, _dn, fns in os.walk(base):
-            if "/.git" in dp:
+            if _is_git_dir(dp):
                 continue
             for fn in fns:
                 fp = os.path.join(dp, fn)

@@ -154,6 +154,10 @@ class RichSink:
         self.current_todos: list = []
         self._todo_counts = (0, 0)      # kernel-reported (done, total)
         self._todos_dirty = False       # a turn touched the list -> end_turn records it
+        self._reconnecting = 0          # stream transport down (W1 front-5): armed attempt#, 0 = none
+        self._reconnect_since = None    # clock() at the moment the outage started
+        self._turn_failed = False       # ERROR (not a user stop) ended the last turn (W1 front-3b)
+        self._parked = False            # marathon PARKED this turn (W1 front-3b) -> end_turn keeps remote_pending
 
     def _nudge(self) -> None:
         """After output/state changes: let the pane follow the tail + redraw."""
@@ -217,17 +221,44 @@ class RichSink:
         self.tokens = 0        # per-turn live counters (usage frames are per-turn cumulative)
         self.credits = 0
         self._busy = True
+        self._reconnecting = 0
+        self._reconnect_since = None
+        self._turn_failed = False
+        self._parked = False
         self.console.print()   # breathing room between the user's message and the response
         self._nudge()
+
+    def mark_turn_failed(self) -> None:
+        """The turn ended in an ERROR (not a user stop): the dock's drain rule
+        holds the type-ahead queue instead of burning one queued line into
+        each failing turn (W1 front-3b). One-turn flag; begin_turn clears."""
+        self._turn_failed = True
+
+    def marathon_parked(self, reason: str) -> None:
+        """The run PARKED (runaway/consent/credits — kernel keeps its task
+        queue alive waiting for a wake). end_turn must NOT clear the remote
+        rows: they are still queued server-side; the panel would lie
+        (W1 front-3b, the post-runaway 'empty panel over a non-empty kernel
+        queue'). Rows re-tag ⏸ parked; the next run's task_dequeued frames
+        remove them by iid as the kernel drains."""
+        self._parked = True
 
     def end_turn(self, final_text: str) -> None:
         self._busy = False
         # The kernel session's own queue only exists while a run is live —
-        # once this turn returns (complete / stopped / parked) the terminal
-        # no longer streams its dequeue frames, so any leftover remote rows
-        # would linger as phantoms. Clear them (in place — the panel holds
-        # this list object).
-        self.remote_pending.clear()
+        # once this turn returns COMPLETE or user-stopped, the terminal no
+        # longer streams its dequeue frames, so any leftover remote rows
+        # would linger as phantoms: clear them (in place — the panel holds
+        # this list object). A PARKED turn is different: the kernel queue is
+        # still alive server-side waiting for a wake, so the rows are kept
+        # (tagged parked, ⏸ in the panel) instead of wiped — the next run's
+        # task_dequeued frames remove them by iid as the kernel drains.
+        if self._parked:
+            for r in self.remote_pending:
+                r["parked"] = True
+            self._parked = False
+        else:
+            self.remote_pending.clear()
         # Sticky-todo scrollback record (0.3.15): in the dock the live panel
         # replaced the inline re-renders, so print the FINAL checklist state
         # ONCE per turn that touched it — the transcript keeps the history
@@ -257,6 +288,23 @@ class RichSink:
         # prefix indents only the first visual line and continuations hug the
         # screen edge.
         self.console.print(_pad(Text(_clean(message), style=_BEE)))
+        self._nudge()
+
+    def reconnecting(self, attempt: int, delay: float) -> None:
+        """Stream transport down (W1 front-5): attempt>0 arms the toolbar's
+        `⟳ reconnecting` state (busy stays true — the steer poller keeps off);
+        attempt==0 clears it, printing ONE honest note when the outage lasted
+        >300s (the 24h/10k durable stream may have trimmed frames past our
+        Last-Event-ID — progress lines may be missing, work is NOT lost)."""
+        if attempt:
+            if self._reconnect_since is None:
+                self._reconnect_since = self._clock()
+            self._reconnecting = int(attempt)
+        else:
+            since, self._reconnect_since = self._reconnect_since, None
+            self._reconnecting = 0
+            if since is not None and self._clock() - since > 300:
+                self.note("⟳ reconnected after a long outage — some progress lines may be missing")
         self._nudge()
 
     def todos(self, items: list, total: int, done: int) -> None:
@@ -621,7 +669,9 @@ class RichSink:
                 "elapsed": self._elapsed(), "tools": self._tools,
                 "tokens": self.session_tokens + (self.tokens if self._busy else 0),
                 "credits": self.session_credits + (self.credits if self._busy else 0),
-                "consent": self.consent_pending()}
+                "consent": self.consent_pending(),
+                "reconnecting": self._reconnecting,
+                "turn_failed": self._turn_failed}
 
     def is_busy(self) -> bool:
         return self._busy

@@ -138,7 +138,7 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
 
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         # A foreign turn's tool_request and final (must NEVER be executed /
         # terminal for THIS turn -- only rendered as tagged lines), THEN this
         # turn's own final (must be honored). Cross-surface frames carry the
@@ -161,10 +161,12 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
     class _ResultResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {}
 
@@ -256,7 +258,7 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
 
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
                "tool": "read_file", "args": {}, "origin": "telegram"}
         yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
@@ -278,10 +280,12 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
     class _ResultResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {}
 
@@ -324,7 +328,7 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
     assert executor_calls == [("read_file", {}), ("write_file", {})]
     assert posts[0] == "/v1/agent/sessions"
     assert posts.count("/v1/agent/sessions/sid1/result") == 3  # r1, r1-dup, r2
-    assert sess.steps == [
+    assert list(sess.steps) == [
         {"step_id": "r1", "label": "read_file", "ok": True},
         {"step_id": "r2", "label": "write_file", "ok": True},
     ]
@@ -683,10 +687,12 @@ def _run_consent_race(monkeypatch, fake_stream, sink, on_result_post=None):
     result_posts = []
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): ...
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
     class _ResultResp:
+        status_code = 200
         def raise_for_status(self): ...
         def json(self): return {}
 
@@ -719,7 +725,7 @@ def test_consent_prompt_dismissed_when_turn_continues_from_another_surface(monke
     # consent result POSTed (the kernel accepts only the FIRST result per
     # issued req_id), the thinking frame must render, and the turn must
     # continue to its final normally.
-    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
                "app_id": "webbee", "tool": "bash", "args": {"command": "rm x"}}
         yield {"type": "thinking", "task_id": "OURS", "llm_text": "ok, proceeding"}
@@ -738,7 +744,7 @@ def test_consent_prompt_dismissed_when_turn_continues_from_another_surface(monke
 def test_consent_local_answer_posts_exactly_as_today(monkeypatch):
     # Test 2: the user answers locally FIRST -- the result is POSTed exactly
     # as today, nothing is dismissed/cancelled, and the turn ends normally.
-    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
                "app_id": "webbee", "tool": "bash", "args": {"command": "ls"}}
         yield {"type": "final", "task_id": "OURS", "text": "done"}
@@ -760,7 +766,7 @@ def test_consent_republished_same_req_id_keeps_prompt_one_post(monkeypatch):
     release = asyncio.Event()    # gates the local answer
     answered = asyncio.Event()   # gates the stream's final
 
-    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
                "tool": "bash", "args": {}}
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
@@ -784,7 +790,7 @@ def test_stream_end_while_consent_pending_returns_cleanly(monkeypatch):
     # Test 4: the stream generator ends while the consent is still pending --
     # no hang, no unposted-result crash: the prompt task is cancelled safely
     # and run() exits exactly as today's stream end does (returns "").
-    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
                "tool": "bash", "args": {}}
         # generator ends -> StopAsyncIteration mid-consent-wait
@@ -922,7 +928,7 @@ def _run_turn_capture_body(monkeypatch, **run_kw):
 
     monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "final", "task_id": "OURS", "text": "done"}
 
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
@@ -930,6 +936,7 @@ def _run_turn_capture_body(monkeypatch, **run_kw):
     bodies = []
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
@@ -978,17 +985,169 @@ def test_run_threads_steer_iid_into_session_post_body(monkeypatch):
     assert body["surface"] == "telegram"
 
 
-def test_run_omits_steer_iid_key_for_plain_typed_turns(monkeypatch):
-    # A typed turn has no dedup id -- key omitted, body byte-identical to today.
+def test_run_mints_steer_iid_for_plain_typed_turns(monkeypatch):
+    # W1 final review FIX1: a typed turn's body ALWAYS carries a dedup key --
+    # _transient_retry re-sends this SAME closure body on a transient
+    # turn-start failure (timeout/edge-504) whose first attempt may have
+    # already landed server-side. Without a stable steer_iid the kernel's
+    # ring has nothing to drop the twin by, and the turn executes twice.
     body = _run_turn_capture_body(monkeypatch)
-    assert "steer_iid" not in body
+    assert body["steer_iid"]           # minted, non-empty
+    assert "surface" not in body       # additive-only for surface stays true
 
 
-def test_run_omits_steer_iid_key_when_pickup_item_had_none(monkeypatch):
-    # Older gateway: /pending-steer items without `iid` -> "" -> key omitted.
+def test_run_mints_steer_iid_when_pickup_item_had_none(monkeypatch):
+    # Older gateway: /pending-steer items without `iid` -> "" -> the CLIENT
+    # mints its own so the same turn-start-retry dedup guarantee still holds.
     body = _run_turn_capture_body(monkeypatch, surface="telegram", steer_iid="")
-    assert "steer_iid" not in body
+    assert body["steer_iid"]
     assert body["surface"] == "telegram"
+
+
+def test_run_retries_turn_start_post_with_same_steer_iid(monkeypatch):
+    # FIX1 core guarantee: _transient_retry resends the IDENTICAL body
+    # closure on a transient turn-start failure. A retry after a timeout
+    # whose first attempt may have already landed server-side must carry the
+    # SAME steer_iid so the kernel's dedup ring drops the twin instead of
+    # executing the instruction twice.
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    # Fast retry: same real _transient_retry, but with no real sleeps.
+    real_retry = S._transient_retry
+
+    async def _fast_retry(send, **kw):
+        return await real_retry(send, attempts=5, base=0.0, cap=0.0)
+
+    monkeypatch.setattr(S, "_transient_retry", _fast_retry)
+
+    bodies = []
+
+    class _SessResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, json=None, **kw):
+            if path == "/v1/agent/sessions":
+                bodies.append(json)
+                if len(bodies) == 1:
+                    raise httpx.ReadTimeout("slow edge, first attempt may have landed")
+            return _SessResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    class _Sink:
+        def progress(self, *a): ...
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    out = asyncio.run(sess.run("do it", _Sink()))
+    assert out == "done"
+    assert len(bodies) == 2                             # timed out once, retried once
+    assert bodies[0]["steer_iid"] and bodies[0]["steer_iid"] == bodies[1]["steer_iid"]
+
+
+def test_run_wires_force_refresh_and_on_retry_by_identity(monkeypatch):
+    # FIX7a coverage: run() must wire stream_frames' force_refresh to THIS
+    # token_provider's force_refresh and on_retry to THIS sink's reconnecting
+    # -- by IDENTITY (not merely "some truthy callable") -- so a real 401
+    # refresh and a real reconnect-backoff signal actually reach the token
+    # provider / toolbar rather than some incidental substitute.
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    captured = {}
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0",
+                           force_refresh=None, on_retry=None):
+        captured["force_refresh"] = force_refresh
+        captured["on_retry"] = on_retry
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    class _SessResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, headers=None, **kw): return _SessResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    # Plain instance attributes (NOT class methods) -- a bound method created
+    # via the descriptor protocol is a fresh object on every access, so an
+    # `is` identity check against it would be flaky-false. An attribute
+    # assigned directly on the instance is the SAME object every access.
+    async def _force_refresh(): ...
+    def _reconnecting(attempt, delay): ...
+
+    class _TokenProvider:
+        def __init__(self):
+            self.force_refresh = _force_refresh
+
+        async def __call__(self):
+            return "tok"
+
+    class _Sink:
+        def __init__(self):
+            self.reconnecting = _reconnecting
+
+        def progress(self, *a): ...
+
+    token_provider = _TokenProvider()
+    sink = _Sink()
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    asyncio.run(sess.run("do it", sink))
+    assert captured["force_refresh"] is token_provider.force_refresh
+    assert captured["on_retry"] is sink.reconnecting
 
 
 # ── 0.3.14: cross-surface queued visibility (task_queued / task_dequeued) ─────
@@ -1024,13 +1183,14 @@ def _run_queue_frames_stream(monkeypatch, frames, sink):
 
     monkeypatch.setattr(T, "LocalToolExecutor", _NoExecutor)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         for f in frames:
             yield f
 
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
@@ -1098,3 +1258,265 @@ def test_task_queue_frames_ignored_by_minimal_or_crashing_sink(monkeypatch):
     ]
     assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == "done"
     assert _run_queue_frames_stream(monkeypatch, frames, _CrashSink()) == "done"
+
+
+# ── W1 front-3b: marathon_paused tells the sink WHY it parked ────────────────
+# A PARKED marathon (runaway/consent/credits pause) already ends the turn
+# with "" (return "" a few lines above); the addition here is that the run
+# also calls sink.marathon_parked(reason) so the queue panel can keep its
+# kernel-queued rows visible instead of wiping them (the kernel's own task
+# queue is still alive server-side while parked).
+
+def test_marathon_paused_frame_calls_parked_hook(monkeypatch):
+    class _ParkSink(RecSink):
+        def __init__(self):
+            super().__init__()
+            self.parked = []
+        def marathon_parked(self, reason): self.parked.append(reason)
+
+    sink = _ParkSink()
+    result = _run_queue_frames_stream(monkeypatch, [
+        {"type": "marathon_paused", "reason": "runaway"},
+    ], sink)
+    assert result == ""
+    assert sink.parked == ["runaway"]
+
+
+def test_marathon_paused_frame_ignored_by_minimal_or_crashing_sink(monkeypatch):
+    # Backward/limp-mode safety, same discipline as the task_queued hooks: a
+    # sink WITHOUT marathon_parked silently drops it, and a hook that CRASHES
+    # never breaks the frame loop -- the turn still ends on "".
+    class _CrashParkSink(RecSink):
+        def marathon_parked(self, reason): raise RuntimeError("ui bug")
+
+    frames = [{"type": "marathon_paused", "reason": "runaway"}]
+    assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == ""
+    assert _run_queue_frames_stream(monkeypatch, frames, _CrashParkSink()) == ""
+
+
+def test_transient_retry_survives_502_then_succeeds():
+    import asyncio
+    from webbee.session import _transient_retry
+
+    class _R:
+        def __init__(self, s):
+            self.status_code = s
+
+    seq = [_R(502), _R(503), _R(200)]
+
+    async def send():
+        return seq.pop(0)
+
+    r = asyncio.run(_transient_retry(send, attempts=5, base=0.0, cap=0.0))
+    assert r.status_code == 200
+
+
+def test_transient_retry_verdict_passes_through_immediately():
+    import asyncio
+    from webbee.session import _transient_retry
+
+    class _R:
+        status_code = 401
+
+    calls = []
+
+    async def send():
+        calls.append(1)
+        return _R()
+
+    r = asyncio.run(_transient_retry(send, attempts=5, base=0.0, cap=0.0))
+    assert r.status_code == 401 and len(calls) == 1   # a verdict is NOT retried
+
+
+def test_transient_retry_lets_non_transport_errors_propagate_immediately():
+    # FIX5: the except clause is narrowed to (httpx.HTTPError, OSError) -- a
+    # bug in the caller (TypeError, etc.) must surface immediately, not be
+    # silently retried 5x as if it were a transient network blip.
+    import asyncio
+    from webbee.session import _transient_retry
+
+    calls = []
+
+    async def send():
+        calls.append(1)
+        raise TypeError("boom")
+
+    raised = False
+    try:
+        asyncio.run(_transient_retry(send, attempts=5, base=0.0, cap=0.0))
+    except TypeError:
+        raised = True
+    assert raised
+    assert calls == [1]   # ONE call, no retries
+
+
+def test_post_result_retries_then_gives_up_silently():
+    import asyncio
+    from webbee.session import AgentSession
+
+    class _Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def post(self, url, json=None, headers=None):
+            self.calls += 1
+            raise OSError("down")
+
+    s = AgentSession.__new__(AgentSession)
+    s.token_provider = None
+
+    async def _h():
+        return {}
+
+    s._headers = _h
+    s._result_delays = (0.0, 0.0, 0.0)   # test seam: no real sleeps
+    c = _Client()
+    asyncio.run(s._post_result(c, "sid", {"req_id": "r1"}))   # must NOT raise
+    assert c.calls == 4   # 1 try + 3 retries
+
+
+# ── W1 Task 10: own-task watchdog (deduped-twin hang) ────────────────────────
+# Signature: this turn's task was ring-dropped kernel-side, so the shared
+# stream carries ONLY frames tagged with OTHER task_ids -- this turn's own
+# task_id never appears. Left alone the dock spins "working" forever (only
+# Esc unsticks it). If >=1 foreign frame flowed, ZERO own frames landed, and
+# _FOREIGN_ONLY_DEADLINE_S has elapsed since the stream started, end the turn
+# honestly with a note instead of hanging. Pure frame-silence (no frames at
+# all) is a DIFFERENT signature and must never trip this -- the check lives
+# INSIDE the foreign-frame branch only.
+
+def test_foreign_only_stream_trips_watchdog(monkeypatch):
+    import webbee.session as S
+
+    # _monotonic() call sequence: [0] _t0 at stream start: 1000.0
+    # [1] frame1's check: delta 0 -> not tripped -> continue
+    # [2] frame2's check: delta 95 -> tripped -> end the turn
+    times = iter([1000.0, 1000.0, 1095.0])
+    monkeypatch.setattr(S, "_monotonic", lambda: next(times))
+
+    frames = [
+        {"type": "tool_request", "task_id": "other", "req_id": "r1", "tool": "bash", "args": {}},
+        {"type": "tool_request", "task_id": "other", "req_id": "r2", "tool": "bash", "args": {}},
+    ]
+
+    class _NoteSink(RecSink):
+        def __init__(self):
+            super().__init__()
+            self.notes = []
+        def note(self, text): self.notes.append(text)
+
+    sink = _NoteSink()
+    result = _run_queue_frames_stream(monkeypatch, frames, sink)
+
+    assert result == ""
+    assert len(sink.notes) == 1
+    assert "duplicate" in sink.notes[0]
+
+
+def test_foreign_only_watchdog_ignored_by_sink_without_note_hook(monkeypatch):
+    # A minimal sink (no `note`) must still end the turn cleanly -- the hook
+    # is getattr-guarded like every other sink extension point in this loop.
+    import webbee.session as S
+
+    times = iter([1000.0, 1000.0, 1095.0])
+    monkeypatch.setattr(S, "_monotonic", lambda: next(times))
+
+    frames = [
+        {"type": "tool_request", "task_id": "other", "req_id": "r1", "tool": "bash", "args": {}},
+        {"type": "tool_request", "task_id": "other", "req_id": "r2", "tool": "bash", "args": {}},
+    ]
+
+    assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == ""
+
+
+def test_foreign_only_watchdog_never_trips_with_at_least_one_own_frame(monkeypatch):
+    # A single own frame latches _own_frames=True permanently -- even if
+    # foreign traffic keeps flowing past the deadline afterwards, this turn
+    # is genuinely alive (not a ring-dropped twin) and must never be cut off.
+    import webbee.session as S
+
+    # _t0 is the only call the correct implementation ever makes here: once
+    # _own_frames latches True, the foreign branch's `and` short-circuits
+    # before touching the clock again. Extra values stay unused as a safety
+    # net -- if a regression re-checks the clock anyway, it reads a delta
+    # comfortably past the deadline instead of raising StopIteration.
+    times = iter([1000.0, 1200.0, 1200.0])
+    monkeypatch.setattr(S, "_monotonic", lambda: next(times))
+
+    frames = [
+        {"type": "progress", "task_id": "OURS", "text": "on it"},   # own frame
+        {"type": "tool_request", "task_id": "other", "req_id": "r1", "tool": "bash", "args": {}},
+        {"type": "final", "task_id": "OURS", "text": "done"},
+    ]
+
+    sink = RecSink()
+    sink.progress_calls = []
+    sink.progress = lambda text: sink.progress_calls.append(text)
+    assert _run_queue_frames_stream(monkeypatch, frames, sink) == "done"
+
+
+def test_foreign_only_watchdog_never_trips_before_the_deadline(monkeypatch):
+    # Foreign-only traffic that hasn't yet crossed _FOREIGN_ONLY_DEADLINE_S
+    # must let the turn keep waiting for its own final rather than bailing.
+    import webbee.session as S
+
+    times = iter([1000.0, 1010.0, 1089.0])   # deltas 10, 89 -- both under the 90s deadline
+    monkeypatch.setattr(S, "_monotonic", lambda: next(times))
+
+    frames = [
+        {"type": "tool_request", "task_id": "other", "req_id": "r1", "tool": "bash", "args": {}},
+        {"type": "tool_request", "task_id": "other", "req_id": "r2", "tool": "bash", "args": {}},
+        {"type": "final", "task_id": "OURS", "text": "done"},
+    ]
+
+    assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == "done"
+
+
+# ── W1 Task 13: session memory bounds (seen-LRU + steps cap) ────────────────
+
+def test_seen_is_lru_bounded():
+    # A many-hour marathon's `seen` dedup store must never retain every tool
+    # result body -- the kernel only ever re-dispatches the CURRENT pending
+    # req_id (presence-pause re-dispatch), so a small recency window covers
+    # it. Drive the extracted pure helper directly: after 70 distinct
+    # req_ids, only the most recent _SEEN_KEEP survive.
+    from collections import OrderedDict
+
+    from webbee.session import _SEEN_KEEP, _remember
+
+    seen: OrderedDict = OrderedDict()
+    for i in range(70):
+        _remember(seen, f"r{i}", {"n": i})
+    assert len(seen) == _SEEN_KEEP
+    assert "r69" in seen and "r0" not in seen
+
+
+def test_remember_move_to_end_on_re_store():
+    # A re-store of an already-seen req_id (e.g. the confirm_request branch
+    # re-storing the SAME rid the tool_request branch already cached) must
+    # refresh its recency -- it should NOT be evicted just because it was
+    # inserted early, as long as it keeps getting touched.
+    from collections import OrderedDict
+
+    from webbee.session import _SEEN_KEEP, _remember
+
+    seen: OrderedDict = OrderedDict()
+    for i in range(_SEEN_KEEP):
+        _remember(seen, f"r{i}", {"n": i})
+    _remember(seen, "r0", {"n": "touched"})   # re-store the oldest entry
+    _remember(seen, "new", {"n": "fresh"})    # push past the cap once more
+    assert "r0" in seen          # refreshed by the re-store, survives eviction
+    assert "r1" not in seen      # r1 is now the least-recently-touched, evicted
+    assert len(seen) == _SEEN_KEEP
+
+
+def test_steps_capped_at_200():
+    import webbee.session as S
+    from collections import deque
+
+    s = S.AgentSession.__new__(S.AgentSession)
+    s.steps = deque(maxlen=200)
+    for i in range(250):
+        s.steps.append({"step_id": str(i)})
+    assert len(s.steps) == 200
+    assert s.steps[0]["step_id"] == "50"

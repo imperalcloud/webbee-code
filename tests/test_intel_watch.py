@@ -51,6 +51,18 @@ def test_git_and_node_modules_paths_are_filtered(monkeypatch, tmp_path):
     assert calls == [{"a.py"}]
 
 
+def test_git_filter_matches_windows_paths():
+    # F-Task15: the filter must match on Windows backslash paths too --
+    # watchfiles yields native-separator paths, and an un-normalized "/.git/"
+    # substring check never matches "C:\repo\.git\index", so .git churn was
+    # never filtered on Windows and re-indexed the repo on every checkpoint.
+    from webbee.intel.watch import _ignored
+    assert _ignored(r"C:\repo\.git\index")
+    assert _ignored("/repo/.git/index")
+    assert _ignored(r"C:\repo\node_modules\x.js")
+    assert not _ignored(r"C:\repo\src\x.py")
+
+
 def test_missing_watchfiles_extra_returns_immediately(monkeypatch, tmp_path):
     import builtins
     real_import = builtins.__import__

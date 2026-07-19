@@ -85,3 +85,27 @@ def test_height_always_matches_the_rendered_lines():
                   [_t("only", "in_progress")]):
         frags = todo_fragments(items)
         assert todo_height(items) == _text(frags).count("\n") + 1
+
+
+# ── W1 front-3b task 11: click-to-collapse (header toggles to one row) ──────
+
+def test_todo_collapsed_single_row_and_height():
+    todos = [_t("x", "in_progress"), _t("y")]
+    frags = todo_fragments(todos, collapsed=True, toggle=lambda: None)
+    assert len(frags) == 1 and "Todos (0/2)" in frags[0][1] and "▸" in frags[0][1]
+    assert len(frags[0]) == 3                      # header carries the toggle handler
+    assert todo_height(todos, collapsed=True) == 1
+
+
+def test_todo_header_toggle_fires_on_mouse_up():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    hits = []
+    frags = todo_fragments([_t("a")], collapsed=False, toggle=lambda: hits.append(1))
+    handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(up) is None and hits == [1]
+    scroll = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
+                        button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(scroll) is NotImplemented

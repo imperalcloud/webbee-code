@@ -162,7 +162,9 @@ def test_output_pane_no_full_reread_on_unchanged_redraw():
     # Perf regression (long-session lag): _all_lines re-read the ENTIRE buffer
     # (getvalue O(n) + full string compare O(n)) on EVERY redraw. Every keystroke
     # / ticker tick / scroll in a big session cost O(session). With NO new output,
-    # a redraw must not re-read the whole buffer.
+    # a redraw must not re-read the whole buffer; WITH new output (Task 14), the
+    # cache is extended via a positional DELTA read (O(new output)) instead of a
+    # full getvalue() re-split — so getvalue() is never called at all here.
     import io
 
     from webbee.output_pane import OutputPane
@@ -185,9 +187,72 @@ def test_output_pane_no_full_reread_on_unchanged_redraw():
     base = cio.gv
     pane._all_lines(); pane._all_lines(); pane._all_lines()   # no new writes since
     assert cio.gv == base, "re-read the whole buffer on unchanged redraws (O(session)/frame)"
-    pane.console.print("a new line")       # content changed -> one refresh is expected
+    pane.console.print("a new line")       # content changed -> incremental delta, not getvalue()
     assert any("a new line" in ln for ln in pane._all_lines())
-    assert cio.gv > base
+    assert cio.gv == base, "a print must extend the cache via delta read, not a full getvalue() re-split"
+
+
+# ── Task 14: incremental line caches + hysteresis trim ──────────────────────
+# Even with the getvalue()-memoized-by-position cache above, a changed redraw
+# still re-split the WHOLE buffer from scratch (getvalue() + str.split("\n")
+# over the entire session) — O(session) per print, quadratic over a long busy
+# stream. The cache must extend the cached list IN PLACE from only the delta
+# written since the last split.
+
+def test_all_lines_appends_delta_in_place():
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    p.console.print("one")
+    first = p._all_lines()
+    p.console.print("two")
+    second = p._all_lines()
+    assert second is first                      # same list object, extended
+    assert any("two" in ln for ln in second[-3:])
+
+
+def test_trim_hysteresis_and_offset_preserved():
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(21000):
+        p._io.write(f"line{i}\n")
+    p._lines_cache = (None, [""])               # force re-split
+    p._offset = 20500                           # reader scrolled up
+    p._trim()
+    lines = p._all_lines()
+    assert len(lines) <= 15001                  # cut to ~15000 (+trailing)
+    dropped = 21001 - len(lines)
+    assert p._offset == max(0, 20500 - dropped) # view anchored to same content
+
+
+def test_trim_below_threshold_leaves_buffer_untouched():
+    # Hysteresis negative case: below max_lines (20000), _trim must be a
+    # complete no-op -- no rewrite of the underlying StringIO at all.
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(18000):
+        p._io.write(f"line{i}\n")
+    p._lines_cache = (None, [""])               # force re-split
+    before = p._io.getvalue()
+    p._trim()
+    assert p._io.getvalue() == before
+
+
+def test_trim_keep_floor_not_over_aggressive():
+    # A trim that DOES fire must cut down to ~keep (15000), not slash way
+    # below it -- pins the keep floor so a future change to the hysteresis
+    # constants can't silently turn this into an over-aggressive cut.
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(21000):
+        p._io.write(f"line{i}\n")
+    p._lines_cache = (None, [""])
+    p._trim()
+    lines = p._all_lines()
+    assert len(lines) >= 14000
 
 
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
@@ -468,6 +533,21 @@ def test_toolbar_hides_queue_segment_when_empty():
     assert "queued" not in _txt(build_toolbar("default", 0, 0))
 
 
+def test_toolbar_shows_reconnecting():
+    # Stream transport down mid-turn (W1 front-5): the honest reconnecting
+    # state replaces the busy spinner/working line entirely — no fake
+    # "working" while the transport is actually down.
+    frags = build_toolbar("default", 0, 0, busy=True, reconnecting=3)
+    text = _txt(frags)
+    assert "⟳ reconnecting (3)" in text and "working" not in text
+
+
+def test_toolbar_reconnecting_only_applies_while_busy():
+    # Idle never shows the reconnecting glyph — busy=False means no turn is
+    # running to reconnect for.
+    assert "reconnecting" not in _txt(build_toolbar("default", 0, 0, reconnecting=3))
+
+
 def test_turn_completion_drains_oldest_queued_to_submit_path():
     from webbee.tui import _drain_pending
     started = []
@@ -665,6 +745,39 @@ def test_drain_marks_the_start_with_remaining_depth():
     assert started == ["a", "b"] and marks == [1, 0]
 
 
+def test_drain_pending_requeues_on_start_error_and_survives_mark_error():
+    # The popped line is already OUT of `pending` the instant it's read: a
+    # `mark` blow-up (pure render-side announcement) must never lose it, and
+    # a `start` blow-up must put it BACK at the head before propagating —
+    # a broken start must not silently vanish a queued line.
+    from webbee.tui import _drain_pending
+
+    def bad_mark(n):
+        raise RuntimeError
+
+    def boom(t):
+        raise RuntimeError
+
+    q = deque(["a"])
+    try:
+        _drain_pending(q, boom, mark=bad_mark)
+    except RuntimeError:
+        pass
+    assert list(q) == ["a"]           # nothing lost
+
+
+def test_drain_pending_mark_error_alone_still_drains():
+    from webbee.tui import _drain_pending
+    started = []
+    q = deque(["a", "b"])
+
+    def bad_mark(n):
+        raise RuntimeError
+
+    assert _drain_pending(q, started.append, mark=bad_mark) is True
+    assert started == ["a"] and list(q) == ["b"]      # the mark error was swallowed
+
+
 def test_toolbar_queued_segment_is_accent_not_dim():
     for frags in (build_toolbar("default", 0, 0, busy=True, elapsed=1.0, queued=2),
                   build_toolbar("default", 0, 0, queued=2)):
@@ -768,6 +881,141 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
         assert "⋯ queued" not in pane.dump()      # the transcript stays CLEAN
+
+    asyncio.run(scenario())
+
+
+def test_run_session_uses_caller_turn_dict():
+    # The repl shares turn_ref with tui.run_session (the poller's lockout-
+    # proof gate reads THIS dict) -- when the caller passes turn=, run_session
+    # must mutate the SAME object, not a private one of its own.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        gate = asyncio.Event()
+        busy = {"v": False}
+        caller_turn = {"task": None}
+
+        async def on_line(text):
+            busy["v"] = True
+            await gate.wait()
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    turn=caller_turn))
+                await asyncio.sleep(0.05)
+                pipe.send_text("hello\r")
+                await _until(lambda: busy["v"])
+                # the SAME dict object the caller holds now carries the live
+                # task -- exactly what the repl's poller gate reads.
+                assert caller_turn["task"] is not None
+                assert not caller_turn["task"].done()
+                gate.set()
+                await _until(lambda: caller_turn["task"] is None)   # cleared on completion
+                pipe.send_text("\x04")                              # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_error_turn_holds_queue():
+    # THE other half of the drain rule (W1 task 6): an ERROR-terminated turn
+    # must hold the queue exactly like a user stop does -- a broken backend
+    # must never burn one queued line per failing turn. on_line completes
+    # NORMALLY here (no exception escapes it, no turn["stopped"]) but
+    # status()["turn_failed"] is True (repl's except branch calls
+    # RichSink.mark_turn_failed(); this fake status mirrors that). Only the
+    # NEXT clean completion (turn_failed back to False) drains.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        ran, markers = [], []
+        gate = asyncio.Event()
+        busy = {"v": False}
+        failed = {"v": False}
+
+        async def on_line(text):
+            busy["v"] = True
+            failed["v"] = False            # begin_turn clears the one-turn flag
+            ran.append(text)
+            if text == "boom":
+                await gate.wait()
+                try:
+                    raise OSError("network down")
+                except OSError:
+                    failed["v"] = True     # mark_turn_failed(): swallowed, never crashes the REPL
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False,
+                    "turn_failed": failed["v"]}
+
+        pend = deque()
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    pending=pend, queued_run=markers.append))
+                await asyncio.sleep(0.05)
+                pipe.send_text("boom\r")
+                await _until(lambda: ran == ["boom"])          # the ERROR turn is running
+                pipe.send_text("queued follow-up\r")           # type-ahead while it runs
+                await _until(lambda: list(pend) == ["queued follow-up"])   # queued AT ONCE
+                gate.set()                                     # let the error surface + get swallowed
+                await _until(lambda: not busy["v"])            # the turn ends NATURALLY (no stop)
+                await asyncio.sleep(0.1)
+                assert ran == ["boom"]                          # the queue did NOT auto-run…
+                assert list(pend) == ["queued follow-up"]      # …preserved, still visible
+                assert markers == []                           # …and no drain marker fired
+                pipe.send_text("resume\r")                      # a deliberate new (clean) turn
+                await _until(lambda: ran == ["boom", "resume", "queued follow-up"])
+                assert markers == [0]                           # clean completion DOES drain
+                assert not pend
+                await _until(lambda: not busy["v"])
+                pipe.send_text("\x04")                          # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
 
     asyncio.run(scenario())
 
@@ -955,6 +1203,30 @@ def test_control_dispatches_click_row_to_the_matching_item():
     assert ctrl.mouse_handler(ev(0)) is NotImplemented           # header: no pull
 
 
+# ── W1 front-3b task 11: click-to-collapse (header toggles to one row) ──────
+
+def test_queue_collapsed_renders_single_header_row():
+    q = deque(["a", "b", "c"])
+    frags = queue_fragments(q, collapsed=True, toggle=lambda: None)
+    assert len(frags) == 1 and "queued (3)" in frags[0][1] and "▸" in frags[0][1]
+    assert len(frags[0]) == 3                      # header carries the toggle handler
+    assert queue_height(q, collapsed=True) == 1
+
+
+def test_queue_header_toggle_fires_on_mouse_up():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    hits = []
+    frags = queue_fragments(deque(["a"]), collapsed=False, toggle=lambda: hits.append(1))
+    handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(up) is None and hits == [1]
+    scroll = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
+                        button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(scroll) is NotImplemented
+
+
 def test_pull_item_guards_draft_and_stale_index():
     # The ONE pull implementation behind BOTH ↑ and click: never clobbers a
     # typed draft; a stale index (queue drained between render and click) is
@@ -963,14 +1235,70 @@ def test_pull_item_guards_draft_and_stale_index():
     buf = Buffer(multiline=False)
     buf.text = "half-typed draft"
     pend = deque(["a", "b"])
-    assert pull_item(pend, buf, 1) is False              # draft protected
+    assert pull_item(pend, buf, 1) is None                # draft protected
     assert buf.text == "half-typed draft" and list(pend) == ["a", "b"]
     buf.reset()
-    assert pull_item(pend, buf, 5) is False              # stale index ignored
-    assert pull_item(pend, buf, -1) is False
-    assert pull_item(pend, buf, 0) is True               # arbitrary index (click)
+    assert pull_item(pend, buf, 5) is None                # stale index ignored
+    assert pull_item(pend, buf, -1) is None
+    assert pull_item(pend, buf, 0) == "a"                 # arbitrary index (click) — the item itself
     assert buf.text == "a" and buf.cursor_position == 1
     assert list(pend) == ["b"]
+
+
+# ── W1 front-3b task 9: pull-to-edit keeps the original steer_iid ────────────
+# A pull used to hand back a bare bool; now it hands back the REMOVED ITEM (or
+# None) so the caller can read its carried QueuedLine.iid back out — the whole
+# point being an UNCHANGED resubmit keeps the SAME iid (the kernel ring can
+# then dedup a landed twin instead of running a genuine duplicate turn).
+
+def test_pull_item_returns_the_item():
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import QueuedLine
+    buf = Buffer(multiline=False)
+    q = deque([QueuedLine("do x", "iid-1")])
+    item = pull_item(q, buf, 0)
+    assert item == "do x" and item.iid == "iid-1" and not q
+
+
+def test_rewrap_pulled_keeps_iid_when_unchanged_and_mints_when_edited():
+    from webbee.tui import _rewrap_pulled
+    pulled = {"text": "do x", "iid": "iid-1"}
+    out = _rewrap_pulled(pulled, "do x")
+    assert getattr(out, "iid", "") == "iid-1"
+    assert pulled == {"text": "", "iid": ""}          # one-shot: consumed either way
+    pulled = {"text": "do x", "iid": "iid-1"}
+    out2 = _rewrap_pulled(pulled, "do x HARDER")
+    assert getattr(out2, "iid", "") == ""              # edited ⇒ genuinely new message
+
+
+def test_rewrap_pulled_is_a_noop_when_nothing_was_pulled():
+    from webbee.tui import _rewrap_pulled
+    pulled = {"text": "", "iid": ""}
+    out = _rewrap_pulled(pulled, "typed fresh")
+    assert out == "typed fresh" and getattr(out, "iid", "") == ""
+
+
+def test_pull_then_resubmit_unchanged_keeps_the_original_iid_end_to_end():
+    # The actual wiring _enter uses: _arrow_up_action records the pulled
+    # item's text + iid into `pulled`; _rewrap_pulled hands the iid back
+    # ONLY when the resubmitted text is byte-identical.
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import QueuedLine, _arrow_up_action, _rewrap_pulled
+    buf = Buffer(multiline=False)
+    pend = deque([QueuedLine("deploy the fix", "iid-42")])
+    pulled = {"text": "", "iid": ""}
+    _arrow_up_action(_FakeEvent(), buf, {"i": None}, 0, True, pend, pulled)
+    assert buf.text == "deploy the fix" and not pend
+    resubmitted = _rewrap_pulled(pulled, buf.text)          # unedited resubmit
+    assert getattr(resubmitted, "iid", "") == "iid-42"      # SAME iid — kernel ring dedups
+    # a second pull, this time edited before resubmit, must NOT carry the iid
+    pend.append(QueuedLine("deploy the fix", "iid-42"))
+    buf.reset()
+    _arrow_up_action(_FakeEvent(), buf, {"i": None}, 0, True, pend, pulled)
+    edited = _rewrap_pulled(pulled, buf.text + " NOW")
+    assert getattr(edited, "iid", "") == ""                 # edited ⇒ no carried iid
 
 
 def test_up_arrow_pulls_newest_queued_into_empty_buffer_busy_or_idle():
@@ -1175,6 +1503,18 @@ def test_remote_rows_cap_with_a_more_row_and_height_counts_both():
     assert queue_height(deque(["a"]))  == 2             # remote omitted → exactly as before
 
 
+def test_remote_parked_row_renders_with_pause_prefix():
+    # W1 front-3b: a row that survived a marathon PARK is tagged parked=True
+    # by RichSink.end_turn -- the panel must show it's still queued
+    # server-side (not phantom) with a ⏸ prefix, distinct from a live row.
+    parked = _remote("telegram", "do x", "i1")
+    parked["parked"] = True
+    frags = queue_fragments(deque(), remote=[parked, _remote("web-panel", "live one", "i2")])
+    text = _panel_text(frags)
+    assert "⏸ [telegram] do x" in text
+    assert "[web-panel] live one" in text and "⏸ [web-panel]" not in text
+
+
 # ── 0.3.15: mid-turn inject — Enter-while-busy FLIES into the RUNNING turn ────
 # The type-ahead used to hold every busy-typed line client-side until turn end
 # (_drain_pending), so a running marathon never saw it mid-turn. Now the enter
@@ -1226,6 +1566,28 @@ def test_inject_ok_is_kernel_owned_nothing_queued_locally():
         (text, iid), = calls
         assert text == "fly this in"
         assert re.fullmatch(r"[0-9a-f]{32}", iid)     # uuid4 hex, minted at enqueue
+    asyncio.run(scenario())
+
+
+def test_inject_or_queue_reuses_carried_iid():
+    # A QueuedLine (a pull-to-edit resubmitted unchanged, see _rewrap_pulled)
+    # already carries the original steer_iid -- _inject_or_queue must fly it
+    # under THAT id, not mint a fresh one, so the kernel ring can still dedup
+    # a landed twin.
+    from webbee.tui import QueuedLine, _inject_or_queue
+
+    async def scenario():
+        pending = deque()
+        calls = []
+
+        async def inject(text, iid):
+            calls.append((text, iid))
+            return True
+
+        ok = await _inject_or_queue(inject, QueuedLine("t", "iid-9"), pending)
+        assert ok is True
+        (text, iid), = calls
+        assert text == "t" and iid == "iid-9"         # carried, not a fresh uuid
     asyncio.run(scenario())
 
 

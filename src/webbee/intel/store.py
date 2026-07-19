@@ -99,10 +99,17 @@ def load_vectors(cache_dir, repo_key, git_ref, model_id):
         if (meta.get("schema_version") != SCHEMA_VERSION or meta.get("git_ref") != git_ref
                 or meta.get("model_id") != model_id):
             return None
-        mat = np.load(os.path.join(d, "embeddings.npy"))
+        # mmap_mode="r": the on-disk cache can be large across a big repo's
+        # chunk set -- read it lazily off disk instead of paging the whole
+        # matrix into RAM up front. save_vectors always writes float32, so
+        # the astype copy below only fires on an actual dtype mismatch
+        # (e.g. an older/foreign cache file), not on every load.
+        mat = np.load(os.path.join(d, "embeddings.npy"), mmap_mode="r")
         ids = meta.get("ids") or []
         if len(ids) != mat.shape[0]:
             return None
-        return ids, mat.astype(np.float32)
+        if mat.dtype != np.float32:
+            mat = mat.astype(np.float32)
+        return ids, mat
     except Exception:
         return None

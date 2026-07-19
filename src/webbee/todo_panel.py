@@ -9,7 +9,7 @@ redraw (in-place mutation, the twin of `remote_pending`); the scrollback
 record is the ONE inline checklist RichSink.end_turn prints per turn. Split
 into its own file like queue_panel.py to stay far under the size ceiling."""
 
-from webbee.queue_panel import one_line
+from webbee.queue_panel import _toggle_handler, one_line
 
 TP_MAX_ITEMS = 6   # item rows shown; completed collapse first, then `… +K more`
 
@@ -29,7 +29,7 @@ def _rows(todos) -> list:
     return out
 
 
-def todo_fragments(todos, width: int = 0):
+def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None):
     """PURE builder: the panel as prompt_toolkit formatted text, re-invoked
     every redraw (same live mechanics as the queue panel) so every todo_write
     republish shows at once. Layout, top→bottom = plan order:
@@ -42,12 +42,23 @@ def todo_fragments(todos, width: int = 0):
         … +K more            ← pending overflow beyond TP_MAX_ITEMS
 
     Counts derive from the items themselves (the kernel republishes the FULL
-    list on every todo_write). Empty/malformed-only list → [] (panel hidden)."""
+    list on every todo_write). Empty/malformed-only list → [] (panel hidden).
+
+    `collapsed` (Task 11 click-to-collapse, mirrors queue_panel exactly) folds
+    the whole panel down to ONE header row ending `▸`; `▾` when expanded.
+    Both only render when `toggle` is given — the header then carries a
+    3-tuple MOUSE_UP handler (see queue_panel._toggle_handler) that flips it."""
     rows = _rows(todos)
     if not rows:
         return []
     done = sum(1 for s, _ in rows if s == "completed")
-    frags = [("class:tp.header", f" 📋 Todos ({done}/{len(rows)})")]
+    marker = "" if toggle is None else (" ▸" if collapsed else " ▾")
+    header = ("class:tp.header", f" 📋 Todos ({done}/{len(rows)}){marker}")
+    if toggle is not None:
+        header = header + (_toggle_handler(toggle),)
+    frags = [header]
+    if collapsed:
+        return frags
     show = rows
     hidden_done = 0
     if len(show) > TP_MAX_ITEMS:
@@ -80,12 +91,14 @@ def todo_fragments(todos, width: int = 0):
     return frags
 
 
-def todo_height(todos) -> int:
+def todo_height(todos, collapsed=False) -> int:
     """PURE. Rows the panel needs — derived from the SAME fragments the panel
     renders (header line + one per newline), so height can never desync from
-    the visible rows. 0 when the list is empty (the ConditionalContainer
+    the visible rows. `collapsed` (Task 11) falls out of that same derivation:
+    a collapsed header fragment has no newline, so this naturally yields 1
+    when there's data. 0 when the list is empty (the ConditionalContainer
     hides the panel then anyway)."""
-    frags = todo_fragments(todos)
+    frags = todo_fragments(todos, collapsed=collapsed)
     if not frags:
         return 0
     return 1 + sum(f[1].count("\n") for f in frags)

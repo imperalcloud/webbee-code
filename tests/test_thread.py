@@ -259,6 +259,41 @@ def test_fetch_pending_steer_propagates_network_error():
         pass
 
 
+# ── shared keep-alive client (Task 12: no more TCP+TLS handshake every 4s) ──
+
+def test_fetch_pending_steer_reuses_given_client(monkeypatch):
+    # With a client the repl already owns, fetch_pending_steer must call
+    # THROUGH it (client.request) and never open a fresh httpx.AsyncClient --
+    # the constructor is monkeypatched to blow up if it's touched.
+    from webbee.thread import fetch_pending_steer
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": []}
+
+    class FakeClient:
+        async def request(self, method, path, json=None, headers=None):
+            seen["method"] = method
+            seen["path"] = path
+            seen["headers"] = headers
+            return _Resp()
+
+    def _no_new_client(*a, **kw):
+        raise AssertionError("must not construct a new AsyncClient when one is given")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _no_new_client)
+    out = asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56",
+                                          client=FakeClient()))
+    assert seen["method"] == "GET"
+    assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/pending-steer"
+    assert seen["headers"] == {"Authorization": "Bearer tok"}
+    assert out == {"items": []}
+
+
 def test_truncate_for_display_short_text_unchanged():
     assert truncate_for_display("hello") == "hello"
 
@@ -370,3 +405,37 @@ def test_inject_to_session_raises_on_http_error_non_swallowing(monkeypatch):
     except httpx.HTTPStatusError:
         raised = True
     assert raised    # the caller (repl wiring) owns the fallback
+
+
+def test_inject_to_session_reuses_given_client_forwards_body(monkeypatch):
+    # With a client the repl already owns (Task 12's shared keep-alive
+    # client), inject_to_session must call THROUGH it (client.request) and
+    # forward the {text, steer_iid} body verbatim -- and never open a fresh
+    # httpx.AsyncClient (the constructor is monkeypatched to blow up if
+    # touched, same discipline as fetch_pending_steer's sibling test above).
+    from webbee.thread import inject_to_session
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": True}
+
+    class FakeClient:
+        async def request(self, method, path, json=None, headers=None):
+            seen["method"] = method
+            seen["path"] = path
+            seen["json"] = json
+            seen["headers"] = headers
+            return _Resp()
+
+    def _no_new_client(*a, **kw):
+        raise AssertionError("must not construct a new AsyncClient when one is given")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _no_new_client)
+    ok = asyncio.run(inject_to_session(_Cfg(), _tp, "s1", "fly this in", "iid-1",
+                                       client=FakeClient()))
+    assert ok is True
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/v1/agent/sessions/s1/inject"
+    assert seen["json"] == {"text": "fly this in", "steer_iid": "iid-1"}
+    assert seen["headers"] == {"Authorization": "Bearer tok"}

@@ -36,6 +36,33 @@ def test_grep(tmp_path):
     r = ex.run("grep", {"pattern": "def foo"})
     assert r["ok"] and "a.py" in r["content"]
 
+
+def test_grep_skips_git_dir(tmp_path):
+    # Real regression coverage on this (posix) host: a matching file sitting
+    # inside .git/ must never surface in results.
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.py", "content": "needle\n"})
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "blob.txt").write_text("needle\n")
+    r = ex.run("grep", {"pattern": "needle"})
+    assert r["ok"] and "a.py" in r["content"] and ".git" not in r["content"]
+
+
+def test_grep_skips_git_dir_windows_style():
+    # The os.walk-driven .git skip in _t_grep normalizes dp with os.sep so it
+    # also matches on Windows, where os.walk yields backslash paths (an
+    # un-normalized check never matches "C:\repo\.git" there). os.walk on
+    # this posix host never emits backslash paths, so that half of the fix
+    # is unverifiable through a real filesystem walk here -- pin the
+    # extracted pure predicate directly instead of faking a filesystem
+    # assertion that would silently no-op on this host.
+    from webbee.tools import _is_git_dir
+    assert _is_git_dir(r"C:\repo\.git")
+    assert _is_git_dir(r"C:\repo\.git\sub")
+    assert _is_git_dir("/repo/.git")
+    assert not _is_git_dir(r"C:\repo\src")
+
 def test_outside_workspace_denied(tmp_path):
     # run() must DENY an out-of-workspace path but return a graceful result —
     # NOT raise. A re-raise escaped run(), the reverse-channel handler never

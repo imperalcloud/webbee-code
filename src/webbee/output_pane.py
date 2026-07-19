@@ -24,12 +24,12 @@ class OutputPane:
         self.console = Console(file=self._io, force_terminal=True,
                                color_system="truecolor", width=width, highlight=False)
         self._ANSI = ANSI
-        self._lines_cache = (None, [""])   # (write-pos, split-lines) — memoize the split
+        self._lines_cache = (0, [""])      # (write-pos, split-lines) — memoize the split
         self._offset = 0                   # index of the top visible line
         self._view_h = 20                  # viewport height (updated from render_info)
         self._follow = True                # stick to the tail unless the user scrolled up
         self._sel = None                   # (abs_start, abs_end) during a drag → live highlight
-        self._plain_cache = (None, [""])   # (write-pos, ANSI-stripped lines) for select/highlight
+        self._plain_cache = (0, [""])      # (write-pos, ANSI-stripped lines) for select/highlight
         self.copy_flash = ""               # transient toolbar note after a copy
         self._flash_until = 0.0
         pane = self
@@ -80,21 +80,44 @@ class OutputPane:
     def _all_lines(self):
         # Key the cache on the stream WRITE POSITION (O(1)), not a full-buffer
         # getvalue()+string compare (O(session)) — that ran on EVERY redraw
-        # (keystroke / ticker / scroll) and made big sessions lag. getvalue()
-        # + re-split happen ONLY when new output actually arrived.
+        # (keystroke / ticker / scroll) and made big sessions lag. Beyond that,
+        # only the DELTA since the cached position is read and split — the
+        # cached list is extended IN PLACE, so a print costs O(new output),
+        # never a full-buffer re-split (that made long busy streams
+        # quadratic). Boundary safety: the cache only ever advances at print
+        # boundaries (Console.print completes before notify() runs), so an
+        # SGR escape can never split across a delta read.
         pos = self._io.tell()
-        if self._lines_cache[0] != pos:
-            s = self._io.getvalue()
-            self._lines_cache = (pos, s.split("\n"))
-        return self._lines_cache[1]
+        cpos, lines = self._lines_cache
+        if cpos == pos:
+            return lines
+        if isinstance(cpos, int) and 0 <= cpos < pos:
+            self._io.seek(cpos)
+            delta = self._io.read()          # leaves position at EOF (== pos)
+            parts = delta.split("\n")
+            lines[-1] += parts[0]
+            lines.extend(parts[1:])
+        else:
+            lines = self._io.getvalue().split("\n")
+        self._lines_cache = (pos, lines)
+        return lines
 
     def _plain_lines(self):
         import re
         pos = self._io.tell()
-        if self._plain_cache[0] != pos:
-            s = self._io.getvalue()
-            self._plain_cache = (pos, re.sub(r"\x1b\[[0-9;]*m", "", s).split("\n"))
-        return self._plain_cache[1]
+        cpos, lines = self._plain_cache
+        if cpos == pos:
+            return lines
+        if isinstance(cpos, int) and 0 <= cpos < pos:
+            self._io.seek(cpos)
+            delta = re.sub(r"\x1b\[[0-9;]*m", "", self._io.read())
+            parts = delta.split("\n")
+            lines[-1] += parts[0]
+            lines.extend(parts[1:])
+        else:
+            lines = re.sub(r"\x1b\[[0-9;]*m", "", self._io.getvalue()).split("\n")
+        self._plain_cache = (pos, lines)
+        return lines
 
     def _norm_sel(self):
         (a, b) = self._sel
@@ -151,14 +174,25 @@ class OutputPane:
         except Exception:
             pass
 
-    def _trim(self, max_lines: int = 20000) -> None:
+    def _trim(self, max_lines: int = 20000, keep: int = 15000) -> None:
+        # Hysteresis: only trim once past max_lines, and cut down to `keep`
+        # (not max_lines) — trimming is amortized over 5000 lines of headroom
+        # instead of firing on every single print once the ceiling is hit.
         import io
-        s = self._io.getvalue()
-        if s.count("\n") > max_lines:
-            s = "\n".join(s.split("\n")[-max_lines:])
-            self._io = io.StringIO()
-            self._io.write(s)
-            self.console.file = self._io
+        lines = self._all_lines()
+        if len(lines) <= max_lines:
+            return
+        dropped = len(lines) - keep
+        s = "\n".join(lines[-keep:])
+        self._io = io.StringIO()
+        self._io.write(s)
+        self.console.file = self._io
+        self._lines_cache = (0, [""])
+        self._plain_cache = (0, [""])
+        # A scrolled-up reader keeps looking at the SAME content lines — the
+        # dropped count is subtracted from `_offset` so the viewport doesn't
+        # silently jump when the buffer is rewritten underneath it.
+        self._offset = max(0, self._offset - dropped)
 
     def dump(self) -> str:
         """The full session transcript (ANSI). Printed to real stdout on exit so

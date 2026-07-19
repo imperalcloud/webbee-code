@@ -603,6 +603,40 @@ def test_end_turn_and_abort_clear_remote_rows_in_place():
     assert rows == [] and s.remote_pending is rows
 
 
+# ── W1 front-3b: parked marathon keeps its kernel-queued rows visible ────────
+# A marathon PARK (runaway/consent/credits) ends the turn early, but the
+# kernel's OWN task queue stays alive server-side waiting for a wake — an
+# unconditional clear here would leave the panel empty over a non-empty
+# kernel queue (a lie). marathon_parked() arms a one-turn flag; end_turn
+# tags the rows `parked: True` instead of wiping them.
+
+def test_parked_end_turn_keeps_remote_rows_tagged():
+    s = _sink()
+    s.remote_pending.append({"origin": "telegram", "text": "do x", "iid": "i1"})
+    s.marathon_parked("runaway")
+    s.end_turn("")
+    assert s.remote_pending == [{"origin": "telegram", "text": "do x", "iid": "i1", "parked": True}]
+
+
+def test_normal_end_turn_still_clears_remote_rows():
+    s = _sink()
+    s.remote_pending.append({"origin": "telegram", "text": "do x", "iid": "i1"})
+    s.end_turn("")
+    assert s.remote_pending == []
+
+
+def test_begin_turn_clears_parked_flag_but_keeps_rows():
+    # begin_turn disarms the ONE-TURN parked flag (a fresh turn is not
+    # parked) without touching the rows themselves — the next run's own
+    # task_dequeued frames remove them by iid as the kernel drains.
+    s = _sink()
+    s.remote_pending.append({"origin": "telegram", "text": "do x", "iid": "i1"})
+    s.marathon_parked("runaway")
+    s.begin_turn()
+    assert s._parked is False
+    assert s.remote_pending == [{"origin": "telegram", "text": "do x", "iid": "i1"}]
+
+
 # ── 0.3.16: queue-panel single-source dedup (steer_iid reconciliation) ────────
 # The steer_iid minted at enqueue time is the ONE key both legs carry; the
 # display layer now consumes it too: a duplicated task_queued frame
@@ -788,3 +822,85 @@ def test_headless_todos_keep_the_full_inline_render():
     assert "📋 Todos (0/1)" in out and "▶" in out     # inline render as before
     assert s.current_todos == [{"content": "fix the bug",
                                 "status": "in_progress"}]   # twin state still kept
+
+
+# ---- reconnecting (W1 front-5) -----------------------------------------
+# Stream transport drops mid-turn; the toolbar's `⟳ reconnecting` state (see
+# tui.build_toolbar) is armed/cleared from here. A long outage (>300s) gets
+# ONE honest note on recovery — the durable stream may have trimmed frames
+# past our Last-Event-ID, so progress lines can be missing (work is NOT
+# lost). A mutable fake clock (the fixed `lambda: 0.0` other tests use can't
+# simulate elapsed time) drives the >300s branch deterministically.
+
+class _Clock:
+    def __init__(self):
+        self.t = 0.0
+    def __call__(self):
+        return self.t
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def test_reconnecting_arms_status_and_long_outage_note():
+    clock = _Clock()
+    s = RichSink(console=Console(record=True, width=80, force_terminal=False),
+                 live_enabled=False, input_fn=lambda p: "", clock=clock)
+    s.reconnecting(1, 2.0)
+    assert s.status()["reconnecting"] == 1
+    clock.advance(400)
+    s.reconnecting(0, 0.0)                   # back online after >300s
+    assert s.status()["reconnecting"] == 0
+    assert "reconnected after a long outage" in s.console.export_text()
+
+
+def test_reconnecting_clears_quietly_on_a_short_outage():
+    clock = _Clock()
+    s = RichSink(console=Console(record=True, width=80, force_terminal=False),
+                 live_enabled=False, input_fn=lambda p: "", clock=clock)
+    s.reconnecting(1, 2.0)
+    clock.advance(5)
+    s.reconnecting(0, 0.0)                   # back online well under 300s
+    assert s.status()["reconnecting"] == 0
+    assert "reconnected after a long outage" not in s.console.export_text()
+
+
+def test_begin_turn_resets_reconnecting_state():
+    clock = _Clock()
+    s = RichSink(console=Console(record=True, width=80, force_terminal=False),
+                 live_enabled=False, input_fn=lambda p: "", clock=clock)
+    s.reconnecting(2, 1.0)
+    assert s.status()["reconnecting"] == 2
+    s.begin_turn()
+    assert s.status()["reconnecting"] == 0
+
+
+# ── W1 task 6: an ERROR-terminated turn holds the type-ahead queue ───────────
+# mark_turn_failed() is a one-turn flag repl's error branch sets; the dock's
+# drain rule (tui._run_turn) reads it back via status()["turn_failed"] and
+# skips the drain. begin_turn() clears it — a fresh turn always starts clean.
+
+def test_mark_turn_failed_sets_status_flag():
+    s = _sink()
+    assert s.status()["turn_failed"] is False    # clean by default
+    s.mark_turn_failed()
+    assert s.status()["turn_failed"] is True
+
+
+def test_begin_turn_clears_turn_failed_flag():
+    s = _sink()
+    s.mark_turn_failed()
+    assert s.status()["turn_failed"] is True
+    s.begin_turn()
+    assert s.status()["turn_failed"] is False    # the NEXT turn always starts clean
+
+
+def test_end_turn_preserves_turn_failed_flag():
+    # FIX7b coverage: end_turn must NOT clear the flag -- the dock's drain
+    # rule reads status()["turn_failed"] to decide whether to hold the
+    # type-ahead queue, and repl.py calls mark_turn_failed() BEFORE end_turn()
+    # in its error branch. Only the NEXT begin_turn() (already covered above)
+    # resets it.
+    s = _sink()
+    s.mark_turn_failed()
+    s.end_turn("")
+    assert s.status()["turn_failed"] is True

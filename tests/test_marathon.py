@@ -122,7 +122,7 @@ def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X", frames=Non
         {"type": "marathon_complete", "task_id": "OURS", "text": "done"},
     ]
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         for _fr in _frames:
             yield _fr
 
@@ -131,11 +131,13 @@ def _run_marathon_capture_post(monkeypatch, tmp_path, goal="build X", frames=Non
     posted = {}
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): ...
         def json(self): return {"session_id": "marathon-user-1-rabc", "last_id": "0-0",
                                 "task_id": "OURS"}
 
     class _ResultResp:
+        status_code = 200
         def raise_for_status(self): ...
         def json(self): return {}
 
@@ -263,7 +265,7 @@ def test_normal_run_omits_marathon_fields(monkeypatch, tmp_path):
 
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "final", "task_id": "OURS", "text": "done"}
 
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
@@ -271,6 +273,7 @@ def test_normal_run_omits_marathon_fields(monkeypatch, tmp_path):
     posted = {}
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): ...
         def json(self): return {"session_id": "coding-user-1-1", "last_id": "0-0",
                                 "task_id": "OURS"}

@@ -100,6 +100,27 @@ def test_save_vectors_writes_data_before_manifest(tmp_path, monkeypatch):
     assert calls == ["embeddings.npy", "chunks.json"]
 
 
+def test_load_vectors_uses_mmap_and_skips_redundant_astype(tmp_path):
+    # F-Task15: embeddings.npy is always saved as float32 (save_vectors casts
+    # on the way in), so the unconditional .astype(np.float32) on every load
+    # was a redundant full-array RAM copy on top of the mmap read -- on a
+    # large repo's vector cache that's real memory pressure for no benefit.
+    # load_vectors must mmap (mmap_mode="r") and only copy via astype when
+    # the on-disk dtype actually mismatches float32.
+    c = str(tmp_path / "c")
+    ids = ["a.py#1-2", "b.py#1-2"]
+    mat = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32)
+    store.save_vectors(c, "rk", "gitA", "model2vec:potion", ids, mat)
+
+    got = store.load_vectors(c, "rk", "gitA", "model2vec:potion")
+    assert got is not None
+    got_ids, got_mat = got
+    assert got_ids == ids
+    assert got_mat.dtype == np.float32
+    assert isinstance(got_mat, np.memmap)          # no RAM copy for the common case
+    np.testing.assert_array_equal(got_mat, mat)
+
+
 def test_vectors_roundtrip_gated(tmp_path):
     c = str(tmp_path / "c")
     ids = ["a.py#1-2"]; mat = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)

@@ -1,4 +1,6 @@
 import asyncio
+import time
+from collections import OrderedDict, deque
 
 from webbee.coding_context import build_coding_context, detect_verify_cmd
 from webbee.consent import _retire, race_consent
@@ -19,6 +21,76 @@ from webbee.frames import (
 )
 
 
+# W1 Task 10 (own-task watchdog): a test seam for the deduped-twin-hang clock
+# below -- monkeypatched as `webbee.session._monotonic` so a test can drive
+# elapsed-time without a real sleep.
+_monotonic = time.monotonic
+
+# Deduped-twin hang (W1 front-3b): a turn's task_id can be ring-dropped
+# kernel-side as an at-least-once twin, so the shared stream carries ONLY
+# frames tagged with OTHER task_ids while this turn's own task_id never
+# appears. Left alone the dock spins "working" forever. Past this many
+# seconds of foreign-only traffic with zero own frames, end the turn honestly.
+_FOREIGN_ONLY_DEADLINE_S = 90.0
+
+
+_SEEN_KEEP = 64   # kernel re-dispatch only ever targets the CURRENT pending
+                  # req_id -- a small recency window is enough; unbounded full
+                  # results (file bodies, bash output) were the many-hour-
+                  # marathon RAM leak (W1 front-1).
+
+
+def _remember(seen: OrderedDict, rid, out) -> None:
+    """LRU-bounded store for `seen` -- the run() dedup cache. A (re-)store
+    always counts as the most-recent touch; the least-recently-touched entry
+    is evicted once the store grows past _SEEN_KEEP."""
+    seen[rid] = out
+    seen.move_to_end(rid)
+    while len(seen) > _SEEN_KEEP:
+        seen.popitem(last=False)
+
+
+def _is_transient_status(status: int) -> bool:
+    return status >= 500 or status in (408, 429)
+
+
+def _transient_exceptions():
+    # Lazy import (module-level `import httpx` would move httpx's cost to CLI
+    # boot -- session.py is imported by repl.py at module top, and the rest of
+    # this module already keeps httpx as a run()-local, boot-time-optimization
+    # import). `except <call expression>` is valid Python -- the call just
+    # has to happen on every except test, which is cheap (import is memoized).
+    import httpx
+    return (httpx.HTTPError, OSError)
+
+
+async def _transient_retry(send, *, attempts: int = 5, base: float = 1.0, cap: float = 8.0):
+    """Bounded transient-retry for gateway WRITE calls (turn-start POST): a
+    502 during a deploy must not kill the turn. Verdict/normal statuses return
+    immediately; TRANSPORT errors (httpx.HTTPError/OSError) and 5xx/408/429
+    retry with capped backoff -- anything else (a bug in the caller) is not a
+    transient condition and must surface immediately, not be retried 5x.
+    The LAST failure is returned/raised for the caller's raise_for_status."""
+    backoff = base
+    last_exc = None
+    last_resp = None
+    n = max(1, attempts)
+    for i in range(n):
+        try:
+            resp = await send()
+            if not _is_transient_status(resp.status_code):
+                return resp
+            last_resp, last_exc = resp, None
+        except _transient_exceptions() as e:
+            last_exc, last_resp = e, None
+        if i < n - 1:               # never sleep after the FINAL attempt
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, cap)
+    if last_exc is not None:
+        raise last_exc
+    return last_resp
+
+
 class AgentSession:
     """Client-side driver for one coding turn against the Imperal cloud.
     The brain runs server-side; this is the hands — it streams kernel-
@@ -36,7 +108,7 @@ class AgentSession:
         self.workspace_root = workspace_root
         self.mode = mode
         self.session_id: str = ""
-        self.steps: list = []
+        self.steps: deque = deque(maxlen=200)
         self._task_id: str = ""
         self._intel = intel  # IntelService, or None (base install / boot failure)
         self._shadow = shadow  # ShadowGit, or None (git unavailable / boot failure)
@@ -48,9 +120,19 @@ class AgentSession:
     async def run(self, task: str, sink, *, marathon: bool = False, goal: str = "",
                   surface: str = "", steer_iid: str = "") -> str:
         import httpx
+        from uuid import uuid4
 
         from webbee.tools import LocalToolExecutor
         from imperal_mcp.client import ImperalClient
+
+        # FIX1 (W1 final review): every turn-start POST needs a stable dedup
+        # key. A typed turn mints its own (steer_iid arrives empty); a steer
+        # pickup keeps the queue entry's OWN id. Either way, _transient_retry
+        # below re-sends this SAME closure -- so a retry after an ambiguous
+        # failure (timeout / edge-504 whose first attempt may have already
+        # landed) carries the IDENTICAL key, and the kernel's steer-iid ring
+        # drops the twin instead of executing the instruction twice.
+        steer_iid = steer_iid or uuid4().hex
 
         # Offload to a worker thread — build_coding_context runs sync
         # subprocess.run(git status, timeout=10) + os.walk; inline on the dock's
@@ -73,31 +155,30 @@ class AgentSession:
             # [surface] tags). Additive-only -- a typed turn's body is
             # byte-identical to before.
             body["surface"] = surface
-        if steer_iid:
-            # steer-iid-dedup: a pickup also carries the queued item's dedup id
-            # so the kernel's ring can drop an at-least-once twin. Same
-            # additive-only contract -- a typed turn has none, key omitted.
-            body["steer_iid"] = steer_iid
+        # steer-iid-dedup: ALWAYS present now (FIX1 above) -- W1 turn-start
+        # retries need the ring dedup, so a typed turn's minted id rides the
+        # body exactly like a pickup's own id. No longer additive-only for
+        # this key (surface/marathon/goal above still are).
+        body["steer_iid"] = steer_iid
         if marathon:
             body["marathon"] = True
             body["goal"] = goal
 
         headers = await self._headers()
         async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:
-            resp = await client.post(
-                "/v1/agent/sessions",
-                json=body,
-                headers=headers,
-            )
+            resp = await _transient_retry(lambda: client.post(
+                "/v1/agent/sessions", json=body, headers=headers))
             resp.raise_for_status()
             _sess = resp.json()
             session_id = _sess["session_id"]
             start_id = _sess.get("last_id", "0-0")
             self.session_id = session_id
             self._task_id = _sess.get("task_id", "")
-            self.steps = []
+            self.steps = deque(maxlen=200)
 
-            seen: dict = {}  # req_id -> already-posted result (at-least-once dedup)
+            seen: OrderedDict = OrderedDict()  # req_id -> already-posted result
+                                                # (at-least-once dedup); LRU-64 via
+                                                # _remember -- see _SEEN_KEEP.
             # Slice-5 T9: id-sets shared across BOTH vocabularies for EXT tools
             # (the kernel reuses the SAME tc["id"] as step_id there), so a step
             # announced by one vocabulary is never re-announced by its
@@ -111,7 +192,10 @@ class AgentSession:
             step_labels: dict = {}
             local_ids: set = set()
             from webbee.stream import stream_frames
-            stream = stream_frames(client, session_id, self._headers, start_id=start_id)
+            _fr = getattr(self.token_provider, "force_refresh", None)
+            _rc = getattr(sink, "reconnecting", None)
+            stream = stream_frames(client, session_id, self._headers, start_id=start_id,
+                                   force_refresh=_fr, on_retry=_rc)
             # Liveness A: explicit __anext__ pulls (not `async for`) so a
             # pending local consent can RACE the stream. Between iterations at
             # most ONE of carry_task/carry_frame is set — a consent race hands
@@ -120,6 +204,8 @@ class AgentSession:
             # won. Everything else is byte-identical to the old async-for.
             carry_task = None    # a still-pending __anext__ task (consent won)
             carry_frame = None   # an already-pulled frame (the stream won)
+            _t0 = _monotonic()   # W1 Task 10: own-task watchdog start
+            _own_frames = False  # -> True the instant ANY non-foreign frame lands
             try:
                 while True:
                     if carry_frame is not None:
@@ -143,7 +229,20 @@ class AgentSession:
                     # turn's progress) now render ONE tagged, display-only line.
                     if _is_foreign_frame(frame, self._task_id):
                         render_foreign_frame(frame, sink)
+                        if (not _own_frames and self._task_id
+                                and _monotonic() - _t0 > _FOREIGN_ONLY_DEADLINE_S):
+                            # Deduped-twin hang (W1 front-3b): the kernel ring
+                            # dropped this turn's task as a twin -- its task_id
+                            # will never appear on the stream. Foreign traffic
+                            # flowing + zero own frames is the signature; end
+                            # honestly instead of spinning "working" forever.
+                            _note = getattr(sink, "note", None)
+                            if _note is not None:
+                                _note("⚠ this message produced no work of its own "
+                                      "(likely a duplicate the kernel dropped) — done waiting")
+                            return ""
                         continue
+                    _own_frames = True
 
                     # Live steer topology: a Telegram/panel-steered turn keeps THIS
                     # client's task_id (the terminal stays the sole executor) with
@@ -155,6 +254,7 @@ class AgentSession:
                         rid = frame.get("req_id")
                         sid = str(rid or "")
                         if rid in seen:
+                            seen.move_to_end(rid)
                             out = seen[rid]
                         else:
                             # UI rendering is guarded so it can never block the
@@ -175,12 +275,13 @@ class AgentSession:
                                                        "ok": bool(res.get("ok"))})
                                 except Exception:
                                     pass
-                            seen[rid] = out
+                            _remember(seen, rid, out)
                         await self._post_result(client, session_id, out)
 
                     elif ftype == "confirm_request":
                         rid = frame.get("req_id")
                         if rid in seen:
+                            seen.move_to_end(rid)
                             await self._post_result(client, session_id, seen[rid])
                         else:
                             if self.mode == "plan":
@@ -195,7 +296,7 @@ class AgentSession:
                             if race.stream_ended:
                                 break
                             if race.out is not None:
-                                seen[rid] = race.out
+                                _remember(seen, rid, race.out)
                                 await self._post_result(client, session_id, race.out)
 
                     elif ftype == "panel_release_required":
@@ -269,7 +370,19 @@ class AgentSession:
                         if ftype == "marathon_paused":
                             # Parked (out-of-credits / consent / runaway) -> end the
                             # turn so the dock leaves "working"; the note shows why, and
-                            # the run resumes on the user's next reply.
+                            # the run resumes on the user's next reply. The kernel's task
+                            # queue stays alive server-side while parked -- tell the sink
+                            # via marathon_parked() so end_turn keeps the queue-panel's
+                            # remote rows (tagged parked) instead of wiping them (W1
+                            # front-3b: an empty panel over a non-empty kernel queue lies).
+                            # getattr-guarded like every other sink hook here: a minimal
+                            # sink drops it, a crashing hook never breaks the turn.
+                            _parked = getattr(sink, "marathon_parked", None)
+                            if _parked is not None:
+                                try:
+                                    _parked(str(frame.get("reason", "") or ""))
+                                except Exception:
+                                    pass
                             return ""
 
                     elif ftype == "final":
@@ -289,15 +402,25 @@ class AgentSession:
 
         return ""
 
+    _result_delays = (0.5, 2.0, 5.0)   # class attr — tests override per instance
+
     async def _post_result(self, client, session_id: str, out: dict) -> None:
-        # Best-effort: a result POST must NEVER raise into the stream loop — that
-        # would abort the turn and leave the kernel's dispatch hanging (frozen
-        # dock). On a transient failure the kernel's tool-wait timeout recovers.
-        try:
-            headers = await self._headers()
-            await client.post(f"/v1/agent/sessions/{session_id}/result", json=out, headers=headers)
-        except Exception:
-            pass
+        # Never raises into the stream loop. W1: bounded transient retries —
+        # the kernel dedups by req_id, so a duplicate post is safe, and this
+        # cuts outage recovery from the kernel's tool-wait expiry (up to
+        # 65min for bash) to seconds. Final fallback unchanged: give up
+        # silently, kernel re-dispatches the same req_id.
+        for delay in (0.0,) + tuple(self._result_delays):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                headers = await self._headers()
+                r = await client.post(f"/v1/agent/sessions/{session_id}/result",
+                                      json=out, headers=headers)
+                if r.status_code < 500:
+                    return
+            except Exception:
+                continue
 
     async def stop(self) -> None:
         """P5g: server-side stop for Esc/Ctrl-C. Posts a cancel for the
