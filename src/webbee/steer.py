@@ -81,7 +81,11 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                           submit, marathon: bool = True,
                           live_session_id=lambda: "",
                           on_mode=None,
-                          interval: float = _POLL_INTERVAL) -> None:
+                          interval: float = _POLL_INTERVAL,
+                          client=None,
+                          idle_after_s: float = 300.0,
+                          idle_interval: float = 30.0,
+                          _monotonic=None) -> None:
     """Run forever (until cancelled): every ~`interval`s of idle time, drain
     the pending-steer queue and hand the FIRST item to
     `submit(text, surface, steer_iid)` -- the repl's normal turn path. Seams
@@ -105,16 +109,34 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                             submitted, so the flip governs the turn it rode
                             in with. Must never block the poller: the repl's
                             wiring applies downgrades instantly and spawns
-                            the autopilot local-confirm as its own task."""
+                            the autopilot local-confirm as its own task.
+      * client            -- the repl's shared keep-alive AsyncClient (Task
+                            12), threaded into fetch_pending_steer so an idle
+                            terminal stops opening a fresh TCP+TLS handshake
+                            every tick, forever. None (tests / no repl-owned
+                            client) keeps today's per-call client.
+
+    Adaptive cadence (Task 12): after `idle_after_s` (default 5 minutes)
+    without activity, the tick relaxes from `interval` (4s) to
+    `idle_interval` (30s) -- an idle terminal stops hammering the gateway.
+    Activity (a busy tick, a successful fetch that returned items, or a
+    submitted item) resets the clock back to the fast cadence. The failure
+    backoff multiplier applies to whichever base is active. `_monotonic` is a
+    test seam (defaults to time.monotonic)."""
     from webbee.thread import fetch_pending_steer
+    import time
+    now = _monotonic or time.monotonic
     derived = ""
     backlog: deque = deque()
     failures = 0    # consecutive fetch/auth failures -> backoff (a logged-out
                     # terminal must not hammer the token-refresh path every 4s)
+    last_active = now()
     while True:
-        await asyncio.sleep(min(interval * (2 ** min(failures, 4)), 60.0))
+        base = interval if (now() - last_active) < idle_after_s else idle_interval
+        await asyncio.sleep(min(base * (2 ** min(failures, 4)), 60.0))
         try:
             if is_busy():
+                last_active = now()      # a running turn = activity
                 continue
             if not backlog:
                 sid = live_session_id()
@@ -123,7 +145,13 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                         derived = await derive_session_id(
                             cfg, token_provider, workspace, marathon=marathon)
                     sid = derived
-                payload = await fetch_pending_steer(cfg, token_provider, sid) or {}
+                # Old-style test doubles for fetch_pending_steer don't accept
+                # a client kwarg -- only pass it when the repl actually gave
+                # us one, so back-compat call sites stay untouched.
+                fetch_kw = {"client": client} if client is not None else {}
+                payload = await fetch_pending_steer(cfg, token_provider, sid, **fetch_kw) or {}
+                if payload.get("items"):
+                    last_active = now()  # a successful drain = activity
                 backlog.extend(payload.get("items") or [])
                 if _consume_mode(payload, on_mode):
                     # Yield ONE loop cycle so a just-spawned local confirm
@@ -140,6 +168,7 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
             if is_busy():
                 backlog.appendleft(item)  # a local line won the race -- defer, don't drop
                 continue
+            last_active = now()          # an item arrived = activity
             await submit(text, str(item.get("surface") or "telegram"),
                          str(item.get("iid") or ""))
             if _cancel_absorbed():

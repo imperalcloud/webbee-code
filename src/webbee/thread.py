@@ -35,17 +35,37 @@ def conversational_text(content) -> str:
     return text[:cut].strip()
 
 
-async def fetch_recent_thread(cfg, token_provider, session_id: str) -> list[dict]:
-    import httpx
-    token = await token_provider()
-    async with httpx.AsyncClient(base_url=cfg.api_url, timeout=10) as c:
-        r = await c.get(f"/v1/agent/sessions/{session_id}/thread",
-                        headers={"Authorization": f"Bearer {token}"})
+async def _request(cfg, client, method: str, path: str, *, token: str, json=None):
+    """Shared HTTP leg for the three functions below. With a `client` (the
+    repl's shared keep-alive AsyncClient) reuse it — no new TCP+TLS handshake.
+    Without one, fall back to today's ephemeral per-call client (unchanged
+    behavior for existing callers/tests, method-for-method: GET uses .get,
+    everything else uses .post with the given json body)."""
+    headers = {"Authorization": f"Bearer {token}"}
+    if client is not None:
+        r = await client.request(method, path, json=json, headers=headers)
         r.raise_for_status()
-        return (r.json() or {}).get("messages", [])
+        return r
+    import httpx
+    async with httpx.AsyncClient(base_url=cfg.api_url, timeout=10) as c:
+        if method == "GET":
+            r = await c.get(path, headers=headers)
+        else:
+            r = await c.post(path, json=json, headers=headers)
+        r.raise_for_status()
+        return r
 
 
-async def fetch_pending_steer(cfg, token_provider, session_id: str) -> dict:
+async def fetch_recent_thread(cfg, token_provider, session_id: str, *, client=None) -> list[dict]:
+    """Recent tail of the durable per-user thread, for boot replay. `client=`
+    reuses the repl's shared keep-alive client; None keeps the per-call
+    client."""
+    token = await token_provider()
+    r = await _request(cfg, client, "GET", f"/v1/agent/sessions/{session_id}/thread", token=token)
+    return (r.json() or {}).get("messages", [])
+
+
+async def fetch_pending_steer(cfg, token_provider, session_id: str, *, client=None) -> dict:
     """Drain this user's pending-steer state (idle-steer pickup, liveness v2
     §B + full-queue-layer mode adoption) -- the /thread endpoint's sibling,
     same auth. Returns the gateway payload verbatim:
@@ -58,18 +78,15 @@ async def fetch_pending_steer(cfg, token_provider, session_id: str) -> dict:
                             null (GETDEL on the gateway -- delivered exactly
                             once; older gateways omit the key entirely).
     Non-swallowing like fetch_recent_thread above: the poller (webbee.steer)
-    wraps each tick in its own try/except."""
-    import httpx
+    wraps each tick in its own try/except. `client=` reuses the repl's shared
+    keep-alive client; None keeps the per-call client."""
     token = await token_provider()
-    async with httpx.AsyncClient(base_url=cfg.api_url, timeout=10) as c:
-        r = await c.get(f"/v1/agent/sessions/{session_id}/pending-steer",
-                        headers={"Authorization": f"Bearer {token}"})
-        r.raise_for_status()
-        return r.json() or {}
+    r = await _request(cfg, client, "GET", f"/v1/agent/sessions/{session_id}/pending-steer", token=token)
+    return r.json() or {}
 
 
 async def inject_to_session(cfg, token_provider, session_id: str, text: str,
-                            steer_iid: str) -> bool:
+                            steer_iid: str, *, client=None) -> bool:
     """Mid-turn inject (0.3.15): POST an Enter-while-busy line straight into
     the user's OWN running session — `/v1/agent/sessions/{id}/inject`, body
     `{text, steer_iid}`. The gateway signals a task_id-LESS new_task, so the
@@ -78,15 +95,12 @@ async def inject_to_session(cfg, token_provider, session_id: str, text: str,
     the given steer_iid rides the kernel's dedup ring. Returns True only when
     the gateway accepted it ({ok: true}). Non-swallowing like its siblings
     above — the repl wiring wraps it and falls back to the local type-ahead
-    queue on any failure."""
-    import httpx
+    queue on any failure. `client=` reuses the repl's shared keep-alive
+    client; None keeps the per-call client."""
     token = await token_provider()
-    async with httpx.AsyncClient(base_url=cfg.api_url, timeout=10) as c:
-        r = await c.post(f"/v1/agent/sessions/{session_id}/inject",
-                         json={"text": text, "steer_iid": steer_iid},
-                         headers={"Authorization": f"Bearer {token}"})
-        r.raise_for_status()
-        return bool((r.json() or {}).get("ok"))
+    r = await _request(cfg, client, "POST", f"/v1/agent/sessions/{session_id}/inject",
+                       token=token, json={"text": text, "steer_iid": steer_iid})
+    return bool((r.json() or {}).get("ok"))
 
 
 def truncate_for_display(text, limit: int = _DISPLAY_LIMIT) -> str:

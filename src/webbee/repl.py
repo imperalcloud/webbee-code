@@ -58,7 +58,7 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
 
 
 async def _inject_via_gateway(cfg, token_provider, agent, sink,
-                              text: str, steer_iid: str) -> bool:
+                              text: str, steer_iid: str, client=None) -> bool:
     """The gateway leg of the dock's Enter-while-busy fly-in (mid-turn inject,
     0.3.15): POST the line straight into the agent's LIVE running session so
     the marathon absorbs it at the next brain step (seconds), instead of
@@ -67,13 +67,18 @@ async def _inject_via_gateway(cfg, token_provider, agent, sink,
     echo drives the panel row. False on ANY failure (no live session yet,
     network, auth, gateway refusal) — the dock then falls back to today's
     local type-ahead queue (tui._inject_or_queue), carrying the same iid so
-    the kernel ring dedups a twin. Module-level so tests drive it directly."""
+    the kernel ring dedups a twin. Module-level so tests drive it directly.
+    `client=` (Task 12) reuses the repl's shared keep-alive AsyncClient; None
+    keeps the per-call client (existing direct tests of this function)."""
     sid = getattr(agent, "session_id", "")
     if not sid:
         return False
     try:
         from webbee.thread import inject_to_session
-        ok = await inject_to_session(cfg, token_provider, sid, text, steer_iid)
+        # Old-style test doubles for inject_to_session don't accept a client
+        # kwarg -- only pass it when the repl actually gave us one.
+        inject_kw = {"client": client} if client is not None else {}
+        ok = await inject_to_session(cfg, token_provider, sid, text, steer_iid, **inject_kw)
     except Exception:
         return False
     if ok:
@@ -123,6 +128,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
 
     from webbee.tokens import make_token_provider
     token_provider = make_token_provider(cfg, auth)
+
+    from webbee import http as _http
+    shared_client = None  # created in _boot (needs the running loop); Task 12:
+                          # ONE keep-alive AsyncClient for the poller/inject/
+                          # thread-replay calls instead of a fresh TCP+TLS
+                          # handshake per call.
 
     # Prod dock path = the default reader + a real tty + no injected sink; tests
     # inject sink/read_line and take the plain fallback loop.
@@ -383,8 +394,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 _t.cancel()
 
     async def _boot(s) -> None:
-        nonlocal _sink, agent, intel, watcher_task, shadow, steer_task
+        nonlocal _sink, agent, intel, watcher_task, shadow, steer_task, shared_client
         _sink = s
+        # Task 12: the repl-lifetime keep-alive client (needs the running
+        # loop, hence created here rather than at the top of run_repl).
+        shared_client = _http.make_client(cfg)
         # Queue-panel single-source dedup (0.3.16): hand the sink the SAME
         # type-ahead deque tui mutates, so a kernel task_queued echo can
         # promote a landed local twin (matched by steer_iid) into the one
@@ -418,7 +432,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             cfg, token_provider, workspace=workspace, marathon=not once,
             is_busy=_poller_busy,
             live_session_id=lambda: getattr(agent, "session_id", ""),
-            submit=_steer_submit, on_mode=_on_mode))
+            submit=_steer_submit, on_mode=_on_mode, client=shared_client))
 
     if use_dock:
         ok = False
@@ -457,11 +471,17 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         remote_pending=getattr(_sink, "remote_pending", None),
                         todos=getattr(_sink, "current_todos", None),
                         inject=lambda text, iid: _inject_via_gateway(
-                            cfg, token_provider, agent, _sink, text, iid),
+                            cfg, token_provider, agent, _sink, text, iid,
+                            client=shared_client),
                         turn=turn_ref,
                     )
                 finally:
                     _cancel_background()
+                    if shared_client is not None:
+                        try:
+                            await shared_client.aclose()
+                        except Exception:
+                            pass
         except Exception:
             ok = False
         finally:
@@ -496,3 +516,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 return
     finally:
         _cancel_background()
+        if shared_client is not None:
+            try:
+                await shared_client.aclose()
+            except Exception:
+                pass

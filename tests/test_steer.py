@@ -412,3 +412,51 @@ def test_requested_mode_without_on_mode_seam_is_ignored(monkeypatch):
                               interval=0.01),
            until=lambda: submitted)
     assert submitted == ["go"]
+
+
+# ── adaptive idle cadence (Task 12: 4s→30s after 5 quiet minutes) ────────────
+# poll_idle_steer's sleep is the FIRST statement of the loop, so a fake
+# asyncio.sleep both records the requested duration and drives a fake
+# monotonic clock -- no real waiting, fully deterministic.
+
+def test_adaptive_interval_relaxes_after_idle_and_resets_on_activity(monkeypatch):
+    """Drive poll_idle_steer with a fake clock/sleep recorder: first ticks use
+    4s; after 300 fake-idle seconds the recorded sleep is 30s; a submitted
+    item resets the next sleep to 4s."""
+    sleeps = []
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        return clock["t"]
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            clock["t"] = 301.0   # simulate 300+s of wall-clock idle between ticks
+        if len(sleeps) >= 5:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(SP.asyncio, "sleep", fake_sleep)
+
+    calls = {"n": 0}
+
+    async def fake_fetch(cfg, tp, session_id):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            return {"items": [{"text": "resume", "surface": "telegram", "ts": 1}]}
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    with contextlib.suppress(asyncio.CancelledError):
+        asyncio.run(SP.poll_idle_steer(
+            _Cfg(), _tp, workspace=".", is_busy=lambda: False, submit=submit,
+            live_session_id=lambda: "marathon-u-r1", _monotonic=fake_monotonic))
+
+    assert sleeps[:2] == [4.0, 4.0]      # idle-fresh cadence (_POLL_INTERVAL default)
+    assert sleeps[2:4] == [30.0, 30.0]   # relaxed after 300 idle seconds
+    assert sleeps[4] == 4.0              # a submitted item resets the cadence
