@@ -836,6 +836,34 @@ def test_remote_mode_unknown_or_noop_is_dropped(monkeypatch):
     assert not any(n.startswith("mode →") for n in sink.notes)
 
 
+def test_poller_busy_ignores_stale_busy_flag_when_task_dead():
+    """sink.is_busy() True but turn_ref['task'] is a DONE future ⇒
+    _gate_busy() False (the 0.3.8-class stuck-flag no longer starves the
+    idle-steer poller)."""
+    from webbee.repl import _gate_busy
+
+    class BusySink(FakeSink):
+        def is_busy(self): return True
+
+    class _DoneTask:
+        def done(self): return True
+
+    assert _gate_busy(BusySink(), {"task": _DoneTask()}) is False
+
+
+def test_poller_busy_true_while_task_alive():
+    """sink busy + a pending future ⇒ True (unchanged)."""
+    from webbee.repl import _gate_busy
+
+    class BusySink(FakeSink):
+        def is_busy(self): return True
+
+    class _PendingTask:
+        def done(self): return False
+
+    assert _gate_busy(BusySink(), {"task": _PendingTask()}) is True
+
+
 def test_steer_poller_busy_gate_also_holds_while_local_prompt_armed(monkeypatch):
     # The autopilot confirm arms the same pinned-input future a consent uses;
     # the poller must hold off then (a steer turn under an armed prompt could

@@ -283,7 +283,8 @@ def _arrow_down_action(event, buf, sel: dict, n: int, busy: bool) -> None:
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                       is_busy, consent_pending, resolve_consent, steps_nav=None,
                       stop_turn=None, pending=None, queued_run=None,
-                      remote_pending=None, todos=None, inject=None) -> bool:
+                      remote_pending=None, todos=None, inject=None,
+                      turn=None) -> bool:
     """The full-screen dock: `pane` fills the top (scrollable), a bordered input
     box + toolbar are FIXED at the bottom. Enter either resolves a pending
     consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
@@ -311,6 +312,11 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     queue on failure — see _inject_or_queue). `todos` is the sink-owned
     current-checklist list (RichSink.current_todos): a STICKY panel above the
     queue panel renders it live (todo_panel builders), zero rows when empty.
+    `turn` (lockout-proof poller gate) lets the CALLER share its own turn
+    dict (same object, keys `task`/`stopped`) instead of a private one --
+    the repl passes its `turn_ref` so `_poller_busy` can read whether the
+    turn task is genuinely alive, mirroring `_busy_live` below; omitted, a
+    local dict is used (tests that don't care about the shared gate).
     Returns True on clean exit; False if prompt_toolkit is unavailable (caller
     uses the plain fallback loop)."""
     try:
@@ -327,7 +333,9 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         return False
 
     buf = Buffer(multiline=False)
-    turn = {"task": None}
+    if turn is None:
+        turn = {"task": None}   # caller-shared (repl's poller gate reads it)
+    turn.setdefault("task", None)
     if pending is None:
         pending = deque()   # type-ahead queue: lines submitted while a turn runs
     if remote_pending is None:

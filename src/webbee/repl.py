@@ -81,6 +81,26 @@ async def _inject_via_gateway(cfg, token_provider, agent, sink,
     return ok
 
 
+def _gate_busy(sink, turn_ref: dict) -> bool:
+    """Pure predicate behind `_poller_busy` (module-level so tests drive it
+    directly, unlike the run_repl closure) -- LOCKOUT-PROOF like
+    tui._busy_live: busy counts only while the turn TASK recorded in
+    `turn_ref` is genuinely alive. A BaseException-class escape (or a raise
+    inside end_turn) that leaves the sink's _busy flag stuck must no longer
+    starve the idle-steer poller. `turn_ref` is populated ONLY on the dock
+    path (the SAME dict object shared into tui.run_session); the fallback
+    loop leaves it at {"task": None} forever, so the raw flag governs there
+    (its end_turn paths are deterministic)."""
+    busy = bool(getattr(sink, "is_busy", None) and sink.is_busy())
+    t = turn_ref.get("task")
+    if busy and t is not None and t.done():
+        busy = False
+    if busy:
+        return True
+    cp = getattr(sink, "consent_pending", None)
+    return bool(cp and cp())
+
+
 async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None, read_line=input,
                    agent_factory=None, auth=None, account_fetcher=None,
                    sessions_client=None, intel_factory=None, shadow_factory=None) -> None:
@@ -112,6 +132,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     # and /queue clear (dispatched through CommandContext.queued, same
     # mechanism /status uses for session state) see the live deque.
     pending_queue: deque = deque()
+    # Shared with tui.run_session on the dock path ONLY (same dict object):
+    # the poller's lockout-proof busy gate reads whether the turn TASK
+    # recorded here is genuinely alive, mirroring tui._busy_live. The
+    # fallback loop never touches this -- it stays {"task": None} and
+    # _gate_busy falls back to the raw sink flag there.
+    turn_ref: dict = {"task": None}
     _sink = None         # assigned by _boot
     agent = None         # assigned by _boot
     intel = None         # assigned by _boot -- IntelService, or None (off/base-install/boot failure)
@@ -300,15 +326,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         await _run_turn(text, surface=surface, steer_iid=steer_iid)
 
     def _poller_busy() -> bool:
-        """The idle-steer poller's busy gate: the sink's live turn state PLUS
-        an armed local prompt (the autopilot confirm arms the same pinned-
-        input future a consent uses) -- submitting a steer turn under an
-        armed prompt could double-prompt the input, so the poller holds off
-        until it resolves. Both hooks getattr-guarded (minimal test sinks)."""
-        if bool(getattr(_sink, "is_busy", None) and _sink.is_busy()):
-            return True
-        cp = getattr(_sink, "consent_pending", None)
-        return bool(cp and cp())
+        """The idle-steer poller's busy gate: the sink's live turn state
+        (now LOCKOUT-PROOF via _gate_busy -- a dead turn task overrides a
+        stuck busy flag) PLUS an armed local prompt (the autopilot confirm
+        arms the same pinned-input future a consent uses) -- submitting a
+        steer turn under an armed prompt could double-prompt the input, so
+        the poller holds off until it resolves. Both hooks getattr-guarded
+        (minimal test sinks)."""
+        return _gate_busy(_sink, turn_ref)
 
     def _on_mode(mode: str, surface: str) -> None:
         """Remote coding-mode request (TG/panel → gateway one-shot req_mode →
@@ -433,6 +458,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         todos=getattr(_sink, "current_todos", None),
                         inject=lambda text, iid: _inject_via_gateway(
                             cfg, token_provider, agent, _sink, text, iid),
+                        turn=turn_ref,
                     )
                 finally:
                     _cancel_background()

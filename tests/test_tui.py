@@ -787,6 +787,63 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
     asyncio.run(scenario())
 
 
+def test_run_session_uses_caller_turn_dict():
+    # The repl shares turn_ref with tui.run_session (the poller's lockout-
+    # proof gate reads THIS dict) -- when the caller passes turn=, run_session
+    # must mutate the SAME object, not a private one of its own.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        gate = asyncio.Event()
+        busy = {"v": False}
+        caller_turn = {"task": None}
+
+        async def on_line(text):
+            busy["v"] = True
+            await gate.wait()
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    turn=caller_turn))
+                await asyncio.sleep(0.05)
+                pipe.send_text("hello\r")
+                await _until(lambda: busy["v"])
+                # the SAME dict object the caller holds now carries the live
+                # task -- exactly what the repl's poller gate reads.
+                assert caller_turn["task"] is not None
+                assert not caller_turn["task"].done()
+                gate.set()
+                await _until(lambda: caller_turn["task"] is None)   # cleared on completion
+                pipe.send_text("\x04")                              # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 def test_error_turn_holds_queue():
     # THE other half of the drain rule (W1 task 6): an ERROR-terminated turn
     # must hold the queue exactly like a user stop does -- a broken backend
