@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections import OrderedDict, deque
 
 from webbee.coding_context import build_coding_context, detect_verify_cmd
 from webbee.consent import _retire, race_consent
@@ -31,6 +32,22 @@ _monotonic = time.monotonic
 # appears. Left alone the dock spins "working" forever. Past this many
 # seconds of foreign-only traffic with zero own frames, end the turn honestly.
 _FOREIGN_ONLY_DEADLINE_S = 90.0
+
+
+_SEEN_KEEP = 64   # kernel re-dispatch only ever targets the CURRENT pending
+                  # req_id -- a small recency window is enough; unbounded full
+                  # results (file bodies, bash output) were the many-hour-
+                  # marathon RAM leak (W1 front-1).
+
+
+def _remember(seen: OrderedDict, rid, out) -> None:
+    """LRU-bounded store for `seen` -- the run() dedup cache. A (re-)store
+    always counts as the most-recent touch; the least-recently-touched entry
+    is evicted once the store grows past _SEEN_KEEP."""
+    seen[rid] = out
+    seen.move_to_end(rid)
+    while len(seen) > _SEEN_KEEP:
+        seen.popitem(last=False)
 
 
 def _is_transient_status(status: int) -> bool:
@@ -77,7 +94,7 @@ class AgentSession:
         self.workspace_root = workspace_root
         self.mode = mode
         self.session_id: str = ""
-        self.steps: list = []
+        self.steps: deque = deque(maxlen=200)
         self._task_id: str = ""
         self._intel = intel  # IntelService, or None (base install / boot failure)
         self._shadow = shadow  # ShadowGit, or None (git unavailable / boot failure)
@@ -133,9 +150,11 @@ class AgentSession:
             start_id = _sess.get("last_id", "0-0")
             self.session_id = session_id
             self._task_id = _sess.get("task_id", "")
-            self.steps = []
+            self.steps = deque(maxlen=200)
 
-            seen: dict = {}  # req_id -> already-posted result (at-least-once dedup)
+            seen: OrderedDict = OrderedDict()  # req_id -> already-posted result
+                                                # (at-least-once dedup); LRU-64 via
+                                                # _remember -- see _SEEN_KEEP.
             # Slice-5 T9: id-sets shared across BOTH vocabularies for EXT tools
             # (the kernel reuses the SAME tc["id"] as step_id there), so a step
             # announced by one vocabulary is never re-announced by its
@@ -211,6 +230,7 @@ class AgentSession:
                         rid = frame.get("req_id")
                         sid = str(rid or "")
                         if rid in seen:
+                            seen.move_to_end(rid)
                             out = seen[rid]
                         else:
                             # UI rendering is guarded so it can never block the
@@ -231,12 +251,13 @@ class AgentSession:
                                                        "ok": bool(res.get("ok"))})
                                 except Exception:
                                     pass
-                            seen[rid] = out
+                            _remember(seen, rid, out)
                         await self._post_result(client, session_id, out)
 
                     elif ftype == "confirm_request":
                         rid = frame.get("req_id")
                         if rid in seen:
+                            seen.move_to_end(rid)
                             await self._post_result(client, session_id, seen[rid])
                         else:
                             if self.mode == "plan":
@@ -251,7 +272,7 @@ class AgentSession:
                             if race.stream_ended:
                                 break
                             if race.out is not None:
-                                seen[rid] = race.out
+                                _remember(seen, rid, race.out)
                                 await self._post_result(client, session_id, race.out)
 
                     elif ftype == "panel_release_required":

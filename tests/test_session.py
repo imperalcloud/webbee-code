@@ -328,7 +328,7 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
     assert executor_calls == [("read_file", {}), ("write_file", {})]
     assert posts[0] == "/v1/agent/sessions"
     assert posts.count("/v1/agent/sessions/sid1/result") == 3  # r1, r1-dup, r2
-    assert sess.steps == [
+    assert list(sess.steps) == [
         {"step_id": "r1", "label": "read_file", "ok": True},
         {"step_id": "r2", "label": "write_file", "ok": True},
     ]
@@ -1296,3 +1296,53 @@ def test_foreign_only_watchdog_never_trips_before_the_deadline(monkeypatch):
     ]
 
     assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == "done"
+
+
+# ── W1 Task 13: session memory bounds (seen-LRU + steps cap) ────────────────
+
+def test_seen_is_lru_bounded():
+    # A many-hour marathon's `seen` dedup store must never retain every tool
+    # result body -- the kernel only ever re-dispatches the CURRENT pending
+    # req_id (presence-pause re-dispatch), so a small recency window covers
+    # it. Drive the extracted pure helper directly: after 70 distinct
+    # req_ids, only the most recent _SEEN_KEEP survive.
+    from collections import OrderedDict
+
+    from webbee.session import _SEEN_KEEP, _remember
+
+    seen: OrderedDict = OrderedDict()
+    for i in range(70):
+        _remember(seen, f"r{i}", {"n": i})
+    assert len(seen) == _SEEN_KEEP
+    assert "r69" in seen and "r0" not in seen
+
+
+def test_remember_move_to_end_on_re_store():
+    # A re-store of an already-seen req_id (e.g. the confirm_request branch
+    # re-storing the SAME rid the tool_request branch already cached) must
+    # refresh its recency -- it should NOT be evicted just because it was
+    # inserted early, as long as it keeps getting touched.
+    from collections import OrderedDict
+
+    from webbee.session import _SEEN_KEEP, _remember
+
+    seen: OrderedDict = OrderedDict()
+    for i in range(_SEEN_KEEP):
+        _remember(seen, f"r{i}", {"n": i})
+    _remember(seen, "r0", {"n": "touched"})   # re-store the oldest entry
+    _remember(seen, "new", {"n": "fresh"})    # push past the cap once more
+    assert "r0" in seen          # refreshed by the re-store, survives eviction
+    assert "r1" not in seen      # r1 is now the least-recently-touched, evicted
+    assert len(seen) == _SEEN_KEEP
+
+
+def test_steps_capped_at_200():
+    import webbee.session as S
+    from collections import deque
+
+    s = S.AgentSession.__new__(S.AgentSession)
+    s.steps = deque(maxlen=200)
+    for i in range(250):
+        s.steps.append({"step_id": str(i)})
+    assert len(s.steps) == 200
+    assert s.steps[0]["step_id"] == "50"
