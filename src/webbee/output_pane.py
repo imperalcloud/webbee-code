@@ -1,13 +1,8 @@
 """The full-screen dock's scrollable, colored output region. Rich renders the
 full transcript into a StringIO as ANSI; the pane VIRTUALIZES — the
 FormattedTextControl is fed ONLY the currently-visible slice of lines, so
-every frame costs O(viewport), not O(session). That keeps huge sessions
-lag-free and never truncates a long answer (the visible region is always
-rendered in full; scroll to see more). Wheel / PageUp move `_offset`;
-left-drag copies the covered text to the real local clipboard
-(`webbee.clipboard`), OSC 52 only as a fallback. Split out of tui.py to keep
-both files under the file-size ceiling. Grounded in prompt_toolkit 3.0.52
-(verified in venv)."""
+every frame costs O(viewport), not O(session). Wheel / PageUp move `_offset`;
+left-drag copies to the local clipboard (`webbee.clipboard`), OSC 52 fallback."""
 
 _MAX_RECORDS = 4000     # RecordingConsole ring bound (W2 front-2: replay material for reflow)
 
@@ -28,27 +23,23 @@ class OutputPane:
         pane_records: deque = deque(maxlen=_MAX_RECORDS)
 
         class _RecordingConsole(Console):
-            """Captures every printed renderable so a terminal-width change can
-            REPLAY the transcript at the new width (W2 front-2: true reflow —
-            the old pane kept only baked ANSI, which can never re-wrap). The
-            ring is bounded: a >4000-record session replays only the newest
-            4000 records (older scrollback keeps its last-rendered width —
-            the honest trade the spec accepted)."""
+            """Captures every printed renderable so a width change can REPLAY
+            the transcript (old pane kept only baked ANSI, which can't
+            re-wrap). Bounded ring: past 4000 records, only the tail replays."""
 
             def print(self, *objects, **kw):        # noqa: A003
+                if getattr(pane, "_replaying", False):  # replay latch: never re-record
+                    return super().print(*objects, **kw)
+                evicting = len(pane_records) == pane_records.maxlen
                 pane_records.append((objects, kw))
                 pane._all_lines()                    # sync the W1 cache to the pre-write pos
                 pos = pane._io.tell()
                 result = super().print(*objects, **kw)
                 pane._io.seek(pos)
                 delta = pane._io.read()              # leaves position at EOF again
-                parts = delta.split("\n")
-                rl = pane._record_lines
-                if rl:
-                    rl[-1] += parts[0]
-                    rl.extend(parts[1:])
-                else:
-                    rl.extend(parts)
+                if evicting and pane._record_lines:  # stay in lockstep with the deque's own drop
+                    del pane._record_lines[0]
+                pane._record_lines.append(delta.count("\n"))
                 return result
 
             def clear(self, *a, **kw):
@@ -56,8 +47,8 @@ class OutputPane:
                 pane._reset_buffer()                # StringIO + caches reset (Task 3 builds on it)
 
         self._records = pane_records
-        self._record_lines: list = []      # Task 3: flat transcript mirror, same delta arithmetic
-        self._replaying = False            # Task 3: True while a width-reflow replay is in flight
+        self._record_lines: list = []      # per-record NEW-line count, prefix-summable (reflow.py)
+        self._replaying = False            # True while a width-reflow replay is in flight
         self.console = _RecordingConsole(file=self._io, force_terminal=True,
                                          color_system="truecolor", width=width,
                                          highlight=False)
@@ -73,8 +64,6 @@ class OutputPane:
 
         # Content fed to the control is only the visible slice, so the mouse row
         # is a VIEWPORT row (0..view_h-1) — add `_offset` for the absolute line.
-        # Wheel scroll adjusts `_offset` directly (the control shows no more than
-        # a viewport, so there is nothing for the Window itself to scroll).
         class _SelectControl(FormattedTextControl):
             def __init__(self, **kw):
                 super().__init__(**kw)
@@ -115,15 +104,9 @@ class OutputPane:
 
     # ---- virtualized render ---------------------------------------------
     def _all_lines(self):
-        # Key the cache on the stream WRITE POSITION (O(1)), not a full-buffer
-        # getvalue()+string compare (O(session)) — that ran on EVERY redraw
-        # (keystroke / ticker / scroll) and made big sessions lag. Beyond that,
-        # only the DELTA since the cached position is read and split — the
-        # cached list is extended IN PLACE, so a print costs O(new output),
-        # never a full-buffer re-split (that made long busy streams
-        # quadratic). Boundary safety: the cache only ever advances at print
-        # boundaries (Console.print completes before notify() runs), so an
-        # SGR escape can never split across a delta read.
+        # Cache keyed on the stream WRITE POSITION (O(1)); a hit returns the
+        # list as-is, a miss reads only the DELTA and extends it IN PLACE —
+        # never a full getvalue()+re-split (that was O(session) per print).
         pos = self._io.tell()
         cpos, lines = self._lines_cache
         if cpos == pos:
@@ -171,8 +154,7 @@ class OutputPane:
         visible = lines[off:off + h]
         if self._sel is None:
             return self._ANSI("\n".join(visible))
-        # A drag is in progress — overlay reverse-video on the selected columns
-        # (selected lines render plain+reversed; colours return when it clears).
+        # A drag is in progress — overlay reverse-video on the selected columns.
         (y1, x1), (y2, x2) = self._norm_sel()
         plain = self._plain_lines()
         out = []
@@ -202,6 +184,40 @@ class OutputPane:
         self._offset = max_off if self._follow else min(self._offset, max_off)
         self._invalidate()
 
+    def _record_at_line(self, line: int) -> int:
+        """Record owning absolute content line `line` (reflow.py prefix sum)."""
+        from webbee.reflow import record_at_line
+        return record_at_line(self._record_lines, line)
+
+    def reflow(self, new_width: int) -> None:
+        """Replay the retained ring at a new width (true reflow — old ANSI
+        can't re-wrap), anchored by RECORD not line index: a re-wrap changes
+        how many lines a record spans, so only the record stays stable."""
+        from rich.console import Console
+        from webbee.reflow import anchor_offset
+        if new_width == self.console.width or new_width < 10:
+            return
+        follow = self._follow
+        top_record = 0 if follow else self._record_at_line(self._offset)
+        self._sel = None                     # a mid-drag resize aborts the drag honestly
+        self.control._down = None
+        self.console.width = new_width
+        self._reset_buffer()
+        spans: list = []
+        self._replaying = True
+        try:
+            for objects, kw in list(self._records):
+                before = len(self._all_lines())
+                Console.print(self.console, *objects, **kw)   # bypass the recording override
+                spans.append(len(self._all_lines()) - before)
+        finally:
+            self._replaying = False
+        self._record_lines = spans
+        max_off = max(0, len(self._all_lines()) - max(1, self._view_h))
+        self._offset = anchor_offset(spans, top_record, max_off, follow)
+        self._follow = follow and self._offset >= max_off
+        self._invalidate()
+
     def _invalidate(self) -> None:
         try:
             from prompt_toolkit.application import get_app_or_none
@@ -212,9 +228,7 @@ class OutputPane:
             pass
 
     def _trim(self, max_lines: int = 20000, keep: int = 15000) -> None:
-        # Hysteresis: only trim once past max_lines, and cut down to `keep`
-        # (not max_lines) — trimming is amortized over 5000 lines of headroom
-        # instead of firing on every single print once the ceiling is hit.
+        # Hysteresis: only trim past max_lines, cut down to `keep` (amortized).
         import io
         lines = self._all_lines()
         if len(lines) <= max_lines:
@@ -226,19 +240,17 @@ class OutputPane:
         self.console.file = self._io
         self._lines_cache = (0, [""])
         self._plain_cache = (0, [""])
-        # A scrolled-up reader keeps looking at the SAME content lines — the
-        # dropped count is subtracted from `_offset` so the viewport doesn't
-        # silently jump when the buffer is rewritten underneath it.
-        self._offset = max(0, self._offset - dropped)
+        self._offset = max(0, self._offset - dropped)   # viewport anchored to the same content
+        from webbee.reflow import records_to_drop        # keep the ring in step
+        n_drop = records_to_drop(self._record_lines, dropped)
+        for _ in range(n_drop):
+            self._records.popleft()
+        del self._record_lines[:n_drop]
 
     def _reset_buffer(self) -> None:
-        """`/clear` in the PANE path (RichSink.clear() → console.clear(), see
-        `_RecordingConsole.clear` above): wipe the transcript back to empty
-        instead of writing Rich's real clear escape — the pane owns the alt
-        screen, so an emptied buffer IS the cleared state. Same StringIO
-        repoint `_trim` uses, but to zero instead of a kept tail. `_record_lines`
-        resets alongside the W1 caches it mirrors (Task 3 builds the reflow
-        replay on top of this)."""
+        """`/clear` and `reflow()` both wipe the transcript to empty — the
+        pane owns the alt screen, so an emptied buffer IS the cleared state.
+        `reflow()` rebuilds `_record_lines` right after calling this."""
         import io
         self._io = io.StringIO()
         self.console.file = self._io
@@ -248,15 +260,13 @@ class OutputPane:
         self._offset = 0
 
     def dump(self) -> str:
-        """The full session transcript (ANSI). Printed to real stdout on exit so
-        the conversation survives leaving the alternate screen."""
+        """Full session transcript (ANSI), printed to real stdout on exit."""
         return self._io.getvalue()
 
     # ---- copy-on-select --------------------------------------------------
     def _selected_text(self, start, end) -> str:
         """Plain text (ANSI stripped) covered by a drag. start/end .y are
-        VIEWPORT rows → add `_offset` for absolute content lines. wrap_lines is
-        False so a content line maps 1:1 to a `\\n`-split line, col = char index."""
+        VIEWPORT rows → add `_offset` for absolute content lines."""
         lines = self._plain_lines()
         p1 = (start.y + self._offset, start.x)
         p2 = (end.y + self._offset, end.x)
@@ -276,7 +286,6 @@ class OutputPane:
 
     def _copy_selection(self, start, end) -> None:
         import time as _t
-
         from webbee.clipboard import copy_to_clipboard
         text = self._selected_text(start, end)
         if not text.strip():

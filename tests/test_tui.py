@@ -4,11 +4,17 @@ import re
 from webbee.tui import next_mode, build_toolbar
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _txt(frags):
     """Join prompt_toolkit formatted-text fragments into the visible string."""
     return "".join(seg for _, seg in frags)
+
+
+def strip_ansi(s):
+    """Strip SGR colour escapes — same pattern OutputPane._plain_lines uses."""
+    return _SGR.sub("", s)
 
 
 def test_next_mode_cycles():
@@ -288,6 +294,119 @@ def test_record_ring_bounded():
     for i in range(4100):
         p.console.print(str(i))
     assert len(p._records) == 4000          # oldest fell off — replay covers the tail
+
+
+# ── W2 Task 3: reflow — width change replays the ring, offset anchored by
+# the RECORD under the top visible line (a line index is meaningless across
+# a re-wrap; the record that produced it is the only stable anchor). ────────
+
+def test_reflow_rewraps_all_content():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    p.console.print("word " * 40)                  # one long line at width 100
+    wide_lines = len(p._all_lines())
+    p.reflow(40)
+    narrow_lines = len(p._all_lines())
+    assert p.console.width == 40
+    assert narrow_lines > wide_lines               # re-wrapped, not clipped
+    assert all(len(strip_ansi(ln)) <= 40 for ln in p._all_lines())
+
+
+def test_reflow_noop_on_same_width():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.console.print("x")
+    buf_before = p._io.getvalue()
+    p.reflow(80)
+    assert p._io.getvalue() == buf_before
+
+
+def test_reflow_anchors_scrolled_up_offset_by_record():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(200):
+        p.console.print(f"record-{i} " + "pad " * 30)
+    p._view_h = 10
+    p.scroll(-150)                                  # scrolled well up
+    top_record = p._record_at_line(p._offset)
+    p.reflow(50)
+    assert p._record_at_line(p._offset) == top_record   # same CONTENT on top
+
+
+def test_reflow_preserves_tail_follow():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(50):
+        p.console.print("x " * 40)
+    assert p._follow
+    p.reflow(60)
+    lines = p._all_lines()
+    assert p._offset == max(0, len(lines) - max(1, p._view_h))
+
+
+def test_reflow_clears_active_selection():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.console.print("abc")
+    p._sel = ((0, 0), (0, 2))
+    p.reflow(60)
+    assert p._sel is None
+
+
+def test_reflow_aborts_an_in_progress_drag():
+    # A resize mid mouse-drag must abort the drag honestly, not leave a
+    # stale mouse-down anchor pointing at pre-rewrap coordinates.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.console.print("abc")
+    p.control._down = (0, 0)          # simulate an in-progress MOUSE_DOWN
+    p.reflow(60)
+    assert p.control._down is None
+
+
+def test_reflow_noop_below_minimum_width():
+    # A pathologically narrow resize (e.g. a terminal briefly reporting 0-9
+    # cols mid-drag) must not corrupt state — clamp to a no-op.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.console.print("x")
+    buf_before = p._io.getvalue()
+    p.reflow(5)
+    assert p.console.width == 80
+    assert p._io.getvalue() == buf_before
+
+
+def test_reflow_empty_pane_does_not_crash():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.reflow(40)
+    assert p.console.width == 40
+    assert p._offset == 0
+
+
+def test_ring_eviction_keeps_record_lines_in_lockstep_with_records():
+    # _record_lines must shrink in lockstep with the bounded _records deque —
+    # otherwise, once a long session evicts old records, _record_at_line's
+    # prefix sum drifts out of alignment with what's actually replayable.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=60)
+    for i in range(4100):
+        p.console.print(str(i))
+    assert len(p._records) == 4000
+    assert len(p._record_lines) == len(p._records)
+
+
+def test_reflow_does_not_duplicate_records_or_reenter_recording():
+    # The replay must go through the base Console.print, never back through
+    # the RecordingConsole override — else every reflow would double the ring.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(10):
+        p.console.print(f"line-{i}")
+    n_records = len(p._records)
+    p.reflow(50)
+    assert len(p._records) == n_records
+    assert sum(p._record_lines) == len(p._all_lines()) - 1
 
 
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
