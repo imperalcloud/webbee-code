@@ -54,24 +54,38 @@ def _is_transient_status(status: int) -> bool:
     return status >= 500 or status in (408, 429)
 
 
+def _transient_exceptions():
+    # Lazy import (module-level `import httpx` would move httpx's cost to CLI
+    # boot -- session.py is imported by repl.py at module top, and the rest of
+    # this module already keeps httpx as a run()-local, boot-time-optimization
+    # import). `except <call expression>` is valid Python -- the call just
+    # has to happen on every except test, which is cheap (import is memoized).
+    import httpx
+    return (httpx.HTTPError, OSError)
+
+
 async def _transient_retry(send, *, attempts: int = 5, base: float = 1.0, cap: float = 8.0):
     """Bounded transient-retry for gateway WRITE calls (turn-start POST): a
     502 during a deploy must not kill the turn. Verdict/normal statuses return
-    immediately; transport errors and 5xx/408/429 retry with capped backoff.
+    immediately; TRANSPORT errors (httpx.HTTPError/OSError) and 5xx/408/429
+    retry with capped backoff -- anything else (a bug in the caller) is not a
+    transient condition and must surface immediately, not be retried 5x.
     The LAST failure is returned/raised for the caller's raise_for_status."""
     backoff = base
     last_exc = None
     last_resp = None
-    for _ in range(max(1, attempts)):
+    n = max(1, attempts)
+    for i in range(n):
         try:
             resp = await send()
             if not _is_transient_status(resp.status_code):
                 return resp
             last_resp, last_exc = resp, None
-        except (Exception,) as e:            # httpx.HTTPError / OSError
+        except _transient_exceptions() as e:
             last_exc, last_resp = e, None
-        await asyncio.sleep(backoff)
-        backoff = min(backoff * 2, cap)
+        if i < n - 1:               # never sleep after the FINAL attempt
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, cap)
     if last_exc is not None:
         raise last_exc
     return last_resp
@@ -106,9 +120,19 @@ class AgentSession:
     async def run(self, task: str, sink, *, marathon: bool = False, goal: str = "",
                   surface: str = "", steer_iid: str = "") -> str:
         import httpx
+        from uuid import uuid4
 
         from webbee.tools import LocalToolExecutor
         from imperal_mcp.client import ImperalClient
+
+        # FIX1 (W1 final review): every turn-start POST needs a stable dedup
+        # key. A typed turn mints its own (steer_iid arrives empty); a steer
+        # pickup keeps the queue entry's OWN id. Either way, _transient_retry
+        # below re-sends this SAME closure -- so a retry after an ambiguous
+        # failure (timeout / edge-504 whose first attempt may have already
+        # landed) carries the IDENTICAL key, and the kernel's steer-iid ring
+        # drops the twin instead of executing the instruction twice.
+        steer_iid = steer_iid or uuid4().hex
 
         # Offload to a worker thread — build_coding_context runs sync
         # subprocess.run(git status, timeout=10) + os.walk; inline on the dock's
@@ -131,11 +155,11 @@ class AgentSession:
             # [surface] tags). Additive-only -- a typed turn's body is
             # byte-identical to before.
             body["surface"] = surface
-        if steer_iid:
-            # steer-iid-dedup: a pickup also carries the queued item's dedup id
-            # so the kernel's ring can drop an at-least-once twin. Same
-            # additive-only contract -- a typed turn has none, key omitted.
-            body["steer_iid"] = steer_iid
+        # steer-iid-dedup: ALWAYS present now (FIX1 above) -- W1 turn-start
+        # retries need the ring dedup, so a typed turn's minted id rides the
+        # body exactly like a pickup's own id. No longer additive-only for
+        # this key (surface/marathon/goal above still are).
+        body["steer_iid"] = steer_iid
         if marathon:
             body["marathon"] = True
             body["goal"] = goal
@@ -386,7 +410,7 @@ class AgentSession:
         # cuts outage recovery from the kernel's tool-wait expiry (up to
         # 65min for bash) to seconds. Final fallback unchanged: give up
         # silently, kernel re-dispatches the same req_id.
-        for i, delay in enumerate((0.0,) + tuple(self._result_delays)):
+        for delay in (0.0,) + tuple(self._result_delays):
             if delay:
                 await asyncio.sleep(delay)
             try:

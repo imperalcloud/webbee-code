@@ -405,3 +405,37 @@ def test_inject_to_session_raises_on_http_error_non_swallowing(monkeypatch):
     except httpx.HTTPStatusError:
         raised = True
     assert raised    # the caller (repl wiring) owns the fallback
+
+
+def test_inject_to_session_reuses_given_client_forwards_body(monkeypatch):
+    # With a client the repl already owns (Task 12's shared keep-alive
+    # client), inject_to_session must call THROUGH it (client.request) and
+    # forward the {text, steer_iid} body verbatim -- and never open a fresh
+    # httpx.AsyncClient (the constructor is monkeypatched to blow up if
+    # touched, same discipline as fetch_pending_steer's sibling test above).
+    from webbee.thread import inject_to_session
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": True}
+
+    class FakeClient:
+        async def request(self, method, path, json=None, headers=None):
+            seen["method"] = method
+            seen["path"] = path
+            seen["json"] = json
+            seen["headers"] = headers
+            return _Resp()
+
+    def _no_new_client(*a, **kw):
+        raise AssertionError("must not construct a new AsyncClient when one is given")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _no_new_client)
+    ok = asyncio.run(inject_to_session(_Cfg(), _tp, "s1", "fly this in", "iid-1",
+                                       client=FakeClient()))
+    assert ok is True
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/v1/agent/sessions/s1/inject"
+    assert seen["json"] == {"text": "fly this in", "steer_iid": "iid-1"}
+    assert seen["headers"] == {"Authorization": "Bearer tok"}

@@ -985,17 +985,169 @@ def test_run_threads_steer_iid_into_session_post_body(monkeypatch):
     assert body["surface"] == "telegram"
 
 
-def test_run_omits_steer_iid_key_for_plain_typed_turns(monkeypatch):
-    # A typed turn has no dedup id -- key omitted, body byte-identical to today.
+def test_run_mints_steer_iid_for_plain_typed_turns(monkeypatch):
+    # W1 final review FIX1: a typed turn's body ALWAYS carries a dedup key --
+    # _transient_retry re-sends this SAME closure body on a transient
+    # turn-start failure (timeout/edge-504) whose first attempt may have
+    # already landed server-side. Without a stable steer_iid the kernel's
+    # ring has nothing to drop the twin by, and the turn executes twice.
     body = _run_turn_capture_body(monkeypatch)
-    assert "steer_iid" not in body
+    assert body["steer_iid"]           # minted, non-empty
+    assert "surface" not in body       # additive-only for surface stays true
 
 
-def test_run_omits_steer_iid_key_when_pickup_item_had_none(monkeypatch):
-    # Older gateway: /pending-steer items without `iid` -> "" -> key omitted.
+def test_run_mints_steer_iid_when_pickup_item_had_none(monkeypatch):
+    # Older gateway: /pending-steer items without `iid` -> "" -> the CLIENT
+    # mints its own so the same turn-start-retry dedup guarantee still holds.
     body = _run_turn_capture_body(monkeypatch, surface="telegram", steer_iid="")
-    assert "steer_iid" not in body
+    assert body["steer_iid"]
     assert body["surface"] == "telegram"
+
+
+def test_run_retries_turn_start_post_with_same_steer_iid(monkeypatch):
+    # FIX1 core guarantee: _transient_retry resends the IDENTICAL body
+    # closure on a transient turn-start failure. A retry after a timeout
+    # whose first attempt may have already landed server-side must carry the
+    # SAME steer_iid so the kernel's dedup ring drops the twin instead of
+    # executing the instruction twice.
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    # Fast retry: same real _transient_retry, but with no real sleeps.
+    real_retry = S._transient_retry
+
+    async def _fast_retry(send, **kw):
+        return await real_retry(send, attempts=5, base=0.0, cap=0.0)
+
+    monkeypatch.setattr(S, "_transient_retry", _fast_retry)
+
+    bodies = []
+
+    class _SessResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, json=None, **kw):
+            if path == "/v1/agent/sessions":
+                bodies.append(json)
+                if len(bodies) == 1:
+                    raise httpx.ReadTimeout("slow edge, first attempt may have landed")
+            return _SessResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    class _Sink:
+        def progress(self, *a): ...
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    out = asyncio.run(sess.run("do it", _Sink()))
+    assert out == "done"
+    assert len(bodies) == 2                             # timed out once, retried once
+    assert bodies[0]["steer_iid"] and bodies[0]["steer_iid"] == bodies[1]["steer_iid"]
+
+
+def test_run_wires_force_refresh_and_on_retry_by_identity(monkeypatch):
+    # FIX7a coverage: run() must wire stream_frames' force_refresh to THIS
+    # token_provider's force_refresh and on_retry to THIS sink's reconnecting
+    # -- by IDENTITY (not merely "some truthy callable") -- so a real 401
+    # refresh and a real reconnect-backoff signal actually reach the token
+    # provider / toolbar rather than some incidental substitute.
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    captured = {}
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0",
+                           force_refresh=None, on_retry=None):
+        captured["force_refresh"] = force_refresh
+        captured["on_retry"] = on_retry
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    class _SessResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, headers=None, **kw): return _SessResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    # Plain instance attributes (NOT class methods) -- a bound method created
+    # via the descriptor protocol is a fresh object on every access, so an
+    # `is` identity check against it would be flaky-false. An attribute
+    # assigned directly on the instance is the SAME object every access.
+    async def _force_refresh(): ...
+    def _reconnecting(attempt, delay): ...
+
+    class _TokenProvider:
+        def __init__(self):
+            self.force_refresh = _force_refresh
+
+        async def __call__(self):
+            return "tok"
+
+    class _Sink:
+        def __init__(self):
+            self.reconnecting = _reconnecting
+
+        def progress(self, *a): ...
+
+    token_provider = _TokenProvider()
+    sink = _Sink()
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    asyncio.run(sess.run("do it", sink))
+    assert captured["force_refresh"] is token_provider.force_refresh
+    assert captured["on_retry"] is sink.reconnecting
 
 
 # ── 0.3.14: cross-surface queued visibility (task_queued / task_dequeued) ─────
@@ -1174,6 +1326,28 @@ def test_transient_retry_verdict_passes_through_immediately():
 
     r = asyncio.run(_transient_retry(send, attempts=5, base=0.0, cap=0.0))
     assert r.status_code == 401 and len(calls) == 1   # a verdict is NOT retried
+
+
+def test_transient_retry_lets_non_transport_errors_propagate_immediately():
+    # FIX5: the except clause is narrowed to (httpx.HTTPError, OSError) -- a
+    # bug in the caller (TypeError, etc.) must surface immediately, not be
+    # silently retried 5x as if it were a transient network blip.
+    import asyncio
+    from webbee.session import _transient_retry
+
+    calls = []
+
+    async def send():
+        calls.append(1)
+        raise TypeError("boom")
+
+    raised = False
+    try:
+        asyncio.run(_transient_retry(send, attempts=5, base=0.0, cap=0.0))
+    except TypeError:
+        raised = True
+    assert raised
+    assert calls == [1]   # ONE call, no retries
 
 
 def test_post_result_retries_then_gives_up_silently():

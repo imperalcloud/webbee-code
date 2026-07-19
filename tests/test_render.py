@@ -892,3 +892,15 @@ def test_begin_turn_clears_turn_failed_flag():
     assert s.status()["turn_failed"] is True
     s.begin_turn()
     assert s.status()["turn_failed"] is False    # the NEXT turn always starts clean
+
+
+def test_end_turn_preserves_turn_failed_flag():
+    # FIX7b coverage: end_turn must NOT clear the flag -- the dock's drain
+    # rule reads status()["turn_failed"] to decide whether to hold the
+    # type-ahead queue, and repl.py calls mark_turn_failed() BEFORE end_turn()
+    # in its error branch. Only the NEXT begin_turn() (already covered above)
+    # resets it.
+    s = _sink()
+    s.mark_turn_failed()
+    s.end_turn("")
+    assert s.status()["turn_failed"] is True

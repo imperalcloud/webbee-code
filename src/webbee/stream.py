@@ -13,13 +13,16 @@ _BACKOFF_MAX = 15.0
 
 
 class StreamAuthError(Exception):
-    """Raised ONLY for 401 (post-refresh) / 403 / 404 — the gateway's actual
-    verdicts (expired token that survived a forced refresh, ownership 403,
-    not-found). Distinct from httpx.HTTPError so it is NOT caught by the
-    reconnect except-clause below — it propagates to the caller (repl.py's
-    `except Exception` surfaces it) instead of hammering the endpoint
-    forever. Everything else (5xx/408/429, transport drops) retries with
-    Last-Event-ID resume — nothing is lost: the server keeps 24h of stream."""
+    """Raised for 401 (post-refresh) and every OTHER 4xx except 408/429 — the
+    gateway's deterministic client-error verdicts (expired token that
+    survived a forced refresh, ownership 403, not-found 404, and now
+    400/402/405/413/422/... too): none of these are fixed by retrying, so
+    they must surface immediately instead of hammering the endpoint forever.
+    Distinct from httpx.HTTPError so it is NOT caught by the reconnect
+    except-clause below — it propagates to the caller (repl.py's `except
+    Exception` surfaces it). Everything else (5xx/408/429, transport drops)
+    retries with Last-Event-ID resume — nothing is lost: the server keeps
+    24h of stream."""
 
 
 def _parse_frame(sse):
@@ -31,7 +34,7 @@ def _parse_frame(sse):
         return None
 
 
-_VERDICT_STATUSES = (401, 403, 404)   # the gateway's REAL auth/ownership verdicts
+_TRANSIENT_4XX = (408, 429)   # request-timeout / rate-limited — retry, not a verdict
 
 try:                                   # taxonomy lands in imperal-mcp 0.5.2
     from imperal_mcp.auth import TransientAuthError as _TransientAuth
@@ -64,23 +67,37 @@ async def stream_frames(client, session_id: str, headers_provider, *,
                 status = getattr(resp, "status_code", 0) if resp is not None else 0
                 if status >= 400:
                     await resp.aread()
-                    if status in _VERDICT_STATUSES:
+                    # FIX3: every 4xx EXCEPT 408/429 is a deterministic verdict
+                    # (401 keeps its one-refresh chance first) -- 403/404 and
+                    # now 400/402/405/413/422/... too must surface immediately
+                    # instead of looping as if they were transient.
+                    if 400 <= status < 500 and status not in _TRANSIENT_4XX:
                         if status == 401 and force_refresh is not None and not auth_retried:
-                            # A locally-'valid' token the gateway revoked/rotated:
-                            # ONE forced refresh, then reconnect. A second 401 is
-                            # the real verdict.
-                            auth_retried = True
+                            # Budget is consumed only by a COMPLETED refresh: if
+                            # force_refresh itself fails transiently (gateway
+                            # deploy mid-rotation), the retry clause below
+                            # handles it and the one-per-window budget survives.
+                            # A real logout raises NotLoggedInError here and
+                            # propagates (verdict).
                             await force_refresh()
+                            auth_retried = True
                             continue
                         raise StreamAuthError(f"stream {status}")
                     raise _TransientStatus(str(status))  # 5xx/408/429 → patient retry
+                # FIX4: the connect SUCCEEDED (status check passed) -- transport
+                # AND auth are confirmed back right here, not on the first frame.
+                # Fire the online signal / reset state BEFORE entering the frame
+                # loop so the toolbar drops "⟳ reconnecting" the instant the
+                # connection is back, and a long frameless brain step is never
+                # mistaken for a still-down stream (the >300s outage note must
+                # measure the OUTAGE, not time-to-next-frame).
+                if attempt and on_retry is not None:
+                    try:
+                        on_retry(0, 0.0)                 # back online
+                    except Exception:
+                        pass
+                backoff, attempt, auth_retried = _BACKOFF_BASE, 0, False
                 async for sse in event_source.aiter_sse():
-                    if attempt and on_retry is not None:
-                        try:
-                            on_retry(0, 0.0)             # back online
-                        except Exception:
-                            pass
-                    backoff, attempt, auth_retried = _BACKOFF_BASE, 0, False
                     if sse.id:
                         last_id = sse.id
                     frame = _parse_frame(sse)

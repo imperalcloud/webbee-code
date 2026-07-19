@@ -2,7 +2,7 @@ import asyncio
 import re
 
 from webbee.account import Account
-from webbee.repl import run_repl
+from webbee.repl import run_marathon, run_repl
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
 
@@ -195,6 +195,34 @@ def test_stream_auth_error_renders_login_hint():
     assert sink.turns == [""]
 
 
+def test_run_marathon_stream_auth_error_renders_login_hint_and_clears_busy():
+    # FIX7c coverage: run_marathon has its OWN copy of the same StreamAuthError
+    # -> login-hint handling run_repl's _run_turn has (the `sink` vs `_sink`
+    # duplicated branch) -- until now it had ZERO test coverage of its own.
+    class StreamAuthError(Exception):
+        pass
+
+    class AuthDeadAgent:
+        async def run(self, task, sink, *, marathon=True, goal=""):
+            raise StreamAuthError("stream 401")
+
+    class _Auth:
+        async def ensure_access_token(self, cfg, force=False):
+            return "tok"
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+    sink = FakeSink()
+    agent = AuthDeadAgent()
+    text = asyncio.run(run_marathon(
+        cfg, "default", "build a thing", sink=sink, auth=_Auth(),
+        agent_factory=lambda c, tp, ws, m: agent))
+    assert text == ""
+    assert any("run /login" in n for n in sink.notes)
+    assert not any(n.startswith("Error:") for n in sink.notes)
+    assert sink.turns == [""]     # busy cleared via end_turn("") -- same liveness guarantee
+
+
 def test_error_turn_marks_failed_and_notes_held_queue():
     # W1 task 6: an ERROR-terminated turn must mark the sink (so the dock's
     # drain rule holds the type-ahead queue) and, when lines are already
@@ -213,7 +241,11 @@ def test_error_turn_marks_failed_and_notes_held_queue():
     sink, agent = _run(read_line=_lines("do it", "/exit"), agent=agent)
     assert agent.tasks == ["do it"]
     assert sink.turn_failed_marks == 1                     # mark_turn_failed() fired
-    assert any("queue held: 2" in n for n in sink.notes)
+    # FIX6: the note must be honest about what actually works -- Enter on an
+    # EMPTY input is a no-op (the old text advertised a dead gesture); ↑
+    # pulls the next queued item into the input for real.
+    assert any("queue held: 2" in n and "↑ pulls the next into the input" in n
+              for n in sink.notes)
     assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
     assert sink.turns == [""]                               # busy still clears (liveness)
 
@@ -751,6 +783,30 @@ def test_steer_poller_cancelled_on_exit(monkeypatch):
     # no leaked task: the repl cancelled the poller on exit and the loop closed
     # cleanly (asyncio.run inside _run would warn/hang otherwise)
     assert fate.get("cancelled") is True
+
+
+def test_shared_client_closed_on_repl_exit(monkeypatch):
+    # FIX7f coverage: the repl-lifetime keep-alive AsyncClient (Task 12) must
+    # be closed when the fallback loop exits -- a leaked client keeps its
+    # connection pool (and the event loop) alive past the repl's lifetime.
+    import webbee.http as H
+    import webbee.steer as SP
+
+    async def noop_poller(cfg, token_provider, **kw):
+        ...
+
+    monkeypatch.setattr(SP, "poll_idle_steer", noop_poller)
+
+    closed = {"n": 0}
+
+    class _FakeClient:
+        async def aclose(self):
+            closed["n"] += 1
+
+    monkeypatch.setattr(H, "make_client", lambda cfg: _FakeClient())
+
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert closed["n"] == 1
 
 
 def test_queue_command_in_fallback_loop_reports_empty_and_never_hits_agent():

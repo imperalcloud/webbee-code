@@ -325,7 +325,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             _sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
             if pending_queue:
                 _sink.note(f"⏸ queue held: {len(pending_queue)} queued message(s) wait "
-                           "— Enter runs the next, /queue clear drops them")
+                           "— ↑ pulls the next into the input, /queue clear drops them")
             return
         _sink.end_turn(text)
 

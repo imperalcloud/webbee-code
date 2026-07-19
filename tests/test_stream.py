@@ -305,3 +305,85 @@ def test_transient_auth_error_from_headers_provider_retries(fake_sse_server):
     server = fake_sse_server([[{"id": "1-1", "data": {"type": "final", "text": "ok"}}]])
     frames = collect_frames(server, headers_provider=provider)
     assert frames and server.connects >= 1
+
+
+# ── FIX2: the refresh budget is burned only by a COMPLETED refresh ──────────
+# Before the fix, `auth_retried = True` was set BEFORE `await force_refresh()`
+# -- if force_refresh itself failed transiently (a gateway mid-deploy), the
+# ONE-per-outage-window budget was already spent, so the retried 401 (still
+# the SAME outage) hit the "second 401 is the real verdict" branch instead of
+# getting its own refresh attempt.
+
+def test_401_refresh_transient_failure_does_not_burn_budget(fake_sse_server):
+    """force_refresh raises TransientAuthError on its FIRST call (gateway
+    redeploying mid-rotation), succeeds on the second. Server: 401, 401, then
+    frames. The turn must RESUME (frames delivered), force_refresh called
+    TWICE, and no StreamAuthError -- the failed refresh attempt must not have
+    burned the one-per-window budget."""
+    from imperal_mcp.auth import TransientAuthError
+
+    calls = {"n": 0}
+
+    async def force():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientAuthError("gateway redeploying")
+
+    server = fake_sse_server([401, 401, [{"id": "1-1", "data": {"type": "final", "text": "ok"}}]])
+    frames = collect_frames(server, force_refresh=force)
+    assert [f["type"] for f in frames] == ["final"]
+    assert calls["n"] == 2
+    assert server.connects == 3
+
+
+# ── FIX3: strict 4xx taxonomy -- every 4xx except 408/429 is a verdict ──────
+# Deterministic client errors (400/402/405/413/422/...) must surface
+# immediately instead of being treated as transient and retried forever.
+
+def test_400_raises_stream_auth_error_immediately(fake_sse_server):
+    from webbee.stream import StreamAuthError
+
+    server = fake_sse_server([400])
+    with pytest.raises(StreamAuthError):
+        collect_frames(server)
+    assert server.connects == 1
+
+
+# ── FIX7d coverage: the 401-refresh SUCCESS half, and re-arming across a
+# later, independent outage window on the SAME stream. ──────────────────────
+
+def test_401_refresh_success_then_frames_resume(fake_sse_server):
+    """The success half of the 401-refresh dance (only the failure half --
+    401,401 -> StreamAuthError -- had coverage before): 401 -> ONE successful
+    force_refresh -> reconnect -> frames actually flow."""
+    forced = []
+
+    async def force():
+        forced.append(True)
+
+    server = fake_sse_server([401, [{"id": "1-1", "data": {"type": "final", "text": "ok"}}]])
+    frames = collect_frames(server, force_refresh=force)
+    assert [f["type"] for f in frames] == ["final"]
+    assert forced == [True]
+    assert server.connects == 2
+
+
+def test_401_budget_rearms_for_a_later_independent_outage(fake_sse_server):
+    """After a successful refresh+resume, a LATER 401 on the same stream must
+    get its OWN fresh refresh (not an immediate verdict) -- the one-per-
+    outage-window budget re-arms once the connection is actually back."""
+    calls = []
+
+    async def force():
+        calls.append(1)
+
+    server = fake_sse_server([
+        401,
+        [{"id": "1-1", "data": {"type": "progress", "text": "p"}}],
+        401,
+        [{"id": "2-1", "data": {"type": "final", "text": "ok"}}],
+    ])
+    frames = collect_frames(server, force_refresh=force)
+    assert [f["type"] for f in frames] == ["progress", "final"]
+    assert calls == [1, 1]          # TWO successful refreshes, not one-then-verdict
+    assert server.connects == 4

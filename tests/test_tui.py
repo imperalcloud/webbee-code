@@ -226,6 +226,35 @@ def test_trim_hysteresis_and_offset_preserved():
     assert p._offset == max(0, 20500 - dropped) # view anchored to same content
 
 
+def test_trim_below_threshold_leaves_buffer_untouched():
+    # Hysteresis negative case: below max_lines (20000), _trim must be a
+    # complete no-op -- no rewrite of the underlying StringIO at all.
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(18000):
+        p._io.write(f"line{i}\n")
+    p._lines_cache = (None, [""])               # force re-split
+    before = p._io.getvalue()
+    p._trim()
+    assert p._io.getvalue() == before
+
+
+def test_trim_keep_floor_not_over_aggressive():
+    # A trim that DOES fire must cut down to ~keep (15000), not slash way
+    # below it -- pins the keep floor so a future change to the hysteresis
+    # constants can't silently turn this into an over-aggressive cut.
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(21000):
+        p._io.write(f"line{i}\n")
+    p._lines_cache = (None, [""])
+    p._trim()
+    lines = p._all_lines()
+    assert len(lines) >= 14000
+
+
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
 # Previously Ctrl-C only cancelled the local asyncio task while the cloud
 # brain kept running server-side; Esc did nothing while busy. Both key
