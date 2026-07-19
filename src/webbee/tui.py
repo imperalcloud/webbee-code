@@ -559,6 +559,22 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
             pulled["text"], pulled["iid"] = str(item), getattr(item, "iid", "")
             get_app().invalidate()
 
+    # Task 11 click-to-collapse: per-session UI state for the queue/todo
+    # panels (a plain dict, not a Buffer/observable — the header's own
+    # redraw-on-invalidate is the only "reactivity" either panel needs).
+    # Clicking a panel's header toggles between full render and ONE row
+    # ending ▸ (collapsed) / ▾ (expanded) — screen space back on demand.
+    qp_ui = {"collapsed": False}
+    tp_ui = {"collapsed": False}
+
+    def _toggle_queue():
+        qp_ui["collapsed"] = not qp_ui["collapsed"]
+        get_app().invalidate()
+
+    def _toggle_todos():
+        tp_ui["collapsed"] = not tp_ui["collapsed"]
+        get_app().invalidate()
+
     def _queue_fragments():
         # Live like _toolbar: re-invoked every redraw, reads the shared deque
         # + the sink-owned remote list (pull serves the LOCAL rows only —
@@ -566,7 +582,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         import shutil
         return queue_fragments(pending, pull=_pull_at,
                                width=shutil.get_terminal_size((100, 24)).columns,
-                               remote=remote_pending)
+                               remote=remote_pending,
+                               collapsed=qp_ui["collapsed"], toggle=_toggle_queue)
 
     # The LIVE pending-queue panel — pinned BETWEEN the output pane and the
     # input box; zero rows (hidden) while the queue is empty, so the empty
@@ -574,7 +591,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # focus on the input even when a row is clicked.
     queue_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_queue_fragments, focusable=False),
-                       height=lambda: queue_height(pending, remote_pending),
+                       height=lambda: queue_height(pending, remote_pending, qp_ui["collapsed"]),
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(pending) or bool(remote_pending)))
 
@@ -582,7 +599,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         # Live like _queue_fragments: re-invoked every redraw, reads the
         # sink-owned current_todos list in place (todo frames mutate it).
         import shutil
-        return todo_fragments(todos, width=shutil.get_terminal_size((100, 24)).columns)
+        return todo_fragments(todos, width=shutil.get_terminal_size((100, 24)).columns,
+                              collapsed=tp_ui["collapsed"], toggle=_toggle_todos)
 
     # The STICKY todo panel — pinned ABOVE the queue panel (the queue stays
     # adjacent to the input; its bottom row is the ↑-pullable newest). Same
@@ -590,7 +608,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # is empty, focusable=False keeps focus on the input.
     todo_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_todo_fragments, focusable=False),
-                       height=lambda: todo_height(todos),
+                       height=lambda: todo_height(todos, tp_ui["collapsed"]),
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(todos)))
 

@@ -24,17 +24,21 @@ def one_line(text: str, width: int) -> str:
     return t
 
 
-def queue_height(pending, remote=None) -> int:
+def queue_height(pending, remote=None, collapsed=False) -> int:
     """PURE. Rows the panel needs: 1 header + one per SHOWN item + one
     `… +K more` row when a queue is deeper than QP_MAX_ITEMS (each of the
     two sections — remote rows and local rows — caps independently). 0 when
     both are empty (the ConditionalContainer hides the panel then anyway).
-    The cap keeps the output pane dominant on small terminals; the toolbar's
-    `⋯N queued` segment stays the truth-teller for the full depth."""
+    `collapsed=True` (Task 11 click-to-collapse) always costs exactly 1 row
+    when there's data — screen space back on demand. The cap keeps the
+    output pane dominant on small terminals; the toolbar's `⋯N queued`
+    segment stays the truth-teller for the full depth."""
     n = len(pending)
     r = len(remote or ())
     if not n and not r:
         return 0
+    if collapsed:
+        return 1
     rows = 1
     if r:
         rows += min(r, QP_MAX_ITEMS) + (1 if r > QP_MAX_ITEMS else 0)
@@ -76,7 +80,21 @@ def _item_handler(pull, index: int):
     return _h
 
 
-def queue_fragments(pending, pull=None, width: int = 0, remote=None):
+def _toggle_handler(toggle):
+    """Header mouse handler (Task 11 click-to-collapse): MOUSE_UP toggles
+    collapse; everything else falls through (NotImplemented) so wheel scroll
+    keeps working — the exact event discipline of _item_handler."""
+    def _h(mouse_event):
+        from prompt_toolkit.mouse_events import MouseEventType
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            toggle()
+            return None
+        return NotImplemented
+    return _h
+
+
+def queue_fragments(pending, pull=None, width: int = 0, remote=None,
+                     collapsed=False, toggle=None):
     """PURE builder: the panel as prompt_toolkit formatted text, re-invoked
     every redraw (same live mechanics as the toolbar) so every queue
     add/edit/drain shows at once. Layout, top→bottom = drain order (FIFO —
@@ -99,13 +117,24 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None):
     The header counts both; the `↑ edit last` hint shows only when there is
     a local (pullable) item. When `pull` is given each LOCAL item row is a
     3-tuple fragment carrying a mouse handler that pulls exactly that item
-    (see _item_handler). Both queues empty → [] (the panel is hidden)."""
+    (see _item_handler). Both queues empty → [] (the panel is hidden).
+
+    `collapsed` (Task 11 click-to-collapse) folds the whole panel down to
+    ONE header row ending `▸` (screen space back on demand); `▾` when
+    expanded. Both only render when `toggle` is given — the header then
+    carries a 3-tuple MOUSE_UP handler (see _toggle_handler) that flips it."""
     items = list(pending)
     rem = [r for r in (remote or ()) if isinstance(r, dict)]
     n = len(items)
     if not n and not rem:
         return []
-    frags = [("class:qp.header", f" ⋯ queued ({n + len(rem)})")]
+    marker = "" if toggle is None else (" ▸" if collapsed else " ▾")
+    header = ("class:qp.header", f" ⋯ queued ({n + len(rem)}){marker}")
+    if toggle is not None:
+        header = header + (_toggle_handler(toggle),)
+    frags = [header]
+    if collapsed:
+        return frags
     if n:
         frags.append(("class:qp.item", " · ↑ edit last · click to edit"))
     rstart = max(0, len(rem) - QP_MAX_ITEMS)

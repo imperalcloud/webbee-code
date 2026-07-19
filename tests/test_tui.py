@@ -1138,6 +1138,30 @@ def test_control_dispatches_click_row_to_the_matching_item():
     assert ctrl.mouse_handler(ev(0)) is NotImplemented           # header: no pull
 
 
+# ── W1 front-3b task 11: click-to-collapse (header toggles to one row) ──────
+
+def test_queue_collapsed_renders_single_header_row():
+    q = deque(["a", "b", "c"])
+    frags = queue_fragments(q, collapsed=True, toggle=lambda: None)
+    assert len(frags) == 1 and "queued (3)" in frags[0][1] and "▸" in frags[0][1]
+    assert len(frags[0]) == 3                      # header carries the toggle handler
+    assert queue_height(q, collapsed=True) == 1
+
+
+def test_queue_header_toggle_fires_on_mouse_up():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    hits = []
+    frags = queue_fragments(deque(["a"]), collapsed=False, toggle=lambda: hits.append(1))
+    handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(up) is None and hits == [1]
+    scroll = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
+                        button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(scroll) is NotImplemented
+
+
 def test_pull_item_guards_draft_and_stale_index():
     # The ONE pull implementation behind BOTH ↑ and click: never clobbers a
     # typed draft; a stale index (queue drained between render and click) is
