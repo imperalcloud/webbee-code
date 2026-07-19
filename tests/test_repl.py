@@ -21,6 +21,7 @@ class FakeSink:
     def welcome(self, *a, **kw): ...
     def user_echo(self, text): self.echoed = getattr(self, "echoed", []) + [text]
     def queued_run(self, remaining): self.queued_runs = getattr(self, "queued_runs", []) + [remaining]
+    def mark_turn_failed(self): self.turn_failed_marks = getattr(self, "turn_failed_marks", 0) + 1
     def sessions_table(self, rows): self.session_tables = getattr(self, "session_tables", []) + [rows]
     def foreign_turn(self, surface, role, text):
         self.foreign = getattr(self, "foreign", []) + [(surface, role, text)]
@@ -192,6 +193,29 @@ def test_stream_auth_error_renders_login_hint():
     assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
     # Same liveness guarantee as the generic-error path: busy must clear.
     assert sink.turns == [""]
+
+
+def test_error_turn_marks_failed_and_notes_held_queue():
+    # W1 task 6: an ERROR-terminated turn must mark the sink (so the dock's
+    # drain rule holds the type-ahead queue) and, when lines are already
+    # waiting, tell the user honestly that they're held rather than silently
+    # sitting there. `sink.local_pending` is the SAME deque object repl.py
+    # hands the dock (repl._boot: `s.local_pending = pending_queue`) -- the
+    # agent mutates it here to simulate two lines queued while this turn ran.
+    class RaisingAgent(FakeAgent):
+        async def run(self, task, sink, *, marathon=False, goal=""):
+            self.tasks.append(task)
+            sink.local_pending.append("queued 1")
+            sink.local_pending.append("queued 2")
+            raise OSError("network down")
+
+    agent = RaisingAgent()
+    sink, agent = _run(read_line=_lines("do it", "/exit"), agent=agent)
+    assert agent.tasks == ["do it"]
+    assert sink.turn_failed_marks == 1                     # mark_turn_failed() fired
+    assert any("queue held: 2" in n for n in sink.notes)
+    assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
+    assert sink.turns == [""]                               # busy still clears (liveness)
 
 
 def test_login_command_calls_auth_and_logs_in():

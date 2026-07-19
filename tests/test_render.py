@@ -838,3 +838,23 @@ def test_begin_turn_resets_reconnecting_state():
     assert s.status()["reconnecting"] == 2
     s.begin_turn()
     assert s.status()["reconnecting"] == 0
+
+
+# ── W1 task 6: an ERROR-terminated turn holds the type-ahead queue ───────────
+# mark_turn_failed() is a one-turn flag repl's error branch sets; the dock's
+# drain rule (tui._run_turn) reads it back via status()["turn_failed"] and
+# skips the drain. begin_turn() clears it — a fresh turn always starts clean.
+
+def test_mark_turn_failed_sets_status_flag():
+    s = _sink()
+    assert s.status()["turn_failed"] is False    # clean by default
+    s.mark_turn_failed()
+    assert s.status()["turn_failed"] is True
+
+
+def test_begin_turn_clears_turn_failed_flag():
+    s = _sink()
+    s.mark_turn_failed()
+    assert s.status()["turn_failed"] is True
+    s.begin_turn()
+    assert s.status()["turn_failed"] is False    # the NEXT turn always starts clean

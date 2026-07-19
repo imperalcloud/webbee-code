@@ -787,6 +787,84 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
     asyncio.run(scenario())
 
 
+def test_error_turn_holds_queue():
+    # THE other half of the drain rule (W1 task 6): an ERROR-terminated turn
+    # must hold the queue exactly like a user stop does -- a broken backend
+    # must never burn one queued line per failing turn. on_line completes
+    # NORMALLY here (no exception escapes it, no turn["stopped"]) but
+    # status()["turn_failed"] is True (repl's except branch calls
+    # RichSink.mark_turn_failed(); this fake status mirrors that). Only the
+    # NEXT clean completion (turn_failed back to False) drains.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        ran, markers = [], []
+        gate = asyncio.Event()
+        busy = {"v": False}
+        failed = {"v": False}
+
+        async def on_line(text):
+            busy["v"] = True
+            failed["v"] = False            # begin_turn clears the one-turn flag
+            ran.append(text)
+            if text == "boom":
+                await gate.wait()
+                try:
+                    raise OSError("network down")
+                except OSError:
+                    failed["v"] = True     # mark_turn_failed(): swallowed, never crashes the REPL
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False,
+                    "turn_failed": failed["v"]}
+
+        pend = deque()
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
+                    on_cycle=lambda: None, status=status,
+                    is_busy=lambda: busy["v"],
+                    consent_pending=lambda: False, resolve_consent=lambda t: None,
+                    pending=pend, queued_run=markers.append))
+                await asyncio.sleep(0.05)
+                pipe.send_text("boom\r")
+                await _until(lambda: ran == ["boom"])          # the ERROR turn is running
+                pipe.send_text("queued follow-up\r")           # type-ahead while it runs
+                await _until(lambda: list(pend) == ["queued follow-up"])   # queued AT ONCE
+                gate.set()                                     # let the error surface + get swallowed
+                await _until(lambda: not busy["v"])            # the turn ends NATURALLY (no stop)
+                await asyncio.sleep(0.1)
+                assert ran == ["boom"]                          # the queue did NOT auto-run…
+                assert list(pend) == ["queued follow-up"]      # …preserved, still visible
+                assert markers == []                           # …and no drain marker fired
+                pipe.send_text("resume\r")                      # a deliberate new (clean) turn
+                await _until(lambda: ran == ["boom", "resume", "queued follow-up"])
+                assert markers == [0]                           # clean completion DOES drain
+                assert not pend
+                await _until(lambda: not busy["v"])
+                pipe.send_text("\x04")                          # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 def test_dock_queue_command_runs_immediately_even_while_busy():
     # /queue must manage the queue exactly when it matters — MID-TURN. It goes
     # straight to on_line as a background task (never type-ahead-queued), so

@@ -156,6 +156,7 @@ class RichSink:
         self._todos_dirty = False       # a turn touched the list -> end_turn records it
         self._reconnecting = 0          # stream transport down (W1 front-5): armed attempt#, 0 = none
         self._reconnect_since = None    # clock() at the moment the outage started
+        self._turn_failed = False       # ERROR (not a user stop) ended the last turn (W1 front-3b)
 
     def _nudge(self) -> None:
         """After output/state changes: let the pane follow the tail + redraw."""
@@ -221,8 +222,15 @@ class RichSink:
         self._busy = True
         self._reconnecting = 0
         self._reconnect_since = None
+        self._turn_failed = False
         self.console.print()   # breathing room between the user's message and the response
         self._nudge()
+
+    def mark_turn_failed(self) -> None:
+        """The turn ended in an ERROR (not a user stop): the dock's drain rule
+        holds the type-ahead queue instead of burning one queued line into
+        each failing turn (W1 front-3b). One-turn flag; begin_turn clears."""
+        self._turn_failed = True
 
     def end_turn(self, final_text: str) -> None:
         self._busy = False
@@ -643,7 +651,8 @@ class RichSink:
                 "tokens": self.session_tokens + (self.tokens if self._busy else 0),
                 "credits": self.session_credits + (self.credits if self._busy else 0),
                 "consent": self.consent_pending(),
-                "reconnecting": self._reconnecting}
+                "reconnecting": self._reconnecting,
+                "turn_failed": self._turn_failed}
 
     def is_busy(self) -> bool:
         return self._busy

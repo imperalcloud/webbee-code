@@ -274,11 +274,21 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             _sink.end_turn("")   # clear busy (poller starvation guard)
             return
         except Exception as e:  # network/auth/etc — never crash the REPL
+            # W1 task 6: flag the sink so the dock's drain rule HOLDS the
+            # type-ahead queue instead of burning one queued line into this
+            # failing turn (getattr-guarded — minimal sinks in tests/headless
+            # callers may not implement it).
+            _mark = getattr(_sink, "mark_turn_failed", None)
+            if _mark is not None:
+                _mark()
             if type(e).__name__ in ("StreamAuthError", "NotLoggedInError"):
                 _sink.note("Session expired or access revoked — run /login to sign in again.")
             else:
                 _sink.note(f"Error: {type(e).__name__}: {e}")
             _sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
+            if pending_queue:
+                _sink.note(f"⏸ queue held: {len(pending_queue)} queued message(s) wait "
+                           "— Enter runs the next, /queue clear drops them")
             return
         _sink.end_turn(text)
 

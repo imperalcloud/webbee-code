@@ -359,9 +359,17 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
             # queue is PRESERVED, stays visible (toolbar accent + /queue), and
             # never auto-runs; /queue clear drops it, and the next NATURAL
             # completion resumes draining. A propagating exception (dock
-            # teardown) also leaves the queue be.
+            # teardown) also leaves the queue be. An ERROR-terminated turn
+            # (status()["turn_failed"], set by repl's except branch via
+            # RichSink.mark_turn_failed — W1 front-3b) holds the queue too: a
+            # broken backend must never burn one queued line per failing turn.
             stopped = turn.pop("stopped", False)
-            if done and not stopped:
+            failed = False
+            try:
+                failed = bool(status().get("turn_failed"))
+            except Exception:
+                pass
+            if done and not stopped and not failed:
                 # Submit the oldest queued line through the SAME path a typed
                 # line takes; queued_run announces it — never a silent start.
                 _drain_pending(pending, _start_turn, mark=queued_run)
