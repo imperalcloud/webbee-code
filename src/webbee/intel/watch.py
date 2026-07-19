@@ -6,6 +6,14 @@ import asyncio
 import os
 
 
+def _ignored(path: str) -> bool:
+    """PURE. True for VCS/vendor churn. Normalized to forward slashes so the
+    filter works on Windows too (watchfiles yields backslash paths there --
+    unfiltered .git churn re-indexed the repo on every checkpoint)."""
+    p = path.replace(os.sep, "/").replace("\\", "/")
+    return "/.git/" in p or "/node_modules/" in p
+
+
 async def watch_workspace(root: str, on_change) -> None:
     """Call on_change(set_of_relpaths) as files change. Fail-soft: if
     watchfiles is unavailable, return immediately (no watcher)."""
@@ -16,7 +24,7 @@ async def watch_workspace(root: str, on_change) -> None:
     async for changes in awatch(root):
         rels = set()
         for _chg, path in changes:
-            if "/.git/" in path or "/node_modules/" in path:
+            if _ignored(path):
                 continue
             try:
                 rels.add(os.path.relpath(path, root))
