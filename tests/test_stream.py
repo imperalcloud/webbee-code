@@ -150,3 +150,158 @@ async def test_403_raises_stream_auth_error_and_does_not_retry(monkeypatch):
             pass
 
     assert calls == [1]  # connected exactly once -- did NOT loop/retry
+
+
+# --- verdict/transient split (401/403/404 raise; everything else retries) ---
+
+
+class _FakeSSEDict:
+    """One SSE frame whose payload is already a dict (test convenience --
+    the real gateway sends JSON text; _parse_frame only needs .json())."""
+    def __init__(self, sse_id, data):
+        self.id = sse_id
+        self._data = data
+
+    def json(self):
+        return self._data
+
+
+class _FakeStatusSource:
+    """A connect that resolves to a bare status code -- a 401/403/404
+    verdict, or a transient 5xx/408/429 -- with no frames."""
+    def __init__(self, status_code):
+        self.response = _FakeAuthResponse(status_code)
+
+    async def aiter_sse(self):
+        return
+        yield  # pragma: no cover - unreachable; raise happens before this
+
+
+class _FakeFrameSource:
+    """A connect that streams the given frames (dicts with 'id'/'data') then
+    closes cleanly -- no .response attribute, so stream.py treats it as 2xx."""
+    def __init__(self, frames):
+        self._frames = frames
+
+    async def aiter_sse(self):
+        for f in self._frames:
+            yield _FakeSSEDict(f.get("id"), f["data"])
+
+
+class _FakeConnectCtx:
+    def __init__(self, event_source):
+        self._es = event_source
+
+    async def __aenter__(self):
+        return self._es
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _FakeServer:
+    """Pops one scripted connect per aconnect_sse call: an int entry is a
+    bare status code, a list entry is a run of frames to stream successfully."""
+    def __init__(self, entries):
+        self._entries = list(entries)
+        self.connects = 0
+        self.seen_headers: list = []
+
+    def connect(self, client, method, url, headers=None, **kw):
+        self.seen_headers.append(dict(headers or {}))
+        self.connects += 1
+        entry = self._entries.pop(0)
+        es = _FakeStatusSource(entry) if isinstance(entry, int) else _FakeFrameSource(entry)
+        return _FakeConnectCtx(es)
+
+
+@pytest.fixture
+def fake_sse_server(monkeypatch):
+    """Factory fixture: fake_sse_server([502, [...]]) patches
+    webbee.stream.aconnect_sse and returns the _FakeServer for assertions."""
+    def _make(entries):
+        import webbee.stream as S
+        server = _FakeServer(entries)
+        monkeypatch.setattr(S, "aconnect_sse", server.connect)
+        monkeypatch.setattr(S, "_BACKOFF_BASE", 0.001)
+        monkeypatch.setattr(S, "_BACKOFF_MAX", 0.005)
+        return server
+
+    return _make
+
+
+async def _default_headers_provider():
+    return {"Authorization": "Bearer t"}
+
+
+def collect_frames(server, *, headers_provider=None, force_refresh=None,
+                    on_retry=None, stop_on="final"):
+    """Drain stream_frames against a fake_sse_server-built server until the
+    terminal frame, returning the list of parsed frames. Owns its own event
+    loop so callers stay plain `def` tests."""
+    async def _run():
+        hp = headers_provider or _default_headers_provider
+        got = []
+        async for frame in stream_frames(
+            object(), "s1", hp, start_id="0-0",
+            force_refresh=force_refresh, on_retry=on_retry,
+        ):
+            got.append(frame)
+            if frame.get("type") == stop_on:
+                break
+        return got
+
+    return asyncio.run(_run())
+
+
+def flaky_headers_provider(fail_first_with):
+    """A headers_provider that raises the given exception on its first call
+    (simulating a refresh that hit a mid-deploy gateway) then succeeds."""
+    state = {"calls": 0}
+
+    async def _provider():
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise fail_first_with
+        return {"Authorization": "Bearer t"}
+
+    return _provider
+
+
+def test_502_retries_then_resumes(fake_sse_server):
+    """A transient 502 must NOT raise StreamAuthError: connect #1 -> 502,
+    connect #2 -> one frame. Also asserts on_retry fired with attempt=1 then
+    the online signal (0, 0.0)."""
+    calls = []
+    server = fake_sse_server([502, [{"id": "1-1", "data": {"type": "final", "text": "ok"}}]])
+    frames = collect_frames(server, on_retry=lambda a, d: calls.append(a))
+    assert [f["type"] for f in frames] == ["final"]
+    assert calls[0] == 1 and calls[-1] == 0
+    assert server.connects == 2
+
+
+def test_401_forces_one_refresh_then_verdict(fake_sse_server):
+    """401 -> force_refresh() -> ONE reconnect. Second 401 -> StreamAuthError."""
+    from webbee.stream import StreamAuthError
+
+    forced = []
+
+    async def force():
+        forced.append(True)
+
+    server = fake_sse_server([401, 401])
+    with pytest.raises(StreamAuthError):
+        collect_frames(server, force_refresh=force)
+    assert forced == [True]
+    assert server.connects == 2
+
+
+def test_transient_auth_error_from_headers_provider_retries(fake_sse_server):
+    """A TransientAuthError raised by headers_provider (refresh hit a gateway
+    deploy) is retried, not fatal."""
+    from imperal_mcp.auth import TransientAuthError
+
+    provider = flaky_headers_provider(fail_first_with=TransientAuthError("502"))
+    server = fake_sse_server([[{"id": "1-1", "data": {"type": "final", "text": "ok"}}]])
+    frames = collect_frames(server, headers_provider=provider)
+    assert frames and server.connects >= 1
