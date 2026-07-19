@@ -47,7 +47,10 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
         sink.end_turn("")   # clear busy (poller starvation guard)
         return ""
     except Exception as e:  # network/auth/etc — never crash
-        sink.note(f"Error: {type(e).__name__}: {e}")
+        if type(e).__name__ in ("StreamAuthError", "NotLoggedInError"):
+            sink.note("Session expired or access revoked — run /login to sign in again.")
+        else:
+            sink.note(f"Error: {type(e).__name__}: {e}")
         sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
         return ""
     sink.end_turn(text)
@@ -271,7 +274,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             _sink.end_turn("")   # clear busy (poller starvation guard)
             return
         except Exception as e:  # network/auth/etc — never crash the REPL
-            _sink.note(f"Error: {type(e).__name__}: {e}")
+            if type(e).__name__ in ("StreamAuthError", "NotLoggedInError"):
+                _sink.note("Session expired or access revoked — run /login to sign in again.")
+            else:
+                _sink.note(f"Error: {type(e).__name__}: {e}")
             _sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
             return
         _sink.end_turn(text)

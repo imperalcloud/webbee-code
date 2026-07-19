@@ -154,6 +154,8 @@ class RichSink:
         self.current_todos: list = []
         self._todo_counts = (0, 0)      # kernel-reported (done, total)
         self._todos_dirty = False       # a turn touched the list -> end_turn records it
+        self._reconnecting = 0          # stream transport down (W1 front-5): armed attempt#, 0 = none
+        self._reconnect_since = None    # clock() at the moment the outage started
 
     def _nudge(self) -> None:
         """After output/state changes: let the pane follow the tail + redraw."""
@@ -217,6 +219,8 @@ class RichSink:
         self.tokens = 0        # per-turn live counters (usage frames are per-turn cumulative)
         self.credits = 0
         self._busy = True
+        self._reconnecting = 0
+        self._reconnect_since = None
         self.console.print()   # breathing room between the user's message and the response
         self._nudge()
 
@@ -257,6 +261,23 @@ class RichSink:
         # prefix indents only the first visual line and continuations hug the
         # screen edge.
         self.console.print(_pad(Text(_clean(message), style=_BEE)))
+        self._nudge()
+
+    def reconnecting(self, attempt: int, delay: float) -> None:
+        """Stream transport down (W1 front-5): attempt>0 arms the toolbar's
+        `⟳ reconnecting` state (busy stays true — the steer poller keeps off);
+        attempt==0 clears it, printing ONE honest note when the outage lasted
+        >300s (the 24h/10k durable stream may have trimmed frames past our
+        Last-Event-ID — progress lines may be missing, work is NOT lost)."""
+        if attempt:
+            if self._reconnect_since is None:
+                self._reconnect_since = self._clock()
+            self._reconnecting = int(attempt)
+        else:
+            since, self._reconnect_since = self._reconnect_since, None
+            self._reconnecting = 0
+            if since is not None and self._clock() - since > 300:
+                self.note("⟳ reconnected after a long outage — some progress lines may be missing")
         self._nudge()
 
     def todos(self, items: list, total: int, done: int) -> None:
@@ -621,7 +642,8 @@ class RichSink:
                 "elapsed": self._elapsed(), "tools": self._tools,
                 "tokens": self.session_tokens + (self.tokens if self._busy else 0),
                 "credits": self.session_credits + (self.credits if self._busy else 0),
-                "consent": self.consent_pending()}
+                "consent": self.consent_pending(),
+                "reconnecting": self._reconnecting}
 
     def is_busy(self) -> bool:
         return self._busy

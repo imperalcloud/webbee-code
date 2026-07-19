@@ -788,3 +788,53 @@ def test_headless_todos_keep_the_full_inline_render():
     assert "📋 Todos (0/1)" in out and "▶" in out     # inline render as before
     assert s.current_todos == [{"content": "fix the bug",
                                 "status": "in_progress"}]   # twin state still kept
+
+
+# ---- reconnecting (W1 front-5) -----------------------------------------
+# Stream transport drops mid-turn; the toolbar's `⟳ reconnecting` state (see
+# tui.build_toolbar) is armed/cleared from here. A long outage (>300s) gets
+# ONE honest note on recovery — the durable stream may have trimmed frames
+# past our Last-Event-ID, so progress lines can be missing (work is NOT
+# lost). A mutable fake clock (the fixed `lambda: 0.0` other tests use can't
+# simulate elapsed time) drives the >300s branch deterministically.
+
+class _Clock:
+    def __init__(self):
+        self.t = 0.0
+    def __call__(self):
+        return self.t
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def test_reconnecting_arms_status_and_long_outage_note():
+    clock = _Clock()
+    s = RichSink(console=Console(record=True, width=80, force_terminal=False),
+                 live_enabled=False, input_fn=lambda p: "", clock=clock)
+    s.reconnecting(1, 2.0)
+    assert s.status()["reconnecting"] == 1
+    clock.advance(400)
+    s.reconnecting(0, 0.0)                   # back online after >300s
+    assert s.status()["reconnecting"] == 0
+    assert "reconnected after a long outage" in s.console.export_text()
+
+
+def test_reconnecting_clears_quietly_on_a_short_outage():
+    clock = _Clock()
+    s = RichSink(console=Console(record=True, width=80, force_terminal=False),
+                 live_enabled=False, input_fn=lambda p: "", clock=clock)
+    s.reconnecting(1, 2.0)
+    clock.advance(5)
+    s.reconnecting(0, 0.0)                   # back online well under 300s
+    assert s.status()["reconnecting"] == 0
+    assert "reconnected after a long outage" not in s.console.export_text()
+
+
+def test_begin_turn_resets_reconnecting_state():
+    clock = _Clock()
+    s = RichSink(console=Console(record=True, width=80, force_terminal=False),
+                 live_enabled=False, input_fn=lambda p: "", clock=clock)
+    s.reconnecting(2, 1.0)
+    assert s.status()["reconnecting"] == 2
+    s.begin_turn()
+    assert s.status()["reconnecting"] == 0

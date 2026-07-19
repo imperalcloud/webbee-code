@@ -79,9 +79,12 @@ def next_mode(mode: str) -> str:
 
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
-                  consent: bool = False, queued: int = 0) -> list:
+                  consent: bool = False, queued: int = 0,
+                  reconnecting: int = 0) -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
-    text (per-segment styled). Three states: consent (awaiting a reply), busy
+    text (per-segment styled). Four states: consent (awaiting a reply),
+    reconnecting (the stream transport is down mid-turn — honest, not a fake
+    spinner: the run continues server-side and resumes on reconnect), busy
     (a turn is running — an ANIMATED coloured spinner + the current action in
     accent, so it pops, not grey), and idle (mode value coloured PER MODE —
     default cyan / plan purple / autopilot yellow — + SESSION spend + the
@@ -92,6 +95,12 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     q = [("class:tb.working", f" · ⋯{queued} queued")] if queued else []
     if consent:
         return [("class:tb.consent", "  approve? type y / n / a reply · Enter to send")]
+    if busy and reconnecting:
+        frags = [("class:tb.consent", f"  ⟳ reconnecting ({reconnecting})"),
+                 ("class:tb.dim", " · the run continues server-side")]
+        frags += q
+        frags.append(("class:tb.dim", "   ·   Esc/Ctrl-C to stop"))
+        return frags
     if busy:
         spin = _SPINNER[int(elapsed * 10) % len(_SPINNER)]   # animates via the ticker
         frags = [("class:tb.spin", f"  {spin} "), ("class:tb.working", "working")]
@@ -453,7 +462,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         return build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
                              current=st["current"], elapsed=st["elapsed"],
                              tools=st["tools"], consent=st["consent"],
-                             queued=len(pending) + len(remote_pending))
+                             queued=len(pending) + len(remote_pending),
+                             reconnecting=st.get("reconnecting", 0))
 
     # Dynamic height: EXACTLY the rows the wrapped input needs (1→10), so the box
     # grows as you type and shrinks back — never a fixed huge block. Enter still

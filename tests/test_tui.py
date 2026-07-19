@@ -468,6 +468,21 @@ def test_toolbar_hides_queue_segment_when_empty():
     assert "queued" not in _txt(build_toolbar("default", 0, 0))
 
 
+def test_toolbar_shows_reconnecting():
+    # Stream transport down mid-turn (W1 front-5): the honest reconnecting
+    # state replaces the busy spinner/working line entirely — no fake
+    # "working" while the transport is actually down.
+    frags = build_toolbar("default", 0, 0, busy=True, reconnecting=3)
+    text = _txt(frags)
+    assert "⟳ reconnecting (3)" in text and "working" not in text
+
+
+def test_toolbar_reconnecting_only_applies_while_busy():
+    # Idle never shows the reconnecting glyph — busy=False means no turn is
+    # running to reconnect for.
+    assert "reconnecting" not in _txt(build_toolbar("default", 0, 0, reconnecting=3))
+
+
 def test_turn_completion_drains_oldest_queued_to_submit_path():
     from webbee.tui import _drain_pending
     started = []

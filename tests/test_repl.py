@@ -170,6 +170,30 @@ def test_agent_error_is_swallowed_and_loop_continues():
     assert sink.turns == [""]
 
 
+def test_stream_auth_error_renders_login_hint():
+    # A real auth verdict (stream 401 that survived the forced refresh, or a
+    # dead local session) must render a clean actionable message -- never a
+    # raw "Error: StreamAuthError: ..." traceback string. Name-matched (not
+    # imported) per repl.py's except clause, so a plain local class with the
+    # right __name__ exercises the same branch a real StreamAuthError would.
+    class StreamAuthError(Exception):
+        pass
+
+    class AuthDeadAgent(FakeAgent):
+        async def run(self, task, sink, *, marathon=False, goal=""):
+            self.tasks.append(task)
+            raise StreamAuthError("stream 401")
+
+    agent = AuthDeadAgent()
+    sink, agent = _run(read_line=_lines("do it", "/exit"), agent=agent)
+    assert agent.tasks == ["do it"]
+    assert any("run /login" in n for n in sink.notes)
+    assert not any(n.startswith("Error:") for n in sink.notes)
+    assert not any(NO_CYRILLIC.search(n) for n in sink.notes)
+    # Same liveness guarantee as the generic-error path: busy must clear.
+    assert sink.turns == [""]
+
+
 def test_login_command_calls_auth_and_logs_in():
     auth = FakeAuth(logged_in=False)
     sink, agent = _run(read_line=_lines("/login", "/exit"), auth=auth)
