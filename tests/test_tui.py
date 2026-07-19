@@ -162,7 +162,9 @@ def test_output_pane_no_full_reread_on_unchanged_redraw():
     # Perf regression (long-session lag): _all_lines re-read the ENTIRE buffer
     # (getvalue O(n) + full string compare O(n)) on EVERY redraw. Every keystroke
     # / ticker tick / scroll in a big session cost O(session). With NO new output,
-    # a redraw must not re-read the whole buffer.
+    # a redraw must not re-read the whole buffer; WITH new output (Task 14), the
+    # cache is extended via a positional DELTA read (O(new output)) instead of a
+    # full getvalue() re-split — so getvalue() is never called at all here.
     import io
 
     from webbee.output_pane import OutputPane
@@ -185,9 +187,43 @@ def test_output_pane_no_full_reread_on_unchanged_redraw():
     base = cio.gv
     pane._all_lines(); pane._all_lines(); pane._all_lines()   # no new writes since
     assert cio.gv == base, "re-read the whole buffer on unchanged redraws (O(session)/frame)"
-    pane.console.print("a new line")       # content changed -> one refresh is expected
+    pane.console.print("a new line")       # content changed -> incremental delta, not getvalue()
     assert any("a new line" in ln for ln in pane._all_lines())
-    assert cio.gv > base
+    assert cio.gv == base, "a print must extend the cache via delta read, not a full getvalue() re-split"
+
+
+# ── Task 14: incremental line caches + hysteresis trim ──────────────────────
+# Even with the getvalue()-memoized-by-position cache above, a changed redraw
+# still re-split the WHOLE buffer from scratch (getvalue() + str.split("\n")
+# over the entire session) — O(session) per print, quadratic over a long busy
+# stream. The cache must extend the cached list IN PLACE from only the delta
+# written since the last split.
+
+def test_all_lines_appends_delta_in_place():
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    p.console.print("one")
+    first = p._all_lines()
+    p.console.print("two")
+    second = p._all_lines()
+    assert second is first                      # same list object, extended
+    assert any("two" in ln for ln in second[-3:])
+
+
+def test_trim_hysteresis_and_offset_preserved():
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(21000):
+        p._io.write(f"line{i}\n")
+    p._lines_cache = (None, [""])               # force re-split
+    p._offset = 20500                           # reader scrolled up
+    p._trim()
+    lines = p._all_lines()
+    assert len(lines) <= 15001                  # cut to ~15000 (+trailing)
+    dropped = 21001 - len(lines)
+    assert p._offset == max(0, 20500 - dropped) # view anchored to same content
 
 
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
