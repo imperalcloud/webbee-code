@@ -680,6 +680,39 @@ def test_drain_marks_the_start_with_remaining_depth():
     assert started == ["a", "b"] and marks == [1, 0]
 
 
+def test_drain_pending_requeues_on_start_error_and_survives_mark_error():
+    # The popped line is already OUT of `pending` the instant it's read: a
+    # `mark` blow-up (pure render-side announcement) must never lose it, and
+    # a `start` blow-up must put it BACK at the head before propagating —
+    # a broken start must not silently vanish a queued line.
+    from webbee.tui import _drain_pending
+
+    def bad_mark(n):
+        raise RuntimeError
+
+    def boom(t):
+        raise RuntimeError
+
+    q = deque(["a"])
+    try:
+        _drain_pending(q, boom, mark=bad_mark)
+    except RuntimeError:
+        pass
+    assert list(q) == ["a"]           # nothing lost
+
+
+def test_drain_pending_mark_error_alone_still_drains():
+    from webbee.tui import _drain_pending
+    started = []
+    q = deque(["a", "b"])
+
+    def bad_mark(n):
+        raise RuntimeError
+
+    assert _drain_pending(q, started.append, mark=bad_mark) is True
+    assert started == ["a"] and list(q) == ["b"]      # the mark error was swallowed
+
+
 def test_toolbar_queued_segment_is_accent_not_dim():
     for frags in (build_toolbar("default", 0, 0, busy=True, elapsed=1.0, queued=2),
                   build_toolbar("default", 0, 0, queued=2)):
@@ -1113,14 +1146,70 @@ def test_pull_item_guards_draft_and_stale_index():
     buf = Buffer(multiline=False)
     buf.text = "half-typed draft"
     pend = deque(["a", "b"])
-    assert pull_item(pend, buf, 1) is False              # draft protected
+    assert pull_item(pend, buf, 1) is None                # draft protected
     assert buf.text == "half-typed draft" and list(pend) == ["a", "b"]
     buf.reset()
-    assert pull_item(pend, buf, 5) is False              # stale index ignored
-    assert pull_item(pend, buf, -1) is False
-    assert pull_item(pend, buf, 0) is True               # arbitrary index (click)
+    assert pull_item(pend, buf, 5) is None                # stale index ignored
+    assert pull_item(pend, buf, -1) is None
+    assert pull_item(pend, buf, 0) == "a"                 # arbitrary index (click) — the item itself
     assert buf.text == "a" and buf.cursor_position == 1
     assert list(pend) == ["b"]
+
+
+# ── W1 front-3b task 9: pull-to-edit keeps the original steer_iid ────────────
+# A pull used to hand back a bare bool; now it hands back the REMOVED ITEM (or
+# None) so the caller can read its carried QueuedLine.iid back out — the whole
+# point being an UNCHANGED resubmit keeps the SAME iid (the kernel ring can
+# then dedup a landed twin instead of running a genuine duplicate turn).
+
+def test_pull_item_returns_the_item():
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import QueuedLine
+    buf = Buffer(multiline=False)
+    q = deque([QueuedLine("do x", "iid-1")])
+    item = pull_item(q, buf, 0)
+    assert item == "do x" and item.iid == "iid-1" and not q
+
+
+def test_rewrap_pulled_keeps_iid_when_unchanged_and_mints_when_edited():
+    from webbee.tui import _rewrap_pulled
+    pulled = {"text": "do x", "iid": "iid-1"}
+    out = _rewrap_pulled(pulled, "do x")
+    assert getattr(out, "iid", "") == "iid-1"
+    assert pulled == {"text": "", "iid": ""}          # one-shot: consumed either way
+    pulled = {"text": "do x", "iid": "iid-1"}
+    out2 = _rewrap_pulled(pulled, "do x HARDER")
+    assert getattr(out2, "iid", "") == ""              # edited ⇒ genuinely new message
+
+
+def test_rewrap_pulled_is_a_noop_when_nothing_was_pulled():
+    from webbee.tui import _rewrap_pulled
+    pulled = {"text": "", "iid": ""}
+    out = _rewrap_pulled(pulled, "typed fresh")
+    assert out == "typed fresh" and getattr(out, "iid", "") == ""
+
+
+def test_pull_then_resubmit_unchanged_keeps_the_original_iid_end_to_end():
+    # The actual wiring _enter uses: _arrow_up_action records the pulled
+    # item's text + iid into `pulled`; _rewrap_pulled hands the iid back
+    # ONLY when the resubmitted text is byte-identical.
+    from prompt_toolkit.buffer import Buffer
+
+    from webbee.tui import QueuedLine, _arrow_up_action, _rewrap_pulled
+    buf = Buffer(multiline=False)
+    pend = deque([QueuedLine("deploy the fix", "iid-42")])
+    pulled = {"text": "", "iid": ""}
+    _arrow_up_action(_FakeEvent(), buf, {"i": None}, 0, True, pend, pulled)
+    assert buf.text == "deploy the fix" and not pend
+    resubmitted = _rewrap_pulled(pulled, buf.text)          # unedited resubmit
+    assert getattr(resubmitted, "iid", "") == "iid-42"      # SAME iid — kernel ring dedups
+    # a second pull, this time edited before resubmit, must NOT carry the iid
+    pend.append(QueuedLine("deploy the fix", "iid-42"))
+    buf.reset()
+    _arrow_up_action(_FakeEvent(), buf, {"i": None}, 0, True, pend, pulled)
+    edited = _rewrap_pulled(pulled, buf.text + " NOW")
+    assert getattr(edited, "iid", "") == ""                 # edited ⇒ no carried iid
 
 
 def test_up_arrow_pulls_newest_queued_into_empty_buffer_busy_or_idle():
@@ -1388,6 +1477,28 @@ def test_inject_ok_is_kernel_owned_nothing_queued_locally():
         (text, iid), = calls
         assert text == "fly this in"
         assert re.fullmatch(r"[0-9a-f]{32}", iid)     # uuid4 hex, minted at enqueue
+    asyncio.run(scenario())
+
+
+def test_inject_or_queue_reuses_carried_iid():
+    # A QueuedLine (a pull-to-edit resubmitted unchanged, see _rewrap_pulled)
+    # already carries the original steer_iid -- _inject_or_queue must fly it
+    # under THAT id, not mint a fresh one, so the kernel ring can still dedup
+    # a landed twin.
+    from webbee.tui import QueuedLine, _inject_or_queue
+
+    async def scenario():
+        pending = deque()
+        calls = []
+
+        async def inject(text, iid):
+            calls.append((text, iid))
+            return True
+
+        ok = await _inject_or_queue(inject, QueuedLine("t", "iid-9"), pending)
+        assert ok is True
+        (text, iid), = calls
+        assert text == "t" and iid == "iid-9"         # carried, not a fresh uuid
     asyncio.run(scenario())
 
 

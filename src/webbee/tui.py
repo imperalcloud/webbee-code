@@ -172,16 +172,21 @@ class QueuedLine(str):
 async def _inject_or_queue(inject, text: str, pending, invalidate=None) -> bool:
     """Enter-while-busy fly-in (mid-turn inject, 0.3.15): mint the steer_iid
     HERE — one id for both legs — and POST immediately via `inject(text, iid)`
-    (the repl's gateway leg). On ok the line is KERNEL-owned: nothing is queued
-    locally — the kernel's task_queued{origin:terminal} echo renders the panel
-    row and task_dequeued clears it when the running turn absorbs it (seconds,
-    the next brain step). On ANY failure (no live session yet, offline, gateway
+    (the repl's gateway leg). REUSE, don't mint, when `text` already carries
+    one (a QueuedLine — a pull-to-edit resubmitted UNCHANGED, see
+    _rewrap_pulled): the original inject may have already landed server-side,
+    so re-flying it under the SAME iid lets the kernel ring dedup the twin
+    instead of running a genuine duplicate turn. On ok the line is
+    KERNEL-owned: nothing is queued locally — the kernel's
+    task_queued{origin:terminal} echo renders the panel row and
+    task_dequeued clears it when the running turn absorbs it (seconds, the
+    next brain step). On ANY failure (no live session yet, offline, gateway
     refusal) fall back to today's local queue: the row — carrying the SAME
     iid — drains at turn end through _drain_pending, stays ↑/click-pullable,
     and the kernel ring dedups the twin if the inject landed after all.
     Returns True when the line flew in (the caller's tests read it)."""
     from uuid import uuid4
-    iid = uuid4().hex
+    iid = getattr(text, "iid", "") or uuid4().hex
     try:
         ok = bool(await inject(text, iid))
     except Exception:
@@ -227,13 +232,24 @@ def _drain_pending(pending, start, mark=None) -> bool:
     per completion; the rest stay queued FIFO (each finished turn drains the
     next). `mark` (sink.queued_run) announces the handoff — `▶ running queued
     message` — right before the drained line's normal ❯ user-echo, so a drain
-    is never a silent start. Returns True when a drain happened."""
+    is never a silent start. The popped line is ALREADY OUT of `pending` the
+    moment it's read — a `mark` error must never lose it (swallowed: it's
+    only a render-side announcement) and a `start` error must put it BACK at
+    the head before propagating (a broken start must not silently vanish a
+    queued line). Returns True when a drain happened."""
     if not pending:
         return False
     text = pending.popleft()
     if mark is not None:
-        mark(len(pending))
-    start(text)
+        try:
+            mark(len(pending))
+        except Exception:
+            pass          # a render error must never lose the popped line
+    try:
+        start(text)
+    except Exception:
+        pending.appendleft(text)
+        raise
     return True
 
 
@@ -245,20 +261,27 @@ def _is_queue_command(text: str) -> bool:
     return bool(parts) and parts[0] == "/queue"
 
 
-def _arrow_up_action(event, buf, sel: dict, n: int, busy: bool, pending=None) -> None:
+def _arrow_up_action(event, buf, sel: dict, n: int, busy: bool, pending=None,
+                     pulled=None) -> None:
     """Up key — precedence: (1) QUEUE-PULL: pending items + an EMPTY buffer
     (busy or idle — NOT busy-gated: the queue legally survives a user STOP
     into idle, and pulling the newest to edit is exactly what you want after
     an Esc) pull the NEWEST queued line out of the queue into the input for
     editing; re-submit re-queues it at the tail (busy) or runs it (idle).
     Repeated presses walk newest→oldest, one item per press; a buffer with
-    ANY text is never clobbered (history/step-nav serve it instead).
+    ANY text is never clobbered (history/step-nav serve it instead). When
+    `pulled` (run_session's one-shot carry dict) is given, the pulled item's
+    text + steer_iid are recorded into it so _rewrap_pulled can hand the SAME
+    iid back if the line is resubmitted unedited (default None keeps the old
+    behavior for direct-call tests that don't care).
     (2) Step-navigation EXACTLY as before (steps + empty input + idle —
     reachable exactly when the queue is empty, i.e. today's behavior verbatim
     in the queue-empty world). (3) Recall an older submitted line
     (readline-style)."""
     if pending and not buf.text:
-        pull_item(pending, buf, len(pending) - 1)   # newest — "edit the last thing I queued"
+        item = pull_item(pending, buf, len(pending) - 1)   # newest — "edit the last thing I queued"
+        if item is not None and pulled is not None:
+            pulled["text"], pulled["iid"] = str(item), getattr(item, "iid", "")
         event.app.invalidate()
         return
     if n and not buf.text and not busy:
@@ -280,6 +303,22 @@ def _arrow_down_action(event, buf, sel: dict, n: int, busy: bool) -> None:
     event.app.invalidate()
 
 
+def _rewrap_pulled(pulled: dict, text: str):
+    """PURE. A pulled queued line resubmitted UNCHANGED keeps its steer_iid so
+    the kernel ring can still dedup a landed twin (W1 front-3b: pull-to-edit
+    previously minted a fresh iid — a genuine duplicate turn when the original
+    inject had landed). ANY edit = a genuinely new message = fresh iid (the
+    landed twin said something else). One-shot: `pulled` is consumed (reset
+    to empty) on every call, whether or not it held anything, so a later
+    unrelated Enter never sees a stale carry."""
+    iid, orig = pulled.get("iid", ""), pulled.get("text", "")
+    pulled["iid"] = ""
+    pulled["text"] = ""
+    if iid and text == orig:
+        return QueuedLine(text, iid)
+    return text
+
+
 async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                       is_busy, consent_pending, resolve_consent, steps_nav=None,
                       stop_turn=None, pending=None, queued_run=None,
@@ -295,7 +334,12 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     marker — the transcript itself stays real-turns-only). ↑ on an empty
     input pulls the newest queued line back into the box for editing (it
     leaves the panel; re-submit re-queues/runs it); clicking a panel row
-    pulls THAT item. `pending` is the queue deque — the repl passes its OWN
+    pulls THAT item. Either pull carries the item's steer_iid into the
+    one-shot `pulled` dict; if the line is resubmitted BYTE-IDENTICAL it goes
+    back out under the SAME iid (_rewrap_pulled) so the kernel ring can dedup
+    a landed twin instead of running a genuine duplicate turn — ANY edit
+    mints a fresh iid, since the landed twin said something else.
+    `pending` is the queue deque — the repl passes its OWN
     so /queue and /queue clear (dispatched through the normal command layer)
     see and manage the live queue; /queue itself always runs immediately,
     even mid-turn. When `steps_nav` is given and the input is empty and no turn
@@ -342,6 +386,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         remote_pending = []   # cross-surface kernel-queued items (display-only)
     if todos is None:
         todos = []            # sink-less callers: the todo panel never shows
+    pulled = {"text": "", "iid": ""}   # one-shot carry: pull-to-edit's steer_iid,
+                                       # consumed by _rewrap_pulled on the next Enter
 
     def _launch_inject(text):
         # Fire the fly-in as a background task (a key handler can't await):
@@ -397,7 +443,10 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("enter")
     def _enter(event):
-        text = scrub_mouse_residue(buf.text)   # never send leaked mouse reports
+        # never send leaked mouse reports; _rewrap_pulled keeps the ORIGINAL
+        # steer_iid alive when this is a pulled queued line resubmitted
+        # UNCHANGED (one-shot — `pulled` is consumed either way).
+        text = _rewrap_pulled(pulled, scrub_mouse_residue(buf.text))
         buf.reset()
         if consent_pending():
             resolve_consent(text)              # ICNLI: relay the raw reply verbatim
@@ -450,7 +499,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("up")
     def _step_up(event):
-        _arrow_up_action(event, buf, sel, _nav_count(), _busy_live(), pending)
+        _arrow_up_action(event, buf, sel, _nav_count(), _busy_live(), pending, pulled)
 
     @kb.add("down")
     def _step_down(event):
@@ -502,8 +551,12 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         """Mouse pull (a panel row's MOUSE_UP handler, queue_panel._item_handler):
         move the CLICKED queued item into the input for editing — the SAME
         pull_item the ↑ key uses, arbitrary index instead of newest (never
-        clobbers a typed draft, ignores a stale index)."""
-        if pull_item(pending, buf, index):
+        clobbers a typed draft, ignores a stale index). Mirrors _arrow_up_action:
+        records the item's text + steer_iid into `pulled` so an unchanged
+        resubmit keeps the original iid (see _rewrap_pulled)."""
+        item = pull_item(pending, buf, index)
+        if item is not None:
+            pulled["text"], pulled["iid"] = str(item), getattr(item, "iid", "")
             get_app().invalidate()
 
     def _queue_fragments():

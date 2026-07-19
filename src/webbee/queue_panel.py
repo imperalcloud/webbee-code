@@ -43,21 +43,23 @@ def queue_height(pending, remote=None) -> int:
     return rows
 
 
-def pull_item(pending, buf, index: int) -> bool:
+def pull_item(pending, buf, index: int):
     """The ONE pull-to-edit implementation (serves BOTH the ↑ key — newest,
     index len(pending)-1 — and a panel-row click — that row's index): move
     pending[index] OUT of the queue and into the input buffer for editing,
     cursor at the end. Guards, identical on both paths: a buffer with ANY
     text is never clobbered, and a stale index (the queue drained between
-    render and click) is ignored. Returns True when a pull happened (the
-    caller invalidates)."""
+    render and click) is ignored. Returns the removed item (truthy) or None
+    — callers truthy-check, so a QueuedLine's carried steer_iid rides back
+    out with it (tui._rewrap_pulled reuses it when the line is resubmitted
+    unchanged)."""
     if buf.text or not (0 <= index < len(pending)):
-        return False
+        return None
     item = pending[index]
     del pending[index]
-    buf.text = item
-    buf.cursor_position = len(item)
-    return True
+    buf.text = str(item)
+    buf.cursor_position = len(str(item))
+    return item
 
 
 def _item_handler(pull, index: int):
