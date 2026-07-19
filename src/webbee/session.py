@@ -296,7 +296,19 @@ class AgentSession:
                         if ftype == "marathon_paused":
                             # Parked (out-of-credits / consent / runaway) -> end the
                             # turn so the dock leaves "working"; the note shows why, and
-                            # the run resumes on the user's next reply.
+                            # the run resumes on the user's next reply. The kernel's task
+                            # queue stays alive server-side while parked -- tell the sink
+                            # via marathon_parked() so end_turn keeps the queue-panel's
+                            # remote rows (tagged parked) instead of wiping them (W1
+                            # front-3b: an empty panel over a non-empty kernel queue lies).
+                            # getattr-guarded like every other sink hook here: a minimal
+                            # sink drops it, a crashing hook never breaks the turn.
+                            _parked = getattr(sink, "marathon_parked", None)
+                            if _parked is not None:
+                                try:
+                                    _parked(str(frame.get("reason", "") or ""))
+                                except Exception:
+                                    pass
                             return ""
 
                     elif ftype == "final":

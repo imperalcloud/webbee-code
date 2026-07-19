@@ -111,7 +111,11 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None):
         frags.append(("class:qp.remote", f"\n   … +{rstart} more"))
     for r in rem[rstart:]:
         origin = str(r.get("origin") or "") or "remote"
-        row = "\n   " + one_line(f"[{origin}] {r.get('text') or ''}",
+        # A row surviving a marathon PARK (W1 front-3b) is still queued
+        # server-side, not phantom -- the ⏸ prefix tells the user it's
+        # waiting on a wake, not about to run right now.
+        mark = "⏸ " if r.get("parked") else ""
+        row = "\n   " + one_line(f"{mark}[{origin}] {r.get('text') or ''}",
                                  width - 4 if width > 0 else 0)
         frags.append(("class:qp.remote", row))
     start = max(0, n - QP_MAX_ITEMS)

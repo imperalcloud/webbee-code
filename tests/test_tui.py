@@ -1268,6 +1268,18 @@ def test_remote_rows_cap_with_a_more_row_and_height_counts_both():
     assert queue_height(deque(["a"]))  == 2             # remote omitted → exactly as before
 
 
+def test_remote_parked_row_renders_with_pause_prefix():
+    # W1 front-3b: a row that survived a marathon PARK is tagged parked=True
+    # by RichSink.end_turn -- the panel must show it's still queued
+    # server-side (not phantom) with a ⏸ prefix, distinct from a live row.
+    parked = _remote("telegram", "do x", "i1")
+    parked["parked"] = True
+    frags = queue_fragments(deque(), remote=[parked, _remote("web-panel", "live one", "i2")])
+    text = _panel_text(frags)
+    assert "⏸ [telegram] do x" in text
+    assert "[web-panel] live one" in text and "⏸ [web-panel]" not in text
+
+
 # ── 0.3.15: mid-turn inject — Enter-while-busy FLIES into the RUNNING turn ────
 # The type-ahead used to hold every busy-typed line client-side until turn end
 # (_drain_pending), so a running marathon never saw it mid-turn. Now the enter

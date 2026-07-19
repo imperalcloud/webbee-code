@@ -603,6 +603,40 @@ def test_end_turn_and_abort_clear_remote_rows_in_place():
     assert rows == [] and s.remote_pending is rows
 
 
+# ── W1 front-3b: parked marathon keeps its kernel-queued rows visible ────────
+# A marathon PARK (runaway/consent/credits) ends the turn early, but the
+# kernel's OWN task queue stays alive server-side waiting for a wake — an
+# unconditional clear here would leave the panel empty over a non-empty
+# kernel queue (a lie). marathon_parked() arms a one-turn flag; end_turn
+# tags the rows `parked: True` instead of wiping them.
+
+def test_parked_end_turn_keeps_remote_rows_tagged():
+    s = _sink()
+    s.remote_pending.append({"origin": "telegram", "text": "do x", "iid": "i1"})
+    s.marathon_parked("runaway")
+    s.end_turn("")
+    assert s.remote_pending == [{"origin": "telegram", "text": "do x", "iid": "i1", "parked": True}]
+
+
+def test_normal_end_turn_still_clears_remote_rows():
+    s = _sink()
+    s.remote_pending.append({"origin": "telegram", "text": "do x", "iid": "i1"})
+    s.end_turn("")
+    assert s.remote_pending == []
+
+
+def test_begin_turn_clears_parked_flag_but_keeps_rows():
+    # begin_turn disarms the ONE-TURN parked flag (a fresh turn is not
+    # parked) without touching the rows themselves — the next run's own
+    # task_dequeued frames remove them by iid as the kernel drains.
+    s = _sink()
+    s.remote_pending.append({"origin": "telegram", "text": "do x", "iid": "i1"})
+    s.marathon_parked("runaway")
+    s.begin_turn()
+    assert s._parked is False
+    assert s.remote_pending == [{"origin": "telegram", "text": "do x", "iid": "i1"}]
+
+
 # ── 0.3.16: queue-panel single-source dedup (steer_iid reconciliation) ────────
 # The steer_iid minted at enqueue time is the ONE key both legs carry; the
 # display layer now consumes it too: a duplicated task_queued frame

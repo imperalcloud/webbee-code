@@ -1108,6 +1108,40 @@ def test_task_queue_frames_ignored_by_minimal_or_crashing_sink(monkeypatch):
     assert _run_queue_frames_stream(monkeypatch, frames, _CrashSink()) == "done"
 
 
+# ── W1 front-3b: marathon_paused tells the sink WHY it parked ────────────────
+# A PARKED marathon (runaway/consent/credits pause) already ends the turn
+# with "" (return "" a few lines above); the addition here is that the run
+# also calls sink.marathon_parked(reason) so the queue panel can keep its
+# kernel-queued rows visible instead of wiping them (the kernel's own task
+# queue is still alive server-side while parked).
+
+def test_marathon_paused_frame_calls_parked_hook(monkeypatch):
+    class _ParkSink(RecSink):
+        def __init__(self):
+            super().__init__()
+            self.parked = []
+        def marathon_parked(self, reason): self.parked.append(reason)
+
+    sink = _ParkSink()
+    result = _run_queue_frames_stream(monkeypatch, [
+        {"type": "marathon_paused", "reason": "runaway"},
+    ], sink)
+    assert result == ""
+    assert sink.parked == ["runaway"]
+
+
+def test_marathon_paused_frame_ignored_by_minimal_or_crashing_sink(monkeypatch):
+    # Backward/limp-mode safety, same discipline as the task_queued hooks: a
+    # sink WITHOUT marathon_parked silently drops it, and a hook that CRASHES
+    # never breaks the frame loop -- the turn still ends on "".
+    class _CrashParkSink(RecSink):
+        def marathon_parked(self, reason): raise RuntimeError("ui bug")
+
+    frames = [{"type": "marathon_paused", "reason": "runaway"}]
+    assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == ""
+    assert _run_queue_frames_stream(monkeypatch, frames, _CrashParkSink()) == ""
+
+
 def test_transient_retry_survives_502_then_succeeds():
     import asyncio
     from webbee.session import _transient_retry

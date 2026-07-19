@@ -157,6 +157,7 @@ class RichSink:
         self._reconnecting = 0          # stream transport down (W1 front-5): armed attempt#, 0 = none
         self._reconnect_since = None    # clock() at the moment the outage started
         self._turn_failed = False       # ERROR (not a user stop) ended the last turn (W1 front-3b)
+        self._parked = False            # marathon PARKED this turn (W1 front-3b) -> end_turn keeps remote_pending
 
     def _nudge(self) -> None:
         """After output/state changes: let the pane follow the tail + redraw."""
@@ -223,6 +224,7 @@ class RichSink:
         self._reconnecting = 0
         self._reconnect_since = None
         self._turn_failed = False
+        self._parked = False
         self.console.print()   # breathing room between the user's message and the response
         self._nudge()
 
@@ -232,14 +234,31 @@ class RichSink:
         each failing turn (W1 front-3b). One-turn flag; begin_turn clears."""
         self._turn_failed = True
 
+    def marathon_parked(self, reason: str) -> None:
+        """The run PARKED (runaway/consent/credits — kernel keeps its task
+        queue alive waiting for a wake). end_turn must NOT clear the remote
+        rows: they are still queued server-side; the panel would lie
+        (W1 front-3b, the post-runaway 'empty panel over a non-empty kernel
+        queue'). Rows re-tag ⏸ parked; the next run's task_dequeued frames
+        remove them by iid as the kernel drains."""
+        self._parked = True
+
     def end_turn(self, final_text: str) -> None:
         self._busy = False
         # The kernel session's own queue only exists while a run is live —
-        # once this turn returns (complete / stopped / parked) the terminal
-        # no longer streams its dequeue frames, so any leftover remote rows
-        # would linger as phantoms. Clear them (in place — the panel holds
-        # this list object).
-        self.remote_pending.clear()
+        # once this turn returns COMPLETE or user-stopped, the terminal no
+        # longer streams its dequeue frames, so any leftover remote rows
+        # would linger as phantoms: clear them (in place — the panel holds
+        # this list object). A PARKED turn is different: the kernel queue is
+        # still alive server-side waiting for a wake, so the rows are kept
+        # (tagged parked, ⏸ in the panel) instead of wiped — the next run's
+        # task_dequeued frames remove them by iid as the kernel drains.
+        if self._parked:
+            for r in self.remote_pending:
+                r["parked"] = True
+            self._parked = False
+        else:
+            self.remote_pending.clear()
         # Sticky-todo scrollback record (0.3.15): in the dock the live panel
         # replaced the inline re-renders, so print the FINAL checklist state
         # ONCE per turn that touched it — the transcript keeps the history
