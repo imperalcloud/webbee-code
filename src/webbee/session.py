@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from webbee.coding_context import build_coding_context, detect_verify_cmd
 from webbee.consent import _retire, race_consent
@@ -17,6 +18,19 @@ from webbee.frames import (
     render_foreign_frame,
     render_todo_frame,
 )
+
+
+# W1 Task 10 (own-task watchdog): a test seam for the deduped-twin-hang clock
+# below -- monkeypatched as `webbee.session._monotonic` so a test can drive
+# elapsed-time without a real sleep.
+_monotonic = time.monotonic
+
+# Deduped-twin hang (W1 front-3b): a turn's task_id can be ring-dropped
+# kernel-side as an at-least-once twin, so the shared stream carries ONLY
+# frames tagged with OTHER task_ids while this turn's own task_id never
+# appears. Left alone the dock spins "working" forever. Past this many
+# seconds of foreign-only traffic with zero own frames, end the turn honestly.
+_FOREIGN_ONLY_DEADLINE_S = 90.0
 
 
 def _is_transient_status(status: int) -> bool:
@@ -147,6 +161,8 @@ class AgentSession:
             # won. Everything else is byte-identical to the old async-for.
             carry_task = None    # a still-pending __anext__ task (consent won)
             carry_frame = None   # an already-pulled frame (the stream won)
+            _t0 = _monotonic()   # W1 Task 10: own-task watchdog start
+            _own_frames = False  # -> True the instant ANY non-foreign frame lands
             try:
                 while True:
                     if carry_frame is not None:
@@ -170,7 +186,20 @@ class AgentSession:
                     # turn's progress) now render ONE tagged, display-only line.
                     if _is_foreign_frame(frame, self._task_id):
                         render_foreign_frame(frame, sink)
+                        if (not _own_frames and self._task_id
+                                and _monotonic() - _t0 > _FOREIGN_ONLY_DEADLINE_S):
+                            # Deduped-twin hang (W1 front-3b): the kernel ring
+                            # dropped this turn's task as a twin -- its task_id
+                            # will never appear on the stream. Foreign traffic
+                            # flowing + zero own frames is the signature; end
+                            # honestly instead of spinning "working" forever.
+                            _note = getattr(sink, "note", None)
+                            if _note is not None:
+                                _note("⚠ this message produced no work of its own "
+                                      "(likely a duplicate the kernel dropped) — done waiting")
+                            return ""
                         continue
+                    _own_frames = True
 
                     # Live steer topology: a Telegram/panel-steered turn keeps THIS
                     # client's task_id (the terminal stays the sole executor) with

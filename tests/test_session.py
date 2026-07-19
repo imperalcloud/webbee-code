@@ -1199,3 +1199,100 @@ def test_post_result_retries_then_gives_up_silently():
     c = _Client()
     asyncio.run(s._post_result(c, "sid", {"req_id": "r1"}))   # must NOT raise
     assert c.calls == 4   # 1 try + 3 retries
+
+
+# ── W1 Task 10: own-task watchdog (deduped-twin hang) ────────────────────────
+# Signature: this turn's task was ring-dropped kernel-side, so the shared
+# stream carries ONLY frames tagged with OTHER task_ids -- this turn's own
+# task_id never appears. Left alone the dock spins "working" forever (only
+# Esc unsticks it). If >=1 foreign frame flowed, ZERO own frames landed, and
+# _FOREIGN_ONLY_DEADLINE_S has elapsed since the stream started, end the turn
+# honestly with a note instead of hanging. Pure frame-silence (no frames at
+# all) is a DIFFERENT signature and must never trip this -- the check lives
+# INSIDE the foreign-frame branch only.
+
+def test_foreign_only_stream_trips_watchdog(monkeypatch):
+    import webbee.session as S
+
+    # _monotonic() call sequence: [0] _t0 at stream start: 1000.0
+    # [1] frame1's check: delta 0 -> not tripped -> continue
+    # [2] frame2's check: delta 95 -> tripped -> end the turn
+    times = iter([1000.0, 1000.0, 1095.0])
+    monkeypatch.setattr(S, "_monotonic", lambda: next(times))
+
+    frames = [
+        {"type": "tool_request", "task_id": "other", "req_id": "r1", "tool": "bash", "args": {}},
+        {"type": "tool_request", "task_id": "other", "req_id": "r2", "tool": "bash", "args": {}},
+    ]
+
+    class _NoteSink(RecSink):
+        def __init__(self):
+            super().__init__()
+            self.notes = []
+        def note(self, text): self.notes.append(text)
+
+    sink = _NoteSink()
+    result = _run_queue_frames_stream(monkeypatch, frames, sink)
+
+    assert result == ""
+    assert len(sink.notes) == 1
+    assert "duplicate" in sink.notes[0]
+
+
+def test_foreign_only_watchdog_ignored_by_sink_without_note_hook(monkeypatch):
+    # A minimal sink (no `note`) must still end the turn cleanly -- the hook
+    # is getattr-guarded like every other sink extension point in this loop.
+    import webbee.session as S
+
+    times = iter([1000.0, 1000.0, 1095.0])
+    monkeypatch.setattr(S, "_monotonic", lambda: next(times))
+
+    frames = [
+        {"type": "tool_request", "task_id": "other", "req_id": "r1", "tool": "bash", "args": {}},
+        {"type": "tool_request", "task_id": "other", "req_id": "r2", "tool": "bash", "args": {}},
+    ]
+
+    assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == ""
+
+
+def test_foreign_only_watchdog_never_trips_with_at_least_one_own_frame(monkeypatch):
+    # A single own frame latches _own_frames=True permanently -- even if
+    # foreign traffic keeps flowing past the deadline afterwards, this turn
+    # is genuinely alive (not a ring-dropped twin) and must never be cut off.
+    import webbee.session as S
+
+    # _t0 is the only call the correct implementation ever makes here: once
+    # _own_frames latches True, the foreign branch's `and` short-circuits
+    # before touching the clock again. Extra values stay unused as a safety
+    # net -- if a regression re-checks the clock anyway, it reads a delta
+    # comfortably past the deadline instead of raising StopIteration.
+    times = iter([1000.0, 1200.0, 1200.0])
+    monkeypatch.setattr(S, "_monotonic", lambda: next(times))
+
+    frames = [
+        {"type": "progress", "task_id": "OURS", "text": "on it"},   # own frame
+        {"type": "tool_request", "task_id": "other", "req_id": "r1", "tool": "bash", "args": {}},
+        {"type": "final", "task_id": "OURS", "text": "done"},
+    ]
+
+    sink = RecSink()
+    sink.progress_calls = []
+    sink.progress = lambda text: sink.progress_calls.append(text)
+    assert _run_queue_frames_stream(monkeypatch, frames, sink) == "done"
+
+
+def test_foreign_only_watchdog_never_trips_before_the_deadline(monkeypatch):
+    # Foreign-only traffic that hasn't yet crossed _FOREIGN_ONLY_DEADLINE_S
+    # must let the turn keep waiting for its own final rather than bailing.
+    import webbee.session as S
+
+    times = iter([1000.0, 1010.0, 1089.0])   # deltas 10, 89 -- both under the 90s deadline
+    monkeypatch.setattr(S, "_monotonic", lambda: next(times))
+
+    frames = [
+        {"type": "tool_request", "task_id": "other", "req_id": "r1", "tool": "bash", "args": {}},
+        {"type": "tool_request", "task_id": "other", "req_id": "r2", "tool": "bash", "args": {}},
+        {"type": "final", "task_id": "OURS", "text": "done"},
+    ]
+
+    assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == "done"
