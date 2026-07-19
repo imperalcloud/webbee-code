@@ -19,6 +19,33 @@ from webbee.frames import (
 )
 
 
+def _is_transient_status(status: int) -> bool:
+    return status >= 500 or status in (408, 429)
+
+
+async def _transient_retry(send, *, attempts: int = 5, base: float = 1.0, cap: float = 8.0):
+    """Bounded transient-retry for gateway WRITE calls (turn-start POST): a
+    502 during a deploy must not kill the turn. Verdict/normal statuses return
+    immediately; transport errors and 5xx/408/429 retry with capped backoff.
+    The LAST failure is returned/raised for the caller's raise_for_status."""
+    backoff = base
+    last_exc = None
+    last_resp = None
+    for _ in range(max(1, attempts)):
+        try:
+            resp = await send()
+            if not _is_transient_status(resp.status_code):
+                return resp
+            last_resp, last_exc = resp, None
+        except (Exception,) as e:            # httpx.HTTPError / OSError
+            last_exc, last_resp = e, None
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, cap)
+    if last_exc is not None:
+        raise last_exc
+    return last_resp
+
+
 class AgentSession:
     """Client-side driver for one coding turn against the Imperal cloud.
     The brain runs server-side; this is the hands — it streams kernel-
@@ -84,11 +111,8 @@ class AgentSession:
 
         headers = await self._headers()
         async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:
-            resp = await client.post(
-                "/v1/agent/sessions",
-                json=body,
-                headers=headers,
-            )
+            resp = await _transient_retry(lambda: client.post(
+                "/v1/agent/sessions", json=body, headers=headers))
             resp.raise_for_status()
             _sess = resp.json()
             session_id = _sess["session_id"]
@@ -111,7 +135,10 @@ class AgentSession:
             step_labels: dict = {}
             local_ids: set = set()
             from webbee.stream import stream_frames
-            stream = stream_frames(client, session_id, self._headers, start_id=start_id)
+            _fr = getattr(self.token_provider, "force_refresh", None)
+            _rc = getattr(sink, "reconnecting", None)
+            stream = stream_frames(client, session_id, self._headers, start_id=start_id,
+                                   force_refresh=_fr, on_retry=_rc)
             # Liveness A: explicit __anext__ pulls (not `async for`) so a
             # pending local consent can RACE the stream. Between iterations at
             # most ONE of carry_task/carry_frame is set — a consent race hands
@@ -289,15 +316,25 @@ class AgentSession:
 
         return ""
 
+    _result_delays = (0.5, 2.0, 5.0)   # class attr — tests override per instance
+
     async def _post_result(self, client, session_id: str, out: dict) -> None:
-        # Best-effort: a result POST must NEVER raise into the stream loop — that
-        # would abort the turn and leave the kernel's dispatch hanging (frozen
-        # dock). On a transient failure the kernel's tool-wait timeout recovers.
-        try:
-            headers = await self._headers()
-            await client.post(f"/v1/agent/sessions/{session_id}/result", json=out, headers=headers)
-        except Exception:
-            pass
+        # Never raises into the stream loop. W1: bounded transient retries —
+        # the kernel dedups by req_id, so a duplicate post is safe, and this
+        # cuts outage recovery from the kernel's tool-wait expiry (up to
+        # 65min for bash) to seconds. Final fallback unchanged: give up
+        # silently, kernel re-dispatches the same req_id.
+        for i, delay in enumerate((0.0,) + tuple(self._result_delays)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                headers = await self._headers()
+                r = await client.post(f"/v1/agent/sessions/{session_id}/result",
+                                      json=out, headers=headers)
+                if r.status_code < 500:
+                    return
+            except Exception:
+                continue
 
     async def stop(self) -> None:
         """P5g: server-side stop for Esc/Ctrl-C. Posts a cancel for the

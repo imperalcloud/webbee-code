@@ -138,7 +138,7 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
 
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         # A foreign turn's tool_request and final (must NEVER be executed /
         # terminal for THIS turn -- only rendered as tagged lines), THEN this
         # turn's own final (must be honored). Cross-surface frames carry the
@@ -161,10 +161,12 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
     class _ResultResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {}
 
@@ -256,7 +258,7 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
 
     monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
                "tool": "read_file", "args": {}, "origin": "telegram"}
         yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
@@ -278,10 +280,12 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
     class _ResultResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {}
 
@@ -683,10 +687,12 @@ def _run_consent_race(monkeypatch, fake_stream, sink, on_result_post=None):
     result_posts = []
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): ...
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
     class _ResultResp:
+        status_code = 200
         def raise_for_status(self): ...
         def json(self): return {}
 
@@ -719,7 +725,7 @@ def test_consent_prompt_dismissed_when_turn_continues_from_another_surface(monke
     # consent result POSTed (the kernel accepts only the FIRST result per
     # issued req_id), the thinking frame must render, and the turn must
     # continue to its final normally.
-    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
                "app_id": "webbee", "tool": "bash", "args": {"command": "rm x"}}
         yield {"type": "thinking", "task_id": "OURS", "llm_text": "ok, proceeding"}
@@ -738,7 +744,7 @@ def test_consent_prompt_dismissed_when_turn_continues_from_another_surface(monke
 def test_consent_local_answer_posts_exactly_as_today(monkeypatch):
     # Test 2: the user answers locally FIRST -- the result is POSTed exactly
     # as today, nothing is dismissed/cancelled, and the turn ends normally.
-    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
                "app_id": "webbee", "tool": "bash", "args": {"command": "ls"}}
         yield {"type": "final", "task_id": "OURS", "text": "done"}
@@ -760,7 +766,7 @@ def test_consent_republished_same_req_id_keeps_prompt_one_post(monkeypatch):
     release = asyncio.Event()    # gates the local answer
     answered = asyncio.Event()   # gates the stream's final
 
-    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
                "tool": "bash", "args": {}}
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
@@ -784,7 +790,7 @@ def test_stream_end_while_consent_pending_returns_cleanly(monkeypatch):
     # Test 4: the stream generator ends while the consent is still pending --
     # no hang, no unposted-result crash: the prompt task is cancelled safely
     # and run() exits exactly as today's stream end does (returns "").
-    async def _stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "confirm_request", "task_id": "OURS", "req_id": "c1",
                "tool": "bash", "args": {}}
         # generator ends -> StopAsyncIteration mid-consent-wait
@@ -922,7 +928,7 @@ def _run_turn_capture_body(monkeypatch, **run_kw):
 
     monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         yield {"type": "final", "task_id": "OURS", "text": "done"}
 
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
@@ -930,6 +936,7 @@ def _run_turn_capture_body(monkeypatch, **run_kw):
     bodies = []
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
@@ -1024,13 +1031,14 @@ def _run_queue_frames_stream(monkeypatch, frames, sink):
 
     monkeypatch.setattr(T, "LocalToolExecutor", _NoExecutor)
 
-    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0"):
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
         for f in frames:
             yield f
 
     monkeypatch.setattr(ST, "stream_frames", _fake_stream)
 
     class _SessResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
 
@@ -1098,3 +1106,62 @@ def test_task_queue_frames_ignored_by_minimal_or_crashing_sink(monkeypatch):
     ]
     assert _run_queue_frames_stream(monkeypatch, frames, RecSink()) == "done"
     assert _run_queue_frames_stream(monkeypatch, frames, _CrashSink()) == "done"
+
+
+def test_transient_retry_survives_502_then_succeeds():
+    import asyncio
+    from webbee.session import _transient_retry
+
+    class _R:
+        def __init__(self, s):
+            self.status_code = s
+
+    seq = [_R(502), _R(503), _R(200)]
+
+    async def send():
+        return seq.pop(0)
+
+    r = asyncio.run(_transient_retry(send, attempts=5, base=0.0, cap=0.0))
+    assert r.status_code == 200
+
+
+def test_transient_retry_verdict_passes_through_immediately():
+    import asyncio
+    from webbee.session import _transient_retry
+
+    class _R:
+        status_code = 401
+
+    calls = []
+
+    async def send():
+        calls.append(1)
+        return _R()
+
+    r = asyncio.run(_transient_retry(send, attempts=5, base=0.0, cap=0.0))
+    assert r.status_code == 401 and len(calls) == 1   # a verdict is NOT retried
+
+
+def test_post_result_retries_then_gives_up_silently():
+    import asyncio
+    from webbee.session import AgentSession
+
+    class _Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def post(self, url, json=None, headers=None):
+            self.calls += 1
+            raise OSError("down")
+
+    s = AgentSession.__new__(AgentSession)
+    s.token_provider = None
+
+    async def _h():
+        return {}
+
+    s._headers = _h
+    s._result_delays = (0.0, 0.0, 0.0)   # test seam: no real sleeps
+    c = _Client()
+    asyncio.run(s._post_result(c, "sid", {"req_id": "r1"}))   # must NOT raise
+    assert c.calls == 4   # 1 try + 3 retries
