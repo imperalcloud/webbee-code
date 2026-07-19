@@ -20,6 +20,15 @@ class VectorStore:
         rows = []
         for i, _id in enumerate(ids):
             if _id in self._pos:
+                if not self._mat.flags.writeable:
+                    # Copy-on-write: _mat may be a read-only mmap loaded
+                    # straight off the vector cache (store.load_vectors'
+                    # mmap_mode="r" perf win) via from_arrays. A read-only
+                    # boot+search session never reaches this branch; only an
+                    # incremental re-embed of an existing chunk id (same id,
+                    # changed content) needs to mutate a row in place, so pay
+                    # for exactly one full copy here, lazily.
+                    self._mat = np.array(self._mat)
                 self._mat[self._pos[_id]] = vecs[i]
             else:
                 self._pos[_id] = len(self._ids)
