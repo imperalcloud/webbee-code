@@ -5,7 +5,9 @@ same-repo-root sharing (wiring map §6 boot split)."""
 import os
 import subprocess
 
-from webbee.slots import SessionSlot, SlotManager, WorkspaceResources, close_active, close_at
+from webbee.slots import (SessionSlot, SlotManager, WorkspaceResources,
+                          auto_label, close_active, close_at, disarm_all,
+                          is_turn_alive, sanitize_label)
 
 
 def _mk_repo(tmp_path):
@@ -336,3 +338,130 @@ def test_close_active_is_a_thin_wrapper_over_close_at():
     assert close_active(mgr, seen.append) is True
     assert seen == [victim]
     assert mgr.active_idx == 1
+
+
+# --- auto_label (W4c T3: tabs name themselves after the first task) --------
+
+
+def test_auto_label_short_text_passes_through_unchanged():
+    assert auto_label("fix the bug") == "fix the bug"
+
+
+def test_auto_label_collapses_internal_whitespace():
+    assert auto_label("fix   the\n\tbug") == "fix the bug"
+
+
+def test_auto_label_strips_leading_trailing_whitespace():
+    assert auto_label("   fix the bug   ") == "fix the bug"
+
+
+def test_auto_label_cuts_at_word_boundary_under_the_cap():
+    text = "please fix the authentication bug in the login flow"
+    label = auto_label(text)
+    assert len(label) <= 25          # 24-char budget + the ellipsis
+    assert label.endswith("…")
+    assert not label[:-1].endswith(" ")   # trailing space trimmed before the ellipsis
+    assert text.startswith(label[:-1].rstrip())
+
+
+def test_auto_label_no_ellipsis_when_text_fits_exactly_at_the_cap():
+    text = "x" * 24
+    assert auto_label(text) == text
+
+
+def test_auto_label_hard_cuts_a_single_word_with_no_boundary():
+    text = "x" * 40
+    label = auto_label(text)
+    assert label == "x" * 24 + "…"
+
+
+def test_auto_label_strips_ansi_color_codes():
+    assert auto_label("\x1b[31mfix the bug\x1b[0m") == "fix the bug"
+
+
+def test_auto_label_strips_bare_control_bytes():
+    assert auto_label("fix\x00the\x1bbug") == "fixthebug"
+
+
+def test_auto_label_empty_or_whitespace_only_returns_empty():
+    assert auto_label("") == ""
+    assert auto_label("   \n\t  ") == ""
+    assert auto_label(None) == ""
+
+
+# --- sanitize_label (/rename: cap 32, no ellipsis) --------------------------
+
+def test_sanitize_label_short_name_passes_through():
+    assert sanitize_label("billing") == "billing"
+
+
+def test_sanitize_label_collapses_whitespace_and_trims():
+    assert sanitize_label("  billing   fix  ") == "billing fix"
+
+
+def test_sanitize_label_hard_caps_at_32_no_ellipsis():
+    name = "x" * 40
+    result = sanitize_label(name)
+    assert result == "x" * 32
+    assert "…" not in result
+
+
+def test_sanitize_label_custom_max_len():
+    assert sanitize_label("x" * 10, max_len=5) == "x" * 5
+
+
+def test_sanitize_label_strips_ansi_and_control():
+    assert sanitize_label("\x1b[31mbilling\x1b[0m\x00") == "billing"
+
+
+def test_sanitize_label_empty_or_whitespace_only_returns_empty():
+    assert sanitize_label("") == ""
+    assert sanitize_label("   ") == ""
+
+
+# --- is_turn_alive (Part D: busy-tab close confirm) -------------------------
+
+class _FakeTask:
+    def __init__(self, done=False):
+        self._done = done
+
+    def done(self):
+        return self._done
+
+
+def test_is_turn_alive_false_when_no_task_recorded():
+    slot = _mk_slot()
+    assert is_turn_alive(slot) is False
+
+
+def test_is_turn_alive_true_while_task_running():
+    slot = _mk_slot()
+    slot.turn["task"] = _FakeTask(done=False)
+    assert is_turn_alive(slot) is True
+
+
+def test_is_turn_alive_false_once_task_is_done():
+    slot = _mk_slot()
+    slot.turn["task"] = _FakeTask(done=True)
+    assert is_turn_alive(slot) is False
+
+
+# --- disarm_all (Part D) -----------------------------------------------------
+
+def test_disarm_all_clears_every_slots_flag():
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    a = _mk_slot(label="a")
+    a.close_armed = True
+    b = _mk_slot(label="b")
+    b.close_armed = True
+    mgr.add(a)
+    mgr.add(b)
+    disarm_all(mgr)
+    assert a.close_armed is False and b.close_armed is False
+
+
+def test_disarm_all_is_a_noop_when_nothing_armed():
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    disarm_all(mgr)   # must not raise

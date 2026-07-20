@@ -89,6 +89,7 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                           live_session_id=lambda: "",
                           on_mode=None,
                           mode_getter=None,
+                          label_getter=None,
                           interval: float = _POLL_INTERVAL,
                           client=None,
                           idle_after_s: float = 300.0,
@@ -139,6 +140,16 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                             at the fast cadence, no extra poke required.
                             None/"" omits the query param entirely (old
                             wiring, or no session polled yet).
+      * label_getter()     -- sync, optional (W4c T3, label sync); returns
+                            the CURRENT tab title of the session actually
+                            being polled -- same "read fresh every tick,
+                            never blindly slots.active()" discipline as
+                            `mode_getter` above. Handed to
+                            fetch_pending_steer as `label=`, which appends
+                            `&label={label}` (urlencoded) so a self-named or
+                            /rename'd tab reaches the gateway within one
+                            poll tick. None/"" omits the query param
+                            entirely, identical to `mode_getter` absent.
       * slot_id            -- W4b T5, optional; threaded verbatim into
                             `derive_session_id` so a LATER tab's poller
                             derives ITS OWN `-s{slot_id}` session id (never
@@ -215,6 +226,9 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                 mode = mode_getter() if mode_getter is not None else ""
                 if mode:
                     fetch_kw["mode"] = mode
+                label = label_getter() if label_getter is not None else ""
+                if label:
+                    fetch_kw["label"] = label
                 payload = await fetch_pending_steer(cfg, token_provider, sid, **fetch_kw) or {}
                 if payload.get("items"):
                     last_active = now()  # a successful drain = activity

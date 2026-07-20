@@ -8,7 +8,8 @@ from webbee import __version__, boot, home
 from webbee.account import login_device_flow
 from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
-from webbee.slots import SessionSlot, SlotManager, WorkspaceResources, close_active
+from webbee.slots import (SessionSlot, SlotManager, WorkspaceResources,
+                         auto_label, close_active, sanitize_label)
 from webbee.tui import _MODES, next_mode
 
 
@@ -151,7 +152,7 @@ def _slot_ctx(slot: SessionSlot, *, logged_in: bool) -> CommandContext:
 _HOME_GATED_ACTIONS = frozenset({
     "steps", "step_detail", "checkpoints", "rollback", "notify", "mode",
     "cost", "queue", "queue_clear", "login", "logout", "sessions",
-    "sessions_revoke", "logout_others",
+    "sessions_revoke", "logout_others", "rename",
 })
 
 _HOME_GATE_NOTE = "open a session tab first — Ctrl+T or type a task"
@@ -489,16 +490,45 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
     slot already has open, its workspace is auto-isolated into its own `git
     worktree` (`_isolate_workspace`) -- the tab's LABEL still reflects the
     original repo name (computed here, before the swap), never the worktree
-    cache path's basename."""
+    cache path's basename.
+
+    0.3.25 Part C (per-repo instance lock): `first=True` is also the ONE
+    moment this process tries to become the primary Webbee for this repo
+    (`instance_lock.acquire`) — a SECOND process opening the same repo finds
+    the lock already held and is told so (`lock.held`); when `slot_id` was
+    auto-minted (the caller didn't pass one — real production boot, never a
+    deterministic test) this instance then mints a short hex id for what
+    would otherwise be its own legacy tab-1 id, exactly like every LATER tab
+    already does, and an honest note lands in this slot's own transcript.
+    The `InstanceLock` itself rides on `slot.instance_lock` (a dynamic
+    attribute, same pattern as `agent.slot_id` below it) — `run_repl`'s own
+    teardown closes it at process exit, releasing the flock for a future
+    process on this repo."""
     from uuid import uuid4
 
+    from webbee import instance_lock as _instance_lock
     from webbee import tui
     from webbee.mode_store import load_mode
     from webbee.render import RichSink
+    from webbee.repo import compute_repo_key, find_repo_root
     from webbee.sizing import get_size
 
-    if slot_id is None:
+    auto_slot_id = slot_id is None
+    if auto_slot_id:
         slot_id = "" if first else uuid4().hex[:6]
+
+    lock = None
+    lock_note = ""
+    if first:
+        def _repo_key() -> str:   # runs `git remote get-url` -- keep off the event loop
+            return compute_repo_key(find_repo_root(workspace))
+        lock = _instance_lock.acquire(await asyncio.to_thread(_repo_key))
+        if lock.held:
+            lock_note = ("another Webbee is already running in this repo — "
+                        "this window is a separate parallel session")
+            if auto_slot_id:
+                slot_id = uuid4().hex[:6]
+
     effective_mode = await asyncio.to_thread(load_mode, workspace) or mode
     width, _height = get_size(None)   # pre-app: same fallback tui.run_session's own sizing uses
     pane = tui.OutputPane(width=width)
@@ -511,6 +541,9 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
                                         intel_factory=intel_factory, shadow_factory=shadow_factory,
                                         pane=pane, sink=sink, first=first, account=account,
                                         slot_id=slot_id, label=label)
+    slot.instance_lock = lock
+    if lock_note:
+        sink.note(lock_note)
     if wt_note:
         sink.note(wt_note)
     return (slot, replayed) if _with_replayed else slot
@@ -825,30 +858,13 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     _say(slot, f"Remote control unavailable: {type(e).__name__}")
                 return "continue"
             if res.action == "new_tab":
-                # Task 5: no path -> clone the ACTIVE slot's own workspace
-                # into a fresh tab (falling back to the process cwd only if
-                # that's somehow empty too — defensive, shouldn't happen in
-                # practice); a GIVEN path is resolved against the process's
-                # cwd (`os.path.abspath`, the SAME anchor `workspace` itself
-                # uses everywhere else in this file), not the active slot's
-                # own directory — so `/new ../sibling` means the same thing
-                # no matter which tab you typed it from. Always `first=False`
-                # (map §6 replay landmine): only the process's very first
-                # session slot ever gets the welcome banner + thread replay.
-                # A fresh tab starts in the process's BASELINE `mode`, never
-                # inheriting whatever the active tab is currently running in
-                # — an autopilot tab must never spawn another autopilot tab
-                # silently.
-                ws = os.path.abspath(res.arg) if res.arg else (slot.workspace or workspace)
-                new_slot = await _make_session_slot(
-                    cfg, token_provider, ws, mode, resources=resources,
-                    shared_client=shared_client, agent_factory=agent_factory,
-                    intel_factory=intel_factory, shadow_factory=shadow_factory,
-                    first=False)
-                idx = slots.add(new_slot)
-                ui_hooks.get("switch", slots.switch)(idx)
-                _spawn_slot_poller(new_slot)
-                new_slot.sink.note(f"tab {idx} opened — {new_slot.label}")
+                # `_open_new_tab` (shared with the tab bar's + chip, W4c Part
+                # B item 5) resolves the SAME "no path -> clone whatever's
+                # active" / "a given path is process-cwd-relative" contract
+                # this action always had. Always `first=False` (map §6
+                # replay landmine): only the process's very first session
+                # slot ever gets the welcome banner + thread replay.
+                await _open_new_tab(res.arg)
                 return "continue"
             if res.action == "tab_switch":
                 try:
@@ -889,6 +905,21 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                          for i, s in enumerate(slots.slots)]
                 _say(slot, "Open tabs:\n" + "\n".join(lines))
                 return "continue"
+            if res.action == "rename":
+                # W4c T3: a manual rename ALWAYS wins -- `label_pinned = True`
+                # locks the title against the one-shot auto-label in
+                # `_run_turn_on` (and against any future /rename overwriting
+                # THIS one accidentally). Gated by _HOME_GATED_ACTIONS (Home
+                # has no title of its own to rename), so `slot` here is
+                # always a real session slot.
+                name = sanitize_label(res.arg) if res.arg else ""
+                if not name:
+                    _say(slot, "Usage: /rename <name>")
+                else:
+                    slot.label = name
+                    slot.label_pinned = True
+                    _say(slot, f"tab renamed → {name}")
+                return "continue"
             if res.action == "queue_clear":
                 # dispatch built the message (with the drop count) from the
                 # ctx snapshot; here we drop the live deque — the toolbar
@@ -927,7 +958,22 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         deliberately targets a DIFFERENT slot than whatever's on screen --
         W4b T5's `_steer_submit_on` is the poller's own caller now, each
         bound to its OWN slot). `_run_turn` below is the thin active()-
-        resolving wrapper every typed-line call site keeps using unchanged."""
+        resolving wrapper every typed-line call site keeps using unchanged.
+
+        W4c T3 (self-naming tabs): every call here is a genuine task line
+        (never a slash command -- `_handle` handles those itself and returns
+        before reaching this function), so the FIRST one a not-yet-labeled
+        slot ever runs doubles as the browser-tab-title moment -- `label_
+        pinned` is the ONE flag guarding this (see its own field comment on
+        SessionSlot): still False means neither a manual `/rename` nor an
+        earlier auto-label has claimed this slot's title yet. `auto_label`
+        returning "" (blank/pure-noise text) leaves today's default label
+        untouched rather than blanking it."""
+        if not slot.label_pinned:
+            label = auto_label(line)
+            if label:
+                slot.label = label
+                slot.label_pinned = True
         _sink = slot.sink
         _sink.begin_turn()
         kw = {"surface": surface} if surface else {}
@@ -1102,9 +1148,41 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 slot, text, surface, steer_iid),
             on_mode=lambda mode, surface: _on_mode(slot, mode, surface),
             mode_getter=lambda: slot.mode,
+            label_getter=lambda: slot.label,
             attach_turn=lambda attach_info: _attach_turn_on(slot, attach_info),
             client=shared_client, slot_id=slot.slot_id, initial_delay=offset))
         slot.bg_tasks.append(task)
+
+    async def _open_new_tab(path: str = "") -> SessionSlot:
+        """The shared "open a new tab" flow (Task 5's `/new` action; W4c
+        Part B item 5 generalizes it for the tab bar's + chip): builds a
+        session slot exactly like `/new` always has (`_make_session_slot`,
+        `first=False`, the process's BASELINE `mode` — an autopilot tab must
+        never spawn another autopilot tab silently), adds it, and switches
+        through `ui_hooks.get("switch", slots.switch)` — the SAME
+        `_switch_to` a click, Ctrl-T or a repl command already goes through,
+        so the history/draft swap always runs, never bypassed.
+
+        `path=""` (the + chip's own call — tui's `on_new` always calls this
+        with no args — and `/new` with no argument) clones the CURRENTLY
+        ACTIVE slot's own workspace, falling back to the process cwd only if
+        that's somehow empty too; a GIVEN path is resolved against the
+        process's cwd (`os.path.abspath`, the SAME anchor `workspace` itself
+        uses everywhere else in this file), not the active slot's own
+        directory — so `/new ../sibling` means the same thing no matter
+        which tab you typed it from."""
+        active = slots.active()
+        ws = os.path.abspath(path) if path else (active.workspace or workspace)
+        new_slot = await _make_session_slot(
+            cfg, token_provider, ws, mode, resources=resources,
+            shared_client=shared_client, agent_factory=agent_factory,
+            intel_factory=intel_factory, shadow_factory=shadow_factory,
+            first=False)
+        idx = slots.add(new_slot)
+        ui_hooks.get("switch", slots.switch)(idx)
+        _spawn_slot_poller(new_slot)
+        new_slot.sink.note(f"tab {idx} opened — {new_slot.label}")
+        return new_slot
 
     if use_dock:
         ok = False
@@ -1169,9 +1247,17 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                             workspace=workspace, ui_hooks=ui_hooks, run_turn=_run_turn,
                             spawn_poller=_spawn_slot_poller),
                         on_switch=lambda idx: _schedule_home_refill(slots, idx, home_fill_kwargs),
+                        on_new=lambda: _open_new_tab(),
                     )
                 finally:
                     _cancel_background()
+                    # Part C: release the per-repo instance lock (if this
+                    # process actually acquired one -- None on a secondary
+                    # instance or a lock-unavailable filesystem) so a FUTURE
+                    # process opening this same repo can become primary.
+                    _lock = getattr(session_slot, "instance_lock", None)
+                    if _lock is not None:
+                        _lock.close()
                     if shared_client is not None:
                         try:
                             await shared_client.aclose()

@@ -570,6 +570,115 @@ def test_mode_getter_read_fresh_every_tick_no_extra_poke_needed(monkeypatch):
     assert seen_modes[2] == "autopilot"   # the very next tick already reports it
 
 
+# ── W4c T3: label sync -- label_getter → fetch_pending_steer(label=) ────────
+
+def test_label_getter_threads_label_into_fetch(monkeypatch):
+    seen_labels = []
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        seen_labels.append(kw.get("label"))
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              label_getter=lambda: "billing fix", interval=0.01),
+           until=lambda: len(seen_labels) >= 2)
+    assert seen_labels[0] == "billing fix"
+
+
+def test_label_getter_absent_never_passes_label_kwarg(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_fetch(cfg, tp, session_id):   # no **kw -- would TypeError if a kwarg leaked
+        calls["n"] += 1
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              interval=0.01),
+           until=lambda: calls["n"] >= 2)
+    assert calls["n"] >= 2   # ran clean -- no TypeError from a stray kwarg
+
+
+def test_label_getter_returning_empty_string_omits_label_kwarg(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_fetch(cfg, tp, session_id):   # no **kw
+        calls["n"] += 1
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              label_getter=lambda: "", interval=0.01),
+           until=lambda: calls["n"] >= 2)
+    assert calls["n"] >= 2
+
+
+def test_label_getter_read_fresh_every_tick(monkeypatch):
+    # Same contract as mode_getter: a rename lands within one poll tick,
+    # no extra poke needed.
+    current = {"label": "webbee"}
+    seen_labels = []
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        seen_labels.append(kw.get("label"))
+        if len(seen_labels) == 2:
+            current["label"] = "billing"   # a rename lands between ticks
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              label_getter=lambda: current["label"], interval=0.01),
+           until=lambda: len(seen_labels) >= 3)
+    assert seen_labels[:2] == ["webbee", "webbee"]
+    assert seen_labels[2] == "billing"
+
+
+def test_mode_and_label_getters_both_thread_independently(monkeypatch):
+    seen = []
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        seen.append((kw.get("mode"), kw.get("label")))
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              mode_getter=lambda: "plan", label_getter=lambda: "billing",
+                              interval=0.01),
+           until=lambda: len(seen) >= 2)
+    assert seen[0] == ("plan", "billing")
+
+
 # ── per-slot stagger + slot_id threading (W4b T5) ────────────────────────────
 
 def test_initial_delay_sleeps_once_before_the_first_tick(monkeypatch):

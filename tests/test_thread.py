@@ -329,6 +329,121 @@ def test_fetch_pending_steer_mode_param_works_with_shared_client(monkeypatch):
     assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/pending-steer?mode=autopilot"
 
 
+# ── W4c T3: label sync -- &label= beside ?mode=, same back-compat style ─────
+
+def test_fetch_pending_steer_appends_label_query_param_when_given(monkeypatch):
+    from webbee.thread import fetch_pending_steer
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": []}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, path, headers=None, **kw):
+            seen["path"] = path
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56", label="billing fix"))
+    assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/pending-steer?label=billing%20fix"
+
+
+def test_fetch_pending_steer_omits_label_query_param_when_absent(monkeypatch):
+    from webbee.thread import fetch_pending_steer
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": []}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, path, headers=None, **kw):
+            seen["path"] = path
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56"))
+    assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/pending-steer"
+
+
+def test_fetch_pending_steer_combines_mode_and_label_with_ampersand(monkeypatch):
+    from webbee.thread import fetch_pending_steer
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": []}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, path, headers=None, **kw):
+            seen["path"] = path
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56",
+                                    mode="plan", label="billing"))
+    assert seen["path"] == ("/v1/agent/sessions/marathon-user-1-rab12cd34ef56/"
+                            "pending-steer?mode=plan&label=billing")
+
+
+def test_fetch_pending_steer_label_param_works_with_shared_client(monkeypatch):
+    from webbee.thread import fetch_pending_steer
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": []}
+
+    class FakeClient:
+        async def request(self, method, path, json=None, headers=None):
+            seen["path"] = path
+            return _Resp()
+
+    asyncio.run(fetch_pending_steer(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56",
+                                    client=FakeClient(), label="billing"))
+    assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/pending-steer?label=billing"
+
+
 def test_fetch_pending_steer_propagates_network_error():
     # Non-swallowing, same division of labor as fetch_recent_thread: the
     # poller (webbee.steer) owns the per-tick try/except.

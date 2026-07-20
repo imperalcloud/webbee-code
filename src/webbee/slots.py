@@ -7,8 +7,71 @@ WorkspaceResources caches the per-WORKSPACE pieces (intel, shadow, watcher,
 git branch) shared by slots on the same repo root (map §6 boot split)."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from collections import deque
+
+# Auto-label (W4c T3): a session tab renames itself from its first task's
+# text, browser-tab-title style. ANSI CSI sequences (colors/cursor moves --
+# "\x1b[31m...") are stripped as a WHOLE run FIRST (the run's own bytes,
+# ESC included, are never whitespace so collapsing later wouldn't touch
+# them); whitespace is collapsed NEXT -- \s already covers tab/newline/CR,
+# so a tab or newline inside the pasted text becomes a single space rather
+# than being silently deleted (which would glue two words together); any
+# STILL-remaining bare control byte (a lone ESC not part of a CSI run, NUL,
+# etc. -- never a real word separator) is dropped LAST, after whitespace is
+# already settled, so it simply vanishes without leaving a gap.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_WS_RE = re.compile(r"\s+")
+AUTO_LABEL_MAX = 24
+
+
+def _sanitize_whitespace(text: str) -> str:
+    """PURE. The ANSI/control/whitespace cleanup shared by `auto_label` and
+    `sanitize_label` below -- see the module comment above for the ordering
+    rationale (ANSI runs first, then whitespace collapse, then leftover
+    bare control bytes)."""
+    cleaned = _ANSI_RE.sub("", text or "")
+    cleaned = _WS_RE.sub(" ", cleaned)
+    return _CONTROL_RE.sub("", cleaned).strip()
+
+
+def auto_label(text: str) -> str:
+    """PURE. A compact browser-tab-style title from `text` (a session's
+    first task): sanitized (ANSI/control stripped -- see module comment
+    above), internal whitespace collapsed to single spaces, then cut to
+    `AUTO_LABEL_MAX` chars at the last whole word that still fits inside
+    that budget (falling back to a hard cut only when no space exists in
+    it at all -- same "no perfect boundary, still bounded" fallback
+    `tabs._fit` uses) with a trailing `…` -- appended ONLY when the
+    cleaned text was actually longer than the budget, never tacked onto
+    something that already fit as-is. "" (empty/all-control/all-
+    whitespace input) tells the caller to leave the slot's current label
+    alone."""
+    cleaned = _sanitize_whitespace(text)
+    if not cleaned:
+        return ""
+    if len(cleaned) <= AUTO_LABEL_MAX:
+        return cleaned
+    cut = cleaned[:AUTO_LABEL_MAX]
+    boundary = cut.rfind(" ")
+    if boundary > 0:
+        cut = cut[:boundary]
+    return cut.rstrip() + "…"
+
+
+RENAME_LABEL_MAX = 32
+
+
+def sanitize_label(text: str, max_len: int = RENAME_LABEL_MAX) -> str:
+    """PURE. `/rename`'s own sanitizer (repl.py): the SAME ANSI/control/
+    whitespace cleanup `auto_label` uses, but a plain hard cap at `max_len`
+    chars -- no word-boundary search, no trailing `…`. The user explicitly
+    typed this name; truncating it silently at a predictable length beats
+    surprising them with an ellipsis they never asked for. "" either way on
+    empty/all-noise input."""
+    return _sanitize_whitespace(text)[:max_len]
 
 
 @dataclass
@@ -24,6 +87,18 @@ class SessionSlot:
                                   # every LATER session slot mints a short hex id
                                   # (_make_session_slot), threaded into the agent's
                                   # POST body + the steer poller's derived id.
+    label_pinned: bool = False   # W4c T3: True once the label is LOCKED -- either
+                                  # a manual /rename, or the one-shot auto-label
+                                  # already fired (see repl._run_turn_on). Deliberately
+                                  # the ONE flag for both: re-deriving "is this still
+                                  # the default repo-basename label" from `workspace`
+                                  # would misfire on an auto-isolated worktree slot
+                                  # (its `workspace` is the worktree path, not the
+                                  # original repo whose basename became the label).
+    close_armed: bool = False    # W4c Part D: a ✕ click on a BUSY tab arms this
+                                  # instead of closing outright (tui._close_tab_click);
+                                  # a second click while armed closes for real. Any
+                                  # switch or keypress disarms it (tui._disarm_all).
     pending: deque = field(default_factory=deque)
     turn: dict = field(default_factory=lambda: {"task": None})
     pulled: dict = field(default_factory=lambda: {"text": "", "iid": ""})
@@ -125,6 +200,28 @@ def close_active(slots: SlotManager, cancel_slot=None) -> bool:
     I'm looking at", so they keep calling this instead of resolving
     `slots.active_idx` themselves."""
     return close_at(slots, slots.active_idx, cancel_slot)
+
+
+def is_turn_alive(slot: SessionSlot) -> bool:
+    """PURE predicate (Part D — busy-tab close confirm): True iff `slot`'s
+    OWN turn task (the same `turn["task"]` `_cancel_slot`/`_gate_busy`
+    already read) is genuinely still running. Only the dock path ever
+    populates `turn["task"]` at all -- a slot whose turn dict stays
+    `{"task": None}` (Home, the fallback loop, a finished turn) is never
+    considered busy."""
+    task = slot.turn.get("task")
+    return task is not None and not task.done()
+
+
+def disarm_all(slots: SlotManager) -> None:
+    """Part D: clear every slot's one-shot `close_armed` flag -- tui wires
+    this into `_switch_to` (any tab switch) and the Application's
+    `after_key_press` event (any keypress) alike, so a busy tab's armed
+    "click ✕ again" state never lingers past the moment the user does
+    anything else. Unconditional and idempotent -- cheaper to reset every
+    slot than to track which one (if any) was armed."""
+    for s in slots.slots:
+        s.close_armed = False
 
 
 class WorkspaceResources:
