@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.24
+
+The tab bar got a real design: the active tab is a solid highlighted chip,
+tabs are clearly separated, and spacing is uniform — plus a message typed
+on Home no longer shows up twice in the new tab.
+
+- Tabs now render as padded chips with uniform spacing, a clear dim
+  separator between every pair, and the active tab as a solid
+  bee-yellow block — unmistakable at a glance, no more squinting to find
+  which tab you're on.
+- Typing a task on Home and landing in the new session tab no longer
+  double-prints your first message in that tab's transcript.
+- Each tab now keeps its own input draft — switch away and back, your
+  unsent text is right where you left it.
+
 ## 0.3.23
 
 If a task on your session is waiting for your terminal — sent from the panel
