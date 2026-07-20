@@ -4016,7 +4016,7 @@ def test_tab_bar_window_is_root_hsplit_first_child():
                 assert not isinstance(bar, ConditionalContainer)   # ALWAYS visible
                 text = "".join(f[1] for f in bar.content.text())
                 assert "◆ Home" in text                            # Home always first
-                assert "●1 proj" in text                           # active session, marked ●N
+                assert "● 1·proj" in text                          # active session, marked ●N
                 pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
@@ -4495,7 +4495,7 @@ def test_tab_bar_close_click_closes_the_clicked_background_tab_not_the_active_on
                 frags = bar.content.text()
                 # frags: [home, sep, a-body, a-CLOSE, sep, b-body, b-close]
                 close_a = frags[3]
-                assert close_a[1] == " ✕"
+                assert close_a[1] == " ✕ "
                 ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
                                 button=MouseButton.LEFT, modifiers=frozenset())
                 close_a[2](ev)                                 # click ✕ on the BACKGROUND tab a
@@ -4546,7 +4546,7 @@ def test_tab_bar_close_click_closes_the_active_tab_when_that_is_the_one_clicked(
                 bar = get_app().layout.container.children[0]
                 frags = bar.content.text()
                 close_b = frags[6]
-                assert close_b[1] == " ✕"
+                assert close_b[1] == " ✕ "
                 ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
                                 button=MouseButton.LEFT, modifiers=frozenset())
                 close_b[2](ev)                                 # click ✕ on the ACTIVE tab b

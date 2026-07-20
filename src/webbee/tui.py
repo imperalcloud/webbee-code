@@ -1036,10 +1036,12 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     style = Style.from_dict({
         "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
         "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
-        "tab": "#8a8a8a",                    # idle tab — dim, same family as tb.dim
-        "tab.active": "#e8a317 bold",        # the VISIBLE tab — bee-yellow, same accent as tb.spin
-        "tab.alert": "#e8a317 bold reverse", # ⚠ consent waiting in a BACKGROUND tab — reversed so it pops next to tab.active
-        "tab.close": "#8a8a8a",              # the ✕ — dim, closing is never the default action
+        "tab": "#8a8a8a",                    # idle chip — dim text, no bg
+        "tab.active": "bg:#e8a317 #1c1c1c bold",  # the ACTIVE chip — solid bee-yellow bg, dark text: unmistakable
+        "tab.alert": "#e8a317 bold",         # ⚠ consent waiting in a BACKGROUND tab — yellow text, no bg (only the active chip owns one)
+        "tab.close": "#8a8a8a",              # the ✕ on a background tab — dim, closing is never the default action
+        "tab.close.active": "bg:#e8a317 #1c1c1c",  # the ✕ on the ACTIVE tab — same bg as its chip, reads as one contiguous block
+        "tab.sep": "#3a3a3a",                # the │ between tabs — dim, consistent, exactly one per pair, none at the ends
         "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
         "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
         "tb.working": "#e8a317",             # 'working' — yellow
