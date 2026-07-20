@@ -4,11 +4,27 @@ import re
 from webbee.tui import next_mode, build_toolbar
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _txt(frags):
     """Join prompt_toolkit formatted-text fragments into the visible string."""
     return "".join(seg for _, seg in frags)
+
+
+def strip_ansi(s):
+    """Strip SGR colour escapes — same pattern OutputPane._plain_lines uses."""
+    return _SGR.sub("", s)
+
+
+def ring_invariant(pane):
+    """W2 final-review: the buffer holds lines that precede the ring's first
+    record (deque eviction + trims) — `pane._ring_base_lines` is the count
+    of those. This must ALWAYS hold: total buffer lines == 1 (the trailing
+    split artifact — Rich console.print always ends with a newline) +
+    base lines + the sum of every retained record's own line count. Call
+    this after any operation that touches the ring, the base, or a trim."""
+    assert len(pane._all_lines()) == 1 + pane._ring_base_lines + sum(pane._record_lines)
 
 
 def test_next_mode_cycles():
@@ -93,29 +109,28 @@ def test_output_pane_captures_colored_text():
 # ── copy-on-select (drag → OSC 52) ────────────────────────────────────────────
 
 def test_selected_text_single_line():
+    # _selected_text now takes ABSOLUTE (line, col) pairs directly (W2 front-3a:
+    # the caller resolves viewport + _offset once, at press/move/release time).
     from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
     pane = OutputPane(width=80)
     pane.console.print("hello world")
-    assert pane._selected_text(Point(6, 0), Point(10, 0)) == "world"
+    assert pane._selected_text((0, 6), (0, 10)) == "world"
 
 
 def test_selected_text_multi_line_strips_ansi():
     from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
     pane = OutputPane(width=80)
     pane.console.print("abcdef")
     pane.console.print("[bold]ghijkl[/]")   # coloured — must be stripped
     pane.console.print("mnopqr")
-    assert pane._selected_text(Point(3, 0), Point(2, 2)) == "def\nghijkl\nmno"
+    assert pane._selected_text((0, 3), (2, 2)) == "def\nghijkl\nmno"
 
 
 def test_selected_text_reversed_order_normalizes():
     from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
     pane = OutputPane(width=80)
     pane.console.print("hello")
-    assert pane._selected_text(Point(4, 0), Point(0, 0)) == "hello"
+    assert pane._selected_text((0, 4), (0, 0)) == "hello"
 
 
 def test_copy_flash_expires():
@@ -124,6 +139,674 @@ def test_copy_flash_expires():
     pane.copy_flash = "✓ copied 5 chars"
     pane._flash_until = 0.0            # already in the past
     assert pane.flash() == ""
+
+
+def test_selection_survives_scroll_between_press_and_release(monkeypatch):
+    # W2 front-3a correctness base: the drag anchor is captured ABSOLUTE at
+    # MOUSE_DOWN and never re-derived from a later (scrolled) offset. Press
+    # at viewport (row=2, col=1) with offset=10 (abs line 12); scroll +5
+    # mid-drag (offset becomes 15); release at viewport (row=3, col=4)
+    # (abs line 18). Under the OLD viewport-anchor math (re-adding the
+    # CURRENT offset to a stale viewport row at MOVE/UP time) the start
+    # would have drifted to abs line 17 (2 + 15) instead of staying pinned
+    # at 12 — corrupting both the highlight and the copied text.
+    import webbee.clipboard as clipboard
+    from webbee.tui import OutputPane
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))   # numbered transcript
+    pane._offset = 10
+
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    pane.scroll(5)                      # scroll mid-drag: offset 10 → 15
+
+    move = MouseEvent(position=Point(4, 3), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+
+    up = MouseEvent(position=Point(4, 3), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+
+    # abs lines 12..18 exactly (line12[1:] .. line18[:5]) — never line17..
+    assert captured["text"] == "ine12\nline13\nline14\nline15\nline16\nline17\nline1"
+
+
+# ── W2 Task 7: edge-triggered drag auto-scroll + repeating edge tick ─────────
+
+def test_drag_at_bottom_edge_scrolls_and_grows_selection():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))   # 100 lines
+    pane._offset = 0
+
+    down = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    move = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,     # bottom row
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._offset == 3 and pane._edge_drag == 1
+
+    # the pointer sits still at the edge — no more MOUSE_MOVE arrives, but the
+    # ticker's edge_tick() must keep scrolling AND keep growing the selection.
+    pane.edge_tick()
+    assert pane._offset == 6
+    assert pane._sel[1][0] == pane._offset + pane._view_h - 1
+
+    pane.edge_tick()
+    assert pane._offset == 9
+    assert pane._sel[1][0] == pane._offset + pane._view_h - 1
+
+    up = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+    assert pane._edge_drag == 0
+
+
+def test_edge_drag_resets_on_mouse_up_and_top_edge_mirrors():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 0
+
+    down = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    move_bottom = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,
+                             button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move_bottom)
+    assert pane._edge_drag == 1
+
+    up = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+    assert pane._edge_drag == 0        # MOUSE_UP resets the armed edge
+
+    # --- fresh drag, mirrored at the TOP edge ---
+    pane._offset = 20
+    down2 = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                       button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down2)
+    move_top = MouseEvent(position=Point(3, 0), event_type=MouseEventType.MOUSE_MOVE,   # top row
+                          button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move_top)
+    assert pane._offset == 17 and pane._edge_drag == -1
+
+    pane.edge_tick()
+    assert pane._offset == 14
+    assert pane._sel[1][0] == pane._offset
+
+    pane.edge_tick()
+    assert pane._offset == 11
+    assert pane._sel[1][0] == pane._offset
+
+
+def test_edge_tick_noop_when_not_dragging():
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 20
+
+    pane._edge_drag = 0                # not armed at all
+    pane.edge_tick()
+    assert pane._offset == 20
+
+    pane._edge_drag = 1                # armed flag alone isn't enough — needs a live drag too
+    pane.control._down_abs = None
+    pane.edge_tick()
+    assert pane._offset == 20
+
+
+def test_edge_drag_scroll_clamps_at_buffer_end():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(15)))   # max_off == 5
+    pane._offset = 5                                            # already at the bottom
+
+    down = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    move = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._offset == 5           # scroll(+3) clamps at max_off — free from pane.scroll
+
+    pane.edge_tick()
+    assert pane._offset == 5           # edge_tick's scroll clamps too
+
+
+# ── W2 final-review Fix 4: click-vs-drag on ABSOLUTE coords, not viewport
+# ones — an edge auto-scroll during the drag can put the release on the SAME
+# viewport cell the press used while the underlying content has moved; the
+# old viewport-only compare mistook that for a click and dropped the copy. ─
+
+def test_mouse_up_same_viewport_cell_after_autoscroll_still_copies(monkeypatch):
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 0
+
+    down = MouseEvent(position=Point(5, 9), event_type=MouseEventType.MOUSE_DOWN,   # bottom row
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    move = MouseEvent(position=Point(5, 9), event_type=MouseEventType.MOUSE_MOVE,   # SAME cell
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)                  # bottom edge -> auto-scroll +3
+    assert pane._offset == 3
+
+    up = MouseEvent(position=Point(5, 9), event_type=MouseEventType.MOUSE_UP,       # SAME cell as press
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+
+    assert "text" in captured           # absolute endpoints differ (offset moved) -> copy fires
+
+
+def test_mouse_up_same_viewport_and_absolute_cell_still_skips_copy_as_a_click(monkeypatch):
+    # The other half of Fix 4: a genuine click (no scroll happened in
+    # between) still has IDENTICAL absolute endpoints, so it must still be
+    # treated as a click, not a drag — the fix only changes WHAT is
+    # compared, not the click-suppresses-copy behavior itself.
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 0
+
+    down = MouseEvent(position=Point(3, 4), event_type=MouseEventType.MOUSE_DOWN,   # mid-viewport
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    up = MouseEvent(position=Point(3, 4), event_type=MouseEventType.MOUSE_UP,       # no move in between
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+
+    assert captured == {}                # no scroll happened -> absolute endpoints match -> a click
+
+
+# ── W2 Task 8: selection capture — neighbor windows forward drag/release ────
+# prompt_toolkit has NO mouse capture (events route by pointer POSITION, not
+# by who owns a drag): releasing below the output pane used to leave the
+# highlight stuck and the copy never fired. `OutputPane.forward_mouse` lets a
+# neighbor window (queue/todo panel, toolbar) hand a MOUSE_MOVE/MOUSE_UP back
+# to the pane FIRST, while a drag is armed.
+
+def test_forward_mouse_noop_when_no_drag_armed():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    assert pane.control._down_abs is None
+    up = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    move = MouseEvent(position=Point(1, 0), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(up) is False
+    assert pane.forward_mouse(move) is False
+
+
+def test_forward_mouse_move_extends_selection_to_bottom_row_and_arms_edge_drag():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 20
+
+    down = MouseEvent(position=Point(1, 3), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                 # arms the drag INSIDE the pane (Point is x,y)
+
+    # A neighbor window's own coordinate space (e.g. row 2 of the queue
+    # panel) — forward_mouse must ignore ev.position.y entirely and clamp to
+    # the pane's own bottom row instead.
+    move = MouseEvent(position=Point(7, 2), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(move) is True
+    assert pane._sel[1] == (pane._offset + pane._view_h - 1, 7)   # x passed through, y clamped
+    assert pane._edge_drag == 1
+    assert pane.control._down_abs is not None        # still armed — only MOUSE_UP disarms
+
+
+def test_forward_mouse_up_completes_copy_at_bottom_row_and_resets_state(monkeypatch):
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))
+    pane._offset = 10
+
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                 # Point is (x, y) → anchor abs (12, 1)
+
+    # Delivered at the SAME viewport point the press used — a real in-pane
+    # MOUSE_UP would skip the copy as a same-position click, but a FORWARDED
+    # release only ever reaches here because the pointer already left the
+    # pane, so it's a drag by definition; the click-vs-drag check must not
+    # apply.
+    bottom = pane._offset + pane._view_h - 1   # captured BEFORE the call — the
+                                                # post-copy notify() re-follows
+                                                # the tail and moves _offset on
+    up = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(up) is True
+
+    assert captured["text"] == pane._selected_text((12, 1), (bottom, 1))
+    assert pane.control._down is None
+    assert pane.control._down_abs is None
+    assert pane._sel is None
+    assert pane._edge_drag == 0
+
+
+def test_forward_mouse_ignores_other_event_types_while_armed():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._io.write("hello")
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    scroll = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
+                        button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(scroll) is False
+    assert pane.control._down_abs is not None         # untouched — still armed
+
+
+# ── W2 final-review Fix 3a: a MOUSE_DOWN forwarded from a neighbor while a
+# drag is still armed means the matching MOUSE_UP was lost past that neighbor
+# (or further) — reset every stale drag field and let the neighbor's own
+# click proceed untouched (no phantom copy, no swallowed pull/toggle). ─────
+
+def test_forward_mouse_down_while_armed_resets_state_and_returns_false():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._io.write("hello")
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                 # arm a drag, never released — stale
+    assert pane.control._down_abs is not None
+
+    stray_down = MouseEvent(position=Point(3, 1), event_type=MouseEventType.MOUSE_DOWN,
+                            button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(stray_down) is False    # NOT consumed — the neighbor's click proceeds
+    assert pane.control._down is None
+    assert pane.control._down_abs is None
+    assert pane._sel is None
+    assert pane._edge_drag == 0
+
+
+def test_forward_mouse_down_while_stale_armed_lets_wrapped_pull_fire_clean(monkeypatch):
+    # End-to-end (mirrors test_release_below_pane_completes_copy_and_
+    # suppresses_queue_pull): a queue row's own mouse_handler wraps `forward`
+    # exactly like tui wires it. A stray MOUSE_DOWN landing on that row while
+    # the pane's drag is stale-armed must not fire a phantom copy — and the
+    # row's OWN MOUSE_UP (the click completing normally) must still pull,
+    # with the clipboard never touched by this whole sequence.
+    from collections import deque
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.queue_panel import queue_fragments
+    from webbee.tui import OutputPane
+
+    calls = []
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: calls.append(text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))
+    pane._offset = 10
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                  # arm a drag on the pane, stale (no MOUSE_UP)
+
+    pulls = []
+    frags = queue_fragments(deque(["a", "b"]), pull=pulls.append, width=80,
+                            forward=pane.forward_mouse)
+    row_handler = [f[2] for f in frags if len(f) == 3][0]
+
+    stray_down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                            button=MouseButton.LEFT, modifiers=frozenset())
+    assert row_handler(stray_down) is NotImplemented   # not consumed — the click's press proceeds
+    assert pane.control._down_abs is None              # the stale drag is fully cleared
+    assert pane._sel is None
+
+    stray_up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                          button=MouseButton.LEFT, modifiers=frozenset())
+    assert row_handler(stray_up) is None               # the click's OWN release
+    assert pulls == [0]                                # fires the pull normally
+    assert calls == []                                 # clipboard UNTOUCHED — no phantom copy
+
+
+# ── W2 final-review Fix 3b: edge-drag runaway guards — the user's wheel wins
+# over an armed auto-scroll, and a pointer genuinely parked at the edge for
+# ~10s (40 ticks) stops the auto-scroll on its own (selection stays armed;
+# a MOUSE_DOWN/forward hygiene reset is what actually disarms the drag). ───
+
+def test_scroll_wheel_during_armed_edge_drag_disarms_ticking_but_keeps_selection():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 0
+
+    down = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    move = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,   # bottom edge
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._edge_drag == 1
+    offset_before_wheel = pane._offset
+
+    wheel = MouseEvent(position=Point(3, 5), event_type=MouseEventType.SCROLL_DOWN,
+                       button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(wheel)
+
+    assert pane._edge_drag == 0                        # the wheel wins — auto-scroll disarmed
+    assert pane._offset == offset_before_wheel + 3      # the user's own wheel scroll still happened
+    assert pane._sel is not None                        # the armed selection itself STAYS
+    assert pane.control._down_abs is not None            # the drag itself is still live
+
+
+def test_edge_tick_stops_after_40_ticks_without_fresh_motion():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(10000)))
+    pane._offset = 100
+
+    down = MouseEvent(position=Point(0, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    move = MouseEvent(position=Point(0, 4), event_type=MouseEventType.MOUSE_MOVE,   # bottom edge
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._edge_drag == 1
+
+    for _ in range(40):
+        pane.edge_tick()
+    assert pane._edge_drag == 1                          # still ticking through the 40th
+
+    pane.edge_tick()                                     # the 41st tick without fresh motion
+    assert pane._edge_drag == 0                           # stops the auto-scroll
+    assert pane._sel is not None                          # selection stays armed
+    assert pane.control._down_abs is not None
+
+
+def test_edge_tick_counter_resets_on_fresh_drag_mouse_move():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(10000)))
+    pane._offset = 100
+
+    down = MouseEvent(position=Point(0, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    move = MouseEvent(position=Point(0, 4), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+
+    for _ in range(39):
+        pane.edge_tick()
+    assert pane._edge_ticks == 39
+
+    pane.control.mouse_handler(move)                      # a fresh drag MOUSE_MOVE resets the clock
+    assert pane._edge_ticks == 0
+
+    for _ in range(40):
+        pane.edge_tick()
+    assert pane._edge_drag == 1                            # the reset bought another 40 ticks
+
+
+def test_mouse_down_while_already_armed_resets_stale_edge_drag():
+    # W1-recon stuck-highlight hygiene: a release lost past a neighbor window
+    # (the exact bug this task fixes for queue/todo/toolbar, but SOME window
+    # is always uncovered — e.g. the input box) must not leave a stale
+    # `_edge_drag` armed forever; the NEXT press cleans it up.
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 0
+
+    down1 = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                       button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down1)
+    move = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,   # bottom edge
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._edge_drag == 1
+    assert pane.control._down_abs is not None          # no MOUSE_UP ever arrived — stuck
+
+    # A fresh MOUSE_DOWN, without an intervening MOUSE_UP. offset is now 3
+    # (the edge-scroll from `move`, above) — Point is (x, y), so this press
+    # at viewport (x=2, y=4) anchors abs (7, 2).
+    down2 = MouseEvent(position=Point(2, 4), event_type=MouseEventType.MOUSE_DOWN,
+                       button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down2)
+    assert pane._edge_drag == 0                        # stale flag cleared
+    assert pane.control._down_abs == (7, 2)             # re-armed at the NEW press
+    assert pane._sel == ((7, 2), (7, 2))
+
+
+def test_forwarding_wrapper_suppresses_wrapped_handler_when_drag_armed(monkeypatch):
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane, _forwarding
+
+    monkeypatch.setattr(clipboard, "copy_to_clipboard", lambda text: "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._io.write("abc")
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    calls = []
+    wrapped = _forwarding(lambda ev: calls.append(ev) or "handler-ran", pane)
+    up = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert wrapped(up) is None            # consumed by the pane, not the wrapped handler
+    assert calls == []
+    assert pane.control._down_abs is None  # the pane really did complete/reset the drag
+
+
+def test_forwarding_wrapper_falls_through_when_no_drag_armed():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane, _forwarding
+
+    pane = OutputPane(width=80)
+    calls = []
+    wrapped = _forwarding(lambda ev: calls.append(ev) or "handler-ran", pane)
+    up = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert wrapped(up) == "handler-ran"
+    assert calls == [up]
+
+
+def test_forwarding_wrapper_returns_notimplemented_for_a_none_handler(monkeypatch):
+    # The toolbar has no mouse handling of its own — _forwarding(None, pane)
+    # is wrapped purely to give the pane first refusal.
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane, _forwarding
+
+    monkeypatch.setattr(clipboard, "copy_to_clipboard", lambda text: "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._io.write("abc")
+    wrapped = _forwarding(None, pane)
+    up = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert wrapped(up) is NotImplemented                # no drag armed, no handler to fall to
+
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    assert wrapped(up) is None                          # armed now — consumed
+
+
+def test_release_below_pane_completes_copy_and_suppresses_queue_pull(monkeypatch):
+    # End-to-end: the ACTUAL seam tui wires — queue_fragments(forward=pane.
+    # forward_mouse) — delivers a forwarded MOUSE_UP to a queue row exactly
+    # like a real click would, and the copy completes instead of the pull.
+    from collections import deque
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.queue_panel import queue_fragments
+    from webbee.tui import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))
+    pane._offset = 10
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                  # arm a drag on the pane
+
+    pulls = []
+    frags = queue_fragments(deque(["a", "b"]), pull=pulls.append, width=80,
+                            forward=pane.forward_mouse)
+    row_handler = [f[2] for f in frags if len(f) == 3][0]
+
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,   # the row's own y/x
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert row_handler(up) is None
+    assert pulls == []                                # NOT pulled — the pane claimed the release
+    assert "text" in captured                         # the copy fired
+    assert pane.control._down_abs is None
+
+
+def test_forward_noop_when_no_drag_armed_queue_pull_still_works():
+    # Mirror of the above with no drag armed: the wrapped pull fires exactly
+    # as before the forwarding seam existed — the wrapper is transparent.
+    from collections import deque
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.queue_panel import queue_fragments
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pulls = []
+    frags = queue_fragments(deque(["a", "b"]), pull=pulls.append, width=80,
+                            forward=pane.forward_mouse)
+    row_handler = [f[2] for f in frags if len(f) == 3][0]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert row_handler(up) is None
+    assert pulls == [0]
+
+
+def test_queue_header_toggle_forward_param_suppresses_toggle_when_armed(monkeypatch):
+    from collections import deque
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.queue_panel import queue_fragments
+    from webbee.tui import OutputPane
+
+    monkeypatch.setattr(clipboard, "copy_to_clipboard", lambda text: "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._io.write("abc")
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    hits = []
+    frags = queue_fragments(deque(["a"]), toggle=lambda: hits.append(1),
+                            forward=pane.forward_mouse)
+    header_handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert header_handler(up) is None
+    assert hits == []                                 # suppressed — the pane claimed it
+    assert pane.control._down_abs is None
 
 
 # ── virtualization: render only the visible slice, follow the tail ────────────
@@ -149,13 +832,16 @@ def test_pane_scroll_up_pauses_follow_then_rearms():
     assert pane._offset == 40 and pane._follow is True
 
 
-def test_selected_text_respects_scroll_offset():
+def test_selected_text_ignores_offset_now_absolute():
+    # _selected_text no longer re-adds `_offset` — its start/end are already
+    # ABSOLUTE lines, so a scrolled viewport is irrelevant to this call (the
+    # mouse handler is the one place `_offset` gets applied, exactly once,
+    # at press/move/release time — see test_selection_survives_scroll_*).
     from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
     pane = OutputPane(width=80)
     pane._io.write("aaa\nbbb\nccc\nddd\n")
-    pane._offset = 2                   # viewport top = content line 2 ("ccc")
-    assert pane._selected_text(Point(0, 0), Point(2, 0)) == "ccc"
+    pane._offset = 2                   # scrolled — must NOT affect the result below
+    assert pane._selected_text((2, 0), (2, 2)) == "ccc"
 
 
 def test_output_pane_no_full_reread_on_unchanged_redraw():
@@ -212,16 +898,27 @@ def test_all_lines_appends_delta_in_place():
 
 
 def test_trim_hysteresis_and_offset_preserved():
+    # W2 final-review Fix 1: the buffer's front `_ring_base_lines` lines are
+    # pre-ring (deque-evicted equivalent) — freely droppable. Simulate a
+    # realistic post-eviction session (21000 lines total, the newest 4000
+    # still ring-backed) directly, rather than 21000 real console.print()
+    # calls, for test speed.
     from webbee.output_pane import OutputPane
 
     p = OutputPane(width=40)
     for i in range(21000):
         p._io.write(f"line{i}\n")
     p._lines_cache = (None, [""])               # force re-split
+    p._record_lines = [1] * 4000                # newest 4000 lines are ring-backed
+    p._records.extend([(("x",), {})] * 4000)    # matching placeholders (popleft-count only)
+    p._ring_base_lines = 21000 - 4000           # everything older is pre-ring base
     p._offset = 20500                           # reader scrolled up
+    ring_invariant(p)
     p._trim()
     lines = p._all_lines()
     assert len(lines) <= 15001                  # cut to ~15000 (+trailing)
+    ring_invariant(p)
+    assert len(p._records) == 4000              # the base absorbed the WHOLE cut — ring untouched
     dropped = 21001 - len(lines)
     assert p._offset == max(0, 20500 - dropped) # view anchored to same content
 
@@ -250,9 +947,464 @@ def test_trim_keep_floor_not_over_aggressive():
     for i in range(21000):
         p._io.write(f"line{i}\n")
     p._lines_cache = (None, [""])
+    p._record_lines = [1] * 4000
+    p._records.extend([(("x",), {})] * 4000)
+    p._ring_base_lines = 21000 - 4000
     p._trim()
+    ring_invariant(p)
     lines = p._all_lines()
     assert len(lines) >= 14000
+
+
+# ── W2 final-review Fix 1: _trim never splits a ring record — the cut
+# consumes the base first, then only WHOLE leading records, moving the
+# actual cut UP to the nearest record boundary. ────────────────────────────
+
+def test_trim_consumes_base_before_touching_ring_records():
+    # dropped < base -> the base alone absorbs the WHOLE cut; the ring is
+    # never even inspected, let alone split.
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(500):
+        p._io.write(f"line{i}\n")
+    p._record_lines = [1] * 200
+    p._records.extend([(("x",), {})] * 200)
+    p._ring_base_lines = 500 - 200                 # base=300, ring=200 (total 501 w/ trailing)
+    ring_invariant(p)
+
+    p._trim(max_lines=400, keep=350)                # dropped = 501-350 = 151 < base(300)
+    ring_invariant(p)
+
+    assert len(p._records) == 200                   # ring completely untouched
+    assert p._record_lines == [1] * 200
+    assert p._ring_base_lines == 300 - 151           # the base alone absorbed the cut
+
+
+def test_trim_never_splits_a_record_moves_cut_up_to_the_boundary():
+    # A real (eviction-backed) session: 4500 single-line console.print()s,
+    # ring-capped at 4000 -> base=500 lines, 4000 records. A trim whose
+    # naive target falls MID-RECORD must move UP to the record boundary
+    # instead of splitting one — the exact bug this fix closes (a
+    # post-trim reflow could otherwise resurrect a half-trimmed record).
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=60)
+    for i in range(4500):
+        p.console.print(str(i))                     # each print is exactly one line
+    assert p._ring_base_lines == 500
+    assert len(p._records) == 4000
+    ring_invariant(p)
+
+    p._trim(max_lines=4000, keep=3000)               # dropped=1501; base(500) covers 500 of it,
+                                                       # leaving 1001 lines to cut from the ring —
+                                                       # exactly 1001 single-line records, no partial
+    ring_invariant(p)
+
+    assert p._ring_base_lines == 0                    # base fully consumed
+    assert len(p._records) == 4000 - 1001              # exactly 1001 WHOLE records dropped
+    assert len(p._all_lines()) == 3000                  # aligned exactly (each record = 1 line)
+
+
+def test_trim_never_empties_the_ring_while_non_ring_lines_remain():
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=60)
+    for i in range(4500):
+        p.console.print(str(i))
+    assert p._ring_base_lines == 500
+
+    p._trim(max_lines=4000, keep=4001)                # dropped=500, exactly base(500) -> no records
+    ring_invariant(p)
+
+    assert len(p._records) == 4000                     # ring untouched — never even approached
+
+
+# ── W2 final-review Fix 5: a trim shifts an ARMED drag's anchors so the
+# highlight and eventual copy stay on the same CONTENT across the cut. ─────
+
+def test_trim_shifts_armed_drag_anchors_by_actual_dropped():
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(500):
+        p.console.print(str(i))          # 500 single-line records, base stays 0 (< 4000 ring cap)
+    assert p._ring_base_lines == 0
+    p.control._down_abs = (300, 5)
+    p._sel = ((300, 5), (350, 7))
+
+    p._trim(max_lines=400, keep=300)      # dropped=201, base=0 -> actual_dropped=201 (record-aligned)
+    ring_invariant(p)
+
+    assert p.control._down_abs == (99, 5)             # 300 - 201
+    assert p._sel == ((99, 5), (149, 7))              # both endpoints shifted identically
+
+
+def test_trim_clamps_shifted_drag_anchor_row_at_zero():
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(500):
+        p.console.print(str(i))
+    p.control._down_abs = (10, 2)          # anchor near the very top
+    p._sel = ((10, 2), (20, 3))
+
+    p._trim(max_lines=400, keep=300)       # actual_dropped=201 > 10 and > 20 -> both would go negative
+    ring_invariant(p)
+
+    assert p.control._down_abs == (0, 2)   # clamped, never negative
+    assert p._sel == ((0, 2), (0, 3))
+
+
+def test_trim_leaves_unarmed_selection_state_untouched():
+    from webbee.output_pane import OutputPane
+
+    p = OutputPane(width=40)
+    for i in range(500):
+        p.console.print(str(i))
+    assert p.control._down_abs is None
+    assert p._sel is None
+
+    p._trim(max_lines=400, keep=300)
+    ring_invariant(p)
+
+    assert p.control._down_abs is None
+    assert p._sel is None
+
+
+# ── W2 Task 2: RecordingConsole — bounded ring of every printed renderable ──
+# The old pane kept only baked ANSI, which can never re-wrap on a width
+# change. Every console.print() now also appends (objects, kw) to a bounded
+# ring so a future terminal-width change can REPLAY the transcript at the
+# new width (Task 3). The ring is bounded (_MAX_RECORDS=4000) — the honest
+# trade the spec accepted: a session past that only replays the newest tail.
+
+def test_recording_console_captures_renderables():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=60)
+    p.console.print("hello")
+    from rich.text import Text
+    p.console.print(Text("styled"), style="bold")
+    assert len(p._records) == 2
+    assert p._records[0][0] == ("hello",)
+    assert p._records[1][1].get("style") == "bold"
+
+
+def test_recording_console_clear_resets_ring_and_buffer():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=60)
+    p.console.print("x")
+    p.console.clear()
+    assert len(p._records) == 0
+    assert p._all_lines() == [""]
+
+
+def test_record_ring_bounded():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=60)
+    for i in range(4100):
+        p.console.print(str(i))
+    assert len(p._records) == 4000          # oldest fell off — replay covers the tail
+
+
+# ── W2 Task 3: reflow — width change replays the ring, offset anchored by
+# the RECORD under the top visible line (a line index is meaningless across
+# a re-wrap; the record that produced it is the only stable anchor). ────────
+
+def test_reflow_rewraps_all_content():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    p.console.print("word " * 40)                  # one long line at width 100
+    wide_lines = len(p._all_lines())
+    p.reflow(40)
+    narrow_lines = len(p._all_lines())
+    assert p.console.width == 40
+    assert narrow_lines > wide_lines               # re-wrapped, not clipped
+    assert all(len(strip_ansi(ln)) <= 40 for ln in p._all_lines())
+
+
+def test_reflow_noop_on_same_width():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.console.print("x")
+    buf_before = p._io.getvalue()
+    p.reflow(80)
+    assert p._io.getvalue() == buf_before
+
+
+def test_reflow_anchors_scrolled_up_offset_by_record():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(200):
+        p.console.print(f"record-{i} " + "pad " * 30)
+    p._view_h = 10
+    p.scroll(-150)                                  # scrolled well up
+    top_record = p._record_at_line(p._offset)
+    p.reflow(50)
+    assert p._record_at_line(p._offset) == top_record   # same CONTENT on top
+
+
+def test_reflow_preserves_tail_follow():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(50):
+        p.console.print("x " * 40)
+    assert p._follow
+    p.reflow(60)
+    lines = p._all_lines()
+    assert p._offset == max(0, len(lines) - max(1, p._view_h))
+
+
+def test_reflow_clears_active_selection():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.console.print("abc")
+    p._sel = ((0, 0), (0, 2))
+    p.reflow(60)
+    assert p._sel is None
+
+
+def test_reflow_aborts_an_in_progress_drag():
+    # A resize mid mouse-drag must abort the drag honestly, not leave a
+    # stale mouse-down anchor pointing at pre-rewrap coordinates.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.console.print("abc")
+    p.control._down = (0, 0)          # simulate an in-progress MOUSE_DOWN
+    p.reflow(60)
+    assert p.control._down is None
+
+
+def test_reflow_noop_below_minimum_width():
+    # A pathologically narrow resize (e.g. a terminal briefly reporting 0-9
+    # cols mid-drag) must not corrupt state — clamp to a no-op.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.console.print("x")
+    buf_before = p._io.getvalue()
+    p.reflow(5)
+    assert p.console.width == 80
+    assert p._io.getvalue() == buf_before
+
+
+def test_reflow_empty_pane_does_not_crash():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=80)
+    p.reflow(40)
+    assert p.console.width == 40
+    assert p._offset == 0
+
+
+def test_ring_eviction_keeps_record_lines_in_lockstep_with_records():
+    # _record_lines must shrink in lockstep with the bounded _records deque —
+    # otherwise, once a long session evicts old records, _record_at_line's
+    # prefix sum drifts out of alignment with what's actually replayable.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=60)
+    for i in range(4100):
+        p.console.print(str(i))
+    assert len(p._records) == 4000
+    assert len(p._record_lines) == len(p._records)
+
+
+def test_reflow_does_not_duplicate_records_or_reenter_recording():
+    # The replay must go through the base Console.print, never back through
+    # the RecordingConsole override — else every reflow would double the ring.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(10):
+        p.console.print(f"line-{i}")
+    n_records = len(p._records)
+    p.reflow(50)
+    assert len(p._records) == n_records
+    assert sum(p._record_lines) == len(p._all_lines()) - 1
+
+
+# ── W2 final-review Fix 2: reflow preserves PRE-RING scrollback (deque
+# eviction) at its OLD (already-baked) width instead of deleting it, while
+# the ring itself still genuinely re-wraps. ─────────────────────────────────
+
+def test_reflow_preserves_pre_ring_scrollback_at_old_width():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(4050):                        # 50 evicted -> base grows past record 0
+        p.console.print(f"record-{i}")
+    assert p._ring_base_lines > 0
+    base = p._ring_base_lines
+    p._view_h = 10
+    p._follow = False
+    p._offset = base - 5                          # squarely inside the PRE-RING region
+    pre_before = p._all_lines()[:base]
+
+    p.reflow(60)
+    ring_invariant(p)
+
+    assert p._offset == base - 5                  # unchanged — pre-ring lines don't re-wrap
+    assert p._all_lines()[:base] == pre_before     # same content, same (OLD) width
+    assert p._ring_base_lines == base              # the COUNT never changes on reflow
+
+
+def test_reflow_anchors_ring_region_by_record_with_nonzero_base():
+    # Mirror of test_reflow_anchors_scrolled_up_offset_by_record, but with a
+    # nonzero base (post-eviction) — proves the base-adjusted _record_at_line
+    # math, not just the base==0 case.
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(4200):
+        p.console.print(f"record-{i} " + "pad " * 30)
+    assert p._ring_base_lines > 0
+    p._view_h = 10
+    p._follow = False
+    p._offset = p._ring_base_lines + 20            # inside the RING region, not pre-ring
+    top_record = p._record_at_line(p._offset)
+
+    p.reflow(50)
+    ring_invariant(p)
+
+    assert p._record_at_line(p._offset) == top_record   # same CONTENT on top, base-adjusted
+    assert p._offset >= p._ring_base_lines               # anchored back into the ring, not pre-ring
+
+
+def test_reflow_preserves_tail_follow_with_nonzero_base():
+    from webbee.output_pane import OutputPane
+    p = OutputPane(width=100)
+    for i in range(4100):
+        p.console.print("x " * 40)
+    assert p._follow
+    assert p._ring_base_lines > 0
+
+    p.reflow(60)
+    ring_invariant(p)
+
+    lines = p._all_lines()
+    assert p._offset == max(0, len(lines) - max(1, p._view_h))
+
+
+# ── W2 Task 4: _width_watch — the ticker's per-tick bridge from PT's
+# SIGWINCH repaint to the Rich-side reflow ──────────────────────────────────
+
+def test_ticker_width_watch_triggers_reflow(monkeypatch):
+    """Drive the extracted _width_watch(pane, app) helper directly: app
+    reports 72 cols while pane.console.width is 100 ⇒ pane.reflow(72) called
+    (record with a stub); same width ⇒ no call."""
+    from webbee.tui import _width_watch
+
+    class _Pane:
+        def __init__(self, width):
+            self.console = type("Console", (), {"width": width})()
+            self.calls = []
+
+        def reflow(self, cols):
+            self.calls.append(cols)
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    pane = _Pane(100)
+    _width_watch(pane, object())
+    assert pane.calls == [72]
+
+    same = _Pane(72)
+    _width_watch(same, object())
+    assert same.calls == []
+
+
+def test_ticker_width_watch_swallows_reflow_error(monkeypatch):
+    """A reflow crash must never kill the ticker — it's the dock's only
+    animation loop (spinner + queued-line drains all ride on it)."""
+    from webbee.tui import _width_watch
+
+    class _BrokenPane:
+        def __init__(self, width):
+            self.console = type("Console", (), {"width": width})()
+
+        def reflow(self, cols):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    _width_watch(_BrokenPane(100), object())   # must not raise
+
+
+# ── W2 final-review Fix 7: _tick_once — the ticker body, extracted so the
+# wiring itself (not just its pieces) is directly unit-testable. ───────────
+
+def test_tick_once_fires_width_watch_edge_tick_and_invalidate(monkeypatch):
+    from webbee.tui import _tick_once
+
+    calls = {"reflow": [], "edge_tick": 0, "invalidate": 0}
+
+    class _Pane:
+        def __init__(self):
+            self.console = type("Console", (), {"width": 100})()
+
+        def reflow(self, cols):
+            calls["reflow"].append(cols)
+
+        def edge_tick(self):
+            calls["edge_tick"] += 1
+
+        def flash(self):
+            return ""
+
+    class _App:
+        def invalidate(self):
+            calls["invalidate"] += 1
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    _tick_once(_Pane(), _App(), lambda: True)
+
+    assert calls["reflow"] == [72]     # _width_watch fired (resize bridge)
+    assert calls["edge_tick"] == 1     # pane.edge_tick() fired
+    assert calls["invalidate"] == 1    # is_busy() True -> app.invalidate() fired
+
+
+def test_tick_once_swallows_edge_tick_error(monkeypatch):
+    from webbee.tui import _tick_once
+
+    class _Pane:
+        def __init__(self):
+            self.console = type("Console", (), {"width": 72})()
+
+        def edge_tick(self):
+            raise RuntimeError("boom")
+
+        def flash(self):
+            return ""
+
+    class _App:
+        def invalidate(self):
+            pass
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    _tick_once(_Pane(), _App(), lambda: False)   # must not raise
+
+
+# ── W2 Task 5: input_rows — the pure estimator behind _input_height ─────────
+# Extracted like repl._gate_busy: module-level, dependency-injected (cols/cap
+# passed in), so a test drives the exact wrap math without a live app or
+# terminal. The closure (_input_height) feeds it sizing.get_size()'s rows via
+# sizing.input_height_cap — proportional, not the old hardcoded 10.
+
+def test_input_rows_pure_wrap_math():
+    from webbee.tui import input_rows
+    assert input_rows("", 40, 10) == 1                 # empty draft is always 1 row
+    assert input_rows("short", 40, 10) == 1
+    assert input_rows("x" * 90, 40, 10) == 3            # ceil(90/40) == 3
+    assert input_rows("a\nb\nc", 40, 10) == 3           # one row per line, no wrap needed
+
+
+def test_input_rows_uses_the_injected_cap_not_a_fixed_ten():
+    """rows=60 (tall terminal) -> cap 10 (ceiling); rows=24 -> cap 7 — the
+    SAME pure estimator, only the injected cap changes."""
+    from webbee.sizing import input_height_cap
+    from webbee.tui import input_rows
+    long_draft = "\n".join(["x" * 200] * 20)   # far more wrapped rows than any cap allows
+    assert input_height_cap(60) == 10 and input_height_cap(24) == 7
+    assert input_rows(long_draft, 40, input_height_cap(60)) == 10
+    assert input_rows(long_draft, 40, input_height_cap(24)) == 7
+
+
+def test_input_rows_floors_a_tiny_or_zero_width():
+    from webbee.tui import input_rows
+    assert input_rows("x" * 30, 0, 10) == 3             # cols floored at 10 -> ceil(30/10)
 
 
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
@@ -1141,6 +2293,31 @@ def test_panel_height_is_header_plus_rows_capped():
     assert queue_height(deque(["a"])) == 2                       # header + 1
     assert queue_height(deque(["a"] * QP_MAX_ITEMS)) == 6        # header + 5
     assert queue_height(deque(["a"] * 9)) == 7                   # header + 5 + more-row
+
+
+# ── W2 Task 5: proportional chrome — max_items overrides the fixed cap ─────
+# The dock feeds sizing.panel_cap(rows) through this param so a tall terminal
+# shows more queued rows and a short one shows fewer; QP_MAX_ITEMS stays the
+# DEFAULT for every direct/test caller that doesn't pass one.
+
+def test_queue_fragments_respects_max_items_param():
+    items = [f"item{i}" for i in range(9)]
+    frags = queue_fragments(deque(items), max_items=7)
+    text = _panel_text(frags)
+    assert "⋯ queued (9)" in text                        # header keeps the TRUE depth
+    assert "… +2 more" in text                           # only the oldest 2 hide now
+    assert all(t in text for t in items[2:])             # newest 7 shown
+    assert all(t not in text for t in items[:2])
+    # default (QP_MAX_ITEMS=5) is UNCHANGED when max_items isn't passed
+    default_text = _panel_text(queue_fragments(deque(items)))
+    assert "… +4 more" in default_text
+    assert all(t in default_text for t in items[4:])
+
+
+def test_queue_height_respects_max_items_param():
+    items = ["a"] * 9
+    assert queue_height(deque(items), max_items=7) == 1 + 7 + 1  # header + 7 + more-row
+    assert queue_height(deque(items)) == 1 + QP_MAX_ITEMS + 1    # default untouched
 
 
 def test_panel_item_is_one_truncated_row():

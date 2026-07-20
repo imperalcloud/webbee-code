@@ -444,11 +444,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         _errlog = _open_dock_stderr_log()
         try:
             with contextlib.redirect_stderr(_errlog):
-                import shutil
-
                 from webbee import tui
                 from webbee.render import RichSink
-                width = shutil.get_terminal_size((100, 24)).columns
+                from webbee.sizing import get_size
+                width, _height = get_size(None)   # pre-app: same fallback, one code path
                 pane = tui.OutputPane(width=width)
                 await _boot(RichSink(console=pane.console, on_output=pane.notify))
 

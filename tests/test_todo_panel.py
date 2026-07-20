@@ -87,6 +87,28 @@ def test_height_always_matches_the_rendered_lines():
         assert todo_height(items) == _text(frags).count("\n") + 1
 
 
+# ── W2 Task 5: proportional chrome — max_items overrides the fixed cap ─────
+# The dock feeds sizing.panel_cap(rows) through this param so a tall terminal
+# shows more todo rows and a short one shows fewer; TP_MAX_ITEMS stays the
+# DEFAULT for every direct/test caller that doesn't pass one.
+
+def test_todo_fragments_respects_max_items_param():
+    items = [_t(f"p{i}") for i in range(9)]
+    text = _text(todo_fragments(items, max_items=7))
+    assert "… +2 more" in text                          # only the tail 2 hide now
+    assert all(f"p{i}" in text for i in range(7))       # first 7 (plan order) shown
+    assert "p7" not in text and "p8" not in text
+    # default (TP_MAX_ITEMS=6) is UNCHANGED when max_items isn't passed
+    default_text = _text(todo_fragments(items))
+    assert f"… +{9 - TP_MAX_ITEMS} more" in default_text
+
+
+def test_todo_height_respects_max_items_param():
+    items = [_t(f"p{i}") for i in range(9)]
+    assert todo_height(items, max_items=7) == _text(todo_fragments(items, max_items=7)).count("\n") + 1
+    assert todo_height(items) == _text(todo_fragments(items)).count("\n") + 1   # default untouched
+
+
 # ── W1 front-3b task 11: click-to-collapse (header toggles to one row) ──────
 
 def test_todo_collapsed_single_row_and_height():
@@ -109,3 +131,33 @@ def test_todo_header_toggle_fires_on_mouse_up():
     scroll = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
                         button=MouseButton.LEFT, modifiers=frozenset())
     assert handler(scroll) is NotImplemented
+
+
+# ── W2 Task 8: selection capture — the header toggle gives an armed pane
+# drag first refusal (same `forward` seam as queue_panel's) ─────────────────
+
+def test_todo_toggle_handler_forward_param_suppresses_toggle_when_consumed():
+    # `forward` stands in for OutputPane.forward_mouse here — a stub is
+    # enough since todo_panel only needs to know it was CONSUMED.
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    hits = []
+    frags = todo_fragments([_t("a")], collapsed=False, toggle=lambda: hits.append(1),
+                           forward=lambda ev: True)
+    handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(up) is None
+    assert hits == []                                  # suppressed — forward claimed it
+
+
+def test_todo_toggle_handler_forward_param_falls_through_when_not_consumed():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    hits = []
+    frags = todo_fragments([_t("a")], collapsed=False, toggle=lambda: hits.append(1),
+                           forward=lambda ev: False)
+    handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(up) is None and hits == [1]           # untouched — toggle fires as before

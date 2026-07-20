@@ -21,6 +21,7 @@ import asyncio
 import re
 from collections import deque
 
+from webbee import sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
@@ -70,6 +71,22 @@ def configure_mouse_modes(output) -> None:
     output.disable_mouse_support = _disable
 
 
+def input_rows(text: str, cols: int, cap: int) -> int:
+    """PURE row-wrap estimator behind `_input_height` (module-level so tests
+    drive it directly with an injected size, mirroring repl._gate_busy).
+    Same wrap math as before the W2 proportional-sizing pass: `cols` is the
+    usable wrap width (frame + prompt already subtracted by the caller,
+    floored at 10 so a tiny/misreported width never collapses every line to
+    1-char rows); `cap` bounds growth (was: hardcoded 10, now the caller's
+    live `sizing.input_height_cap(rows)` — the box may grow to at most a
+    PROPORTION of the screen, not a fixed character count)."""
+    if not text:
+        return 1
+    cols = max(10, cols)
+    rows = sum(max(1, -(-len(ln) // cols)) for ln in text.split("\n"))
+    return min(cap, max(1, rows))
+
+
 def next_mode(mode: str) -> str:
     try:
         return _MODES[(_MODES.index(mode) + 1) % len(_MODES)]
@@ -116,6 +133,62 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
             ("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits"),
             *q,
             ("class:tb.dim", "   ·   Shift + TAB: switch mode")]
+
+
+def _width_watch(pane, app) -> None:
+    """Per-tick resize detector (W2 front-2): prompt_toolkit repaints on
+    SIGWINCH by itself, but the RICH side (console width) must be told to
+    re-wrap — this is the bridge. Two int compares when nothing changed.
+    Swallows any reflow error — the ticker is the dock's only animation
+    loop (spinner + queue drains ride on it too) and must never die."""
+    from webbee.sizing import get_size
+    cols, _rows = get_size(app)
+    if cols and cols != pane.console.width:
+        try:
+            pane.reflow(cols)
+        except Exception:
+            pass
+
+
+def _tick_once(pane, app, is_busy) -> None:
+    """One iteration of run_session's `_ticker` loop, extracted module-level
+    so the wiring itself is directly unit-testable (an `async def` infinite
+    loop otherwise only proves itself by running the whole dock). Three
+    effects, in order: (1) `_width_watch` — resize-detect + reflow bridge,
+    UNCONDITIONAL busy or idle; (2) `pane.edge_tick()` — repeat-scroll while
+    parked at a drag edge, error-swallowed so a broken edge-tick can never
+    kill the dock's only animation loop; (3) `app.invalidate()` exactly when
+    a turn is running OR the copy-flash toast is still fresh, so the spinner/
+    elapsed-clock/flash-expiry all animate without redrawing on every idle
+    tick for nothing."""
+    _width_watch(pane, app)
+    try:
+        pane.edge_tick()
+    except Exception:
+        pass
+    if is_busy() or pane.flash():
+        app.invalidate()
+
+
+def _forwarding(handler, pane):
+    """W2 Task 8: prompt_toolkit routes mouse events by pointer POSITION,
+    not by who owns an in-progress drag, so a selection armed inside the
+    output pane needs its neighbor windows' own mouse handling to give it
+    first refusal — otherwise a release past the pane's Window just lands on
+    whatever's underneath and the drag never completes (stuck highlight,
+    copy never fires). Wraps `handler` (a plain mouse_handler(ev), or None
+    for a window that has no handler of its own — e.g. the toolbar) so
+    `pane.forward_mouse(ev)` is tried FIRST: consumed (a drag was armed) ⇒
+    stop here, return None; otherwise fall through to `handler(ev)`, or
+    NotImplemented when there's no wrapped handler at all — the toolbar's
+    case, where forwarding is the ONLY behavior being added."""
+    def _h(ev):
+        if pane.forward_mouse(ev):
+            return None
+        if handler is None:
+            return NotImplemented
+        return handler(ev)
+    return _h
 
 
 def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event, buf=None) -> None:
@@ -364,7 +437,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     Returns True on clean exit; False if prompt_toolkit is unavailable (caller
     uses the plain fallback loop)."""
     try:
-        from prompt_toolkit.application import Application, get_app
+        from prompt_toolkit.application import Application, get_app, get_app_or_none
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
@@ -520,27 +593,39 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     def _toolbar():
         f = pane.flash()
         if f:
-            return [("class:tb.working", "  " + f)]   # transient copy confirmation
-        if sel["i"] is not None and steps_nav:
-            return [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
-        st = status()
-        return build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
-                             current=st["current"], elapsed=st["elapsed"],
-                             tools=st["tools"], consent=st["consent"],
-                             queued=len(pending) + len(remote_pending),
-                             reconnecting=st.get("reconnecting", 0))
+            frags = [("class:tb.working", "  " + f)]   # transient copy confirmation
+        elif sel["i"] is not None and steps_nav:
+            frags = [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
+        else:
+            st = status()
+            frags = build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
+                                  current=st["current"], elapsed=st["elapsed"],
+                                  tools=st["tools"], consent=st["consent"],
+                                  queued=len(pending) + len(remote_pending),
+                                  reconnecting=st.get("reconnecting", 0))
+        # W2 Task 8: the toolbar has no mouse handling of its own, so
+        # `_forwarding(None, pane)` is wrapped onto every fragment purely for
+        # drag-forwarding — a release that lands on the toolbar row while a
+        # pane selection is armed still completes the copy instead of
+        # sticking. `build_toolbar` itself stays untouched/2-tuple (its own
+        # unit tests unpack `for _, seg in frags`).
+        fwd = _forwarding(None, pane)
+        return [(style, text, fwd) for style, text in frags]
 
-    # Dynamic height: EXACTLY the rows the wrapped input needs (1→10), so the box
-    # grows as you type and shrinks back — never a fixed huge block. Enter still
-    # submits (multiline=False); the pane above absorbs all remaining space.
+    # Dynamic height: EXACTLY the rows the wrapped input needs (1→cap), so the
+    # box grows as you type and shrinks back — never a fixed huge block. Enter
+    # still submits (multiline=False); the pane above absorbs all remaining
+    # space. Live size (W2 front-2, proportions not pixels): the wrap width
+    # comes from the input window's OWN render_info once it has rendered at
+    # least once (the true columns inside the frame, after the "❯ " prompt
+    # and any margin) — `cols - 4` is the pre-first-render/headless fallback
+    # the old shutil-based estimate used; the cap is a PROPORTION of the
+    # live rows (sizing.input_height_cap), not a fixed 10.
     def _input_height():
-        import shutil
-        text = buf.text
-        cols = max(10, shutil.get_terminal_size((100, 24)).columns - 4)  # frame + "❯ "
-        if not text:
-            return 1
-        rows = sum(max(1, -(-len(ln) // cols)) for ln in text.split("\n"))
-        return min(10, max(1, rows))
+        cols, rows = sizing.get_size(get_app_or_none())
+        ri = getattr(input_win, "render_info", None)
+        width = getattr(ri, "window_width", None) if ri is not None else None
+        return input_rows(buf.text, width or (cols - 4), sizing.input_height_cap(rows))
 
     def _prompt_fragments():
         # The ❯ takes the CURRENT mode's colour (same classes the toolbar uses)
@@ -567,6 +652,17 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     qp_ui = {"collapsed": False}
     tp_ui = {"collapsed": False}
 
+    def _panel_size(floor: int):
+        """(cols, item-row cap) shared by a panel's fragment builder AND its
+        ConditionalContainer height lambda — ONE size read so the rendered
+        rows and the reserved height can never disagree (W2 front-2:
+        proportions, not pixels — was the fixed QP/TP_MAX_ITEMS). `floor` is
+        each panel's own today's-look constant (queue=5, todo=6) passed
+        through to sizing.panel_cap so a normal 24-row terminal keeps its
+        pre-W2 row count and only a tall screen grows past it."""
+        cols, rows = sizing.get_size(get_app_or_none())
+        return cols, sizing.panel_cap(rows, floor)
+
     def _toggle_queue():
         qp_ui["collapsed"] = not qp_ui["collapsed"]
         get_app().invalidate()
@@ -579,11 +675,14 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         # Live like _toolbar: re-invoked every redraw, reads the shared deque
         # + the sink-owned remote list (pull serves the LOCAL rows only —
         # remote rows are display-only by construction in queue_fragments).
-        import shutil
-        return queue_fragments(pending, pull=_pull_at,
-                               width=shutil.get_terminal_size((100, 24)).columns,
-                               remote=remote_pending,
-                               collapsed=qp_ui["collapsed"], toggle=_toggle_queue)
+        # forward=pane.forward_mouse (W2 Task 8): first refusal on every
+        # row/header click so a drag armed on the pane above can still be
+        # extended/completed once it releases on this panel.
+        cols, cap = _panel_size(5)
+        return queue_fragments(pending, pull=_pull_at, width=cols,
+                               remote=remote_pending, collapsed=qp_ui["collapsed"],
+                               toggle=_toggle_queue, max_items=cap,
+                               forward=pane.forward_mouse)
 
     # The LIVE pending-queue panel — pinned BETWEEN the output pane and the
     # input box; zero rows (hidden) while the queue is empty, so the empty
@@ -591,16 +690,19 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # focus on the input even when a row is clicked.
     queue_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_queue_fragments, focusable=False),
-                       height=lambda: queue_height(pending, remote_pending, qp_ui["collapsed"]),
+                       height=lambda: queue_height(pending, remote_pending, qp_ui["collapsed"],
+                                                   max_items=_panel_size(5)[1]),
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(pending) or bool(remote_pending)))
 
     def _todo_fragments():
         # Live like _queue_fragments: re-invoked every redraw, reads the
         # sink-owned current_todos list in place (todo frames mutate it).
-        import shutil
-        return todo_fragments(todos, width=shutil.get_terminal_size((100, 24)).columns,
-                              collapsed=tp_ui["collapsed"], toggle=_toggle_todos)
+        # forward=pane.forward_mouse (W2 Task 8): same first-refusal seam.
+        cols, cap = _panel_size(6)
+        return todo_fragments(todos, width=cols, collapsed=tp_ui["collapsed"],
+                              toggle=_toggle_todos, max_items=cap,
+                              forward=pane.forward_mouse)
 
     # The STICKY todo panel — pinned ABOVE the queue panel (the queue stays
     # adjacent to the input; its bottom row is the ↑-pullable newest). Same
@@ -608,7 +710,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # is empty, focusable=False keeps focus on the input.
     todo_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_todo_fragments, focusable=False),
-                       height=lambda: todo_height(todos, tp_ui["collapsed"]),
+                       height=lambda: todo_height(todos, tp_ui["collapsed"],
+                                                  max_items=_panel_size(6)[1]),
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(todos)))
 
@@ -643,11 +746,13 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     configure_mouse_modes(app.output)   # ?1002 button-event, never ?1003 any-event
 
     async def _ticker():
-        # animate the spinner + tick the elapsed clock while a turn runs
+        # animate the spinner + tick the elapsed clock while a turn runs.
+        # _tick_once runs UNCONDITIONALLY every tick, busy or idle — a
+        # resize while idle must re-wrap the transcript too, and the
+        # no-change cost is just two int reads.
         while True:
             await asyncio.sleep(0.25)
-            if is_busy() or pane.flash():
-                app.invalidate()
+            _tick_once(pane, app, is_busy)
 
     tick = asyncio.ensure_future(_ticker())
     try:

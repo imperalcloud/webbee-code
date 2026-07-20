@@ -24,15 +24,17 @@ def one_line(text: str, width: int) -> str:
     return t
 
 
-def queue_height(pending, remote=None, collapsed=False) -> int:
+def queue_height(pending, remote=None, collapsed=False, max_items=QP_MAX_ITEMS) -> int:
     """PURE. Rows the panel needs: 1 header + one per SHOWN item + one
-    `… +K more` row when a queue is deeper than QP_MAX_ITEMS (each of the
+    `… +K more` row when a queue is deeper than `max_items` (each of the
     two sections — remote rows and local rows — caps independently). 0 when
     both are empty (the ConditionalContainer hides the panel then anyway).
     `collapsed=True` (Task 11 click-to-collapse) always costs exactly 1 row
-    when there's data — screen space back on demand. The cap keeps the
-    output pane dominant on small terminals; the toolbar's `⋯N queued`
-    segment stays the truth-teller for the full depth."""
+    when there's data — screen space back on demand. `max_items` defaults to
+    QP_MAX_ITEMS but the dock overrides it with a LIVE, terminal-proportional
+    cap (sizing.panel_cap) so a huge screen shows more and a tiny one shows
+    less — the toolbar's `⋯N queued` segment stays the truth-teller for the
+    full depth either way."""
     n = len(pending)
     r = len(remote or ())
     if not n and not r:
@@ -41,9 +43,9 @@ def queue_height(pending, remote=None, collapsed=False) -> int:
         return 1
     rows = 1
     if r:
-        rows += min(r, QP_MAX_ITEMS) + (1 if r > QP_MAX_ITEMS else 0)
+        rows += min(r, max_items) + (1 if r > max_items else 0)
     if n:
-        rows += min(n, QP_MAX_ITEMS) + (1 if n > QP_MAX_ITEMS else 0)
+        rows += min(n, max_items) + (1 if n > max_items else 0)
     return rows
 
 
@@ -66,13 +68,22 @@ def pull_item(pending, buf, index: int):
     return item
 
 
-def _item_handler(pull, index: int):
+def _item_handler(pull, index: int, forward=None):
     """One row's mouse handler: MOUSE_UP (a click, not a drag/press) pulls
     THAT queued item into the input via `pull(index)`; every other event
     falls through (NotImplemented) so wheel scroll etc. keep today's
-    behavior. Mirrors OutputPane._SelectControl's event discipline."""
+    behavior. Mirrors OutputPane._SelectControl's event discipline.
+
+    `forward` (W2 Task 8, `OutputPane.forward_mouse`) gets FIRST refusal
+    when given: prompt_toolkit routes mouse events by pointer position, so a
+    drag armed on the pane above can end up releasing on this row — a real
+    click and a forwarded drag-release are indistinguishable to THIS row
+    except by asking the pane. Consumed (a drag was armed) ⇒ stop here,
+    pull is NOT called — the row must not also register as a click."""
     def _h(mouse_event):
         from prompt_toolkit.mouse_events import MouseEventType
+        if forward is not None and forward(mouse_event):
+            return None
         if mouse_event.event_type == MouseEventType.MOUSE_UP:
             pull(index)
             return None
@@ -80,12 +91,15 @@ def _item_handler(pull, index: int):
     return _h
 
 
-def _toggle_handler(toggle):
+def _toggle_handler(toggle, forward=None):
     """Header mouse handler (Task 11 click-to-collapse): MOUSE_UP toggles
     collapse; everything else falls through (NotImplemented) so wheel scroll
-    keeps working — the exact event discipline of _item_handler."""
+    keeps working — the exact event discipline of _item_handler. `forward`
+    (W2 Task 8) is the same first-refusal seam as _item_handler's."""
     def _h(mouse_event):
         from prompt_toolkit.mouse_events import MouseEventType
+        if forward is not None and forward(mouse_event):
+            return None
         if mouse_event.event_type == MouseEventType.MOUSE_UP:
             toggle()
             return None
@@ -94,7 +108,8 @@ def _toggle_handler(toggle):
 
 
 def queue_fragments(pending, pull=None, width: int = 0, remote=None,
-                     collapsed=False, toggle=None):
+                     collapsed=False, toggle=None, max_items=QP_MAX_ITEMS,
+                     forward=None):
     """PURE builder: the panel as prompt_toolkit formatted text, re-invoked
     every redraw (same live mechanics as the toolbar) so every queue
     add/edit/drain shows at once. Layout, top→bottom = drain order (FIFO —
@@ -103,7 +118,9 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
 
         ⋯ queued (N) · ↑ edit last · click to edit
         [telegram] remote item   ← remote rows ABOVE local (qp.remote)
-        … +K more            ← only when N > QP_MAX_ITEMS (the OLDEST hide)
+        … +K more            ← only when N > max_items (the OLDEST hide;
+                                defaults to QP_MAX_ITEMS, overridden by the
+                                dock with a live sizing.panel_cap(rows))
         older item           ← muted (qp.item)
         newest item          ← accent (qp.last)
 
@@ -122,7 +139,13 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
     `collapsed` (Task 11 click-to-collapse) folds the whole panel down to
     ONE header row ending `▸` (screen space back on demand); `▾` when
     expanded. Both only render when `toggle` is given — the header then
-    carries a 3-tuple MOUSE_UP handler (see _toggle_handler) that flips it."""
+    carries a 3-tuple MOUSE_UP handler (see _toggle_handler) that flips it.
+
+    `forward` (W2 Task 8) is forwarded into every _item_handler/_toggle_handler
+    built here — see their docstrings; it is the pane's
+    `OutputPane.forward_mouse`, given first refusal on every row/header click
+    so a drag armed on the pane above can still be extended/completed once
+    it releases on this panel."""
     items = list(pending)
     rem = [r for r in (remote or ()) if isinstance(r, dict)]
     n = len(items)
@@ -131,13 +154,13 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
     marker = "" if toggle is None else (" ▸" if collapsed else " ▾")
     header = ("class:qp.header", f" ⋯ queued ({n + len(rem)}){marker}")
     if toggle is not None:
-        header = header + (_toggle_handler(toggle),)
+        header = header + (_toggle_handler(toggle, forward),)
     frags = [header]
     if collapsed:
         return frags
     if n:
         frags.append(("class:qp.item", " · ↑ edit last · click to edit"))
-    rstart = max(0, len(rem) - QP_MAX_ITEMS)
+    rstart = max(0, len(rem) - max_items)
     if rstart:
         frags.append(("class:qp.remote", f"\n   … +{rstart} more"))
     for r in rem[rstart:]:
@@ -149,7 +172,7 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
         row = "\n   " + one_line(f"{mark}[{origin}] {r.get('text') or ''}",
                                  width - 4 if width > 0 else 0)
         frags.append(("class:qp.remote", row))
-    start = max(0, n - QP_MAX_ITEMS)
+    start = max(0, n - max_items)
     if start:
         frags.append(("class:qp.item", f"\n   … +{start} more"))
     for i in range(start, n):
@@ -158,5 +181,5 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
         if pull is None:
             frags.append((style, row))
         else:
-            frags.append((style, row, _item_handler(pull, i)))
+            frags.append((style, row, _item_handler(pull, i, forward)))
     return frags
