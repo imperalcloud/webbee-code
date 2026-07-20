@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.20
+
+Webbee remembers your mode per project (autopilot always asks again),
+reports it so the panel shows the truth, and tells you at start when a
+session is already running or waiting for an approval.
+
+- Each repo remembers its own coding mode across restarts — open Webbee
+  again in the same project and it picks up right where you left it.
+  Autopilot is the one exception: it always asks again, every time, at this
+  terminal — never silently resumed from a previous run.
+- Your terminal now reports its real coding mode back, so the panel and
+  Telegram stop guessing and show the truth.
+- On start, if a session is already running in this repo, Webbee tells you
+  it reattached — and if it's waiting on an approval, that the prompt will
+  re-show (or that you can approve it from the panel). If a DIFFERENT repo
+  has a session parked on an approval, you get a one-line heads-up too.
+
 ## 0.3.19
 
 The browser wave: Webbee Code becomes a browser inside your terminal.

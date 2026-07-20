@@ -460,3 +460,95 @@ def test_adaptive_interval_relaxes_after_idle_and_resets_on_activity(monkeypatch
     assert sleeps[:2] == [4.0, 4.0]      # idle-fresh cadence (_POLL_INTERVAL default)
     assert sleeps[2:4] == [30.0, 30.0]   # relaxed after 300 idle seconds
     assert sleeps[4] == 4.0              # a submitted item resets the cadence
+
+
+# ── applied-mode report (T6.2): mode_getter → fetch_pending_steer(mode=) ─────
+
+def test_mode_getter_threads_mode_into_fetch(monkeypatch):
+    seen_modes = []
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        seen_modes.append(kw.get("mode"))
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              mode_getter=lambda: "plan", interval=0.01),
+           until=lambda: len(seen_modes) >= 2)
+    assert seen_modes[0] == "plan"
+
+
+def test_mode_getter_absent_never_passes_mode_kwarg(monkeypatch):
+    # Old-style test doubles (and any real gateway call before this feature)
+    # accept no `mode` kwarg at all -- omitted entirely with no mode_getter,
+    # exactly like `client` when the repl doesn't own one.
+    calls = {"n": 0}
+
+    async def fake_fetch(cfg, tp, session_id):   # no **kw -- would TypeError if a kwarg leaked
+        calls["n"] += 1
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              interval=0.01),
+           until=lambda: calls["n"] >= 2)
+    assert calls["n"] >= 2   # ran clean -- no TypeError from a stray kwarg
+
+
+def test_mode_getter_returning_empty_string_omits_mode_kwarg(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_fetch(cfg, tp, session_id):   # no **kw
+        calls["n"] += 1
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              mode_getter=lambda: "", interval=0.01),
+           until=lambda: calls["n"] >= 2)
+    assert calls["n"] >= 2
+
+
+def test_mode_getter_read_fresh_every_tick_no_extra_poke_needed(monkeypatch):
+    # T6.2 contract: a LOCAL mode change (Shift-Tab, /mode, a remote flip)
+    # needs no immediate poke -- mode_getter is called fresh each tick, so
+    # the very next poll (within one `interval`) reports the new value.
+    current = {"mode": "default"}
+    seen_modes = []
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        seen_modes.append(kw.get("mode"))
+        if len(seen_modes) == 2:
+            current["mode"] = "autopilot"   # a mode change lands between ticks
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              mode_getter=lambda: current["mode"], interval=0.01),
+           until=lambda: len(seen_modes) >= 3)
+    assert seen_modes[:2] == ["default", "default"]
+    assert seen_modes[2] == "autopilot"   # the very next tick already reports it

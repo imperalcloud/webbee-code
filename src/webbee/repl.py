@@ -180,6 +180,24 @@ def _say(slot: SessionSlot, msg: str) -> None:
         notify()
 
 
+def set_slot_mode(slot: SessionSlot, mode: str) -> None:
+    """The ONE place a slot's mode is ever assigned (T6.1, mode persistence
+    per-repo) -- mutates `slot.mode` + the live `agent.mode` together
+    (exactly the pair every mutation site duplicated before this helper),
+    then remembers the choice for THIS repo via mode_store.save_mode so the
+    next process boot in it resumes here (autopilot itself is downgraded to
+    'default' inside save_mode -- never persisted, see its own docstring).
+    Replaces the three inline mutation sites: Shift-Tab `_cycle`, the /mode
+    command action, and the remote `_on_mode` flip (including
+    `_confirm_autopilot`'s approval branch). Module-level so tests drive it
+    directly, same testing philosophy as `_slot_ctx`/`_live_session_id`."""
+    slot.mode = mode
+    if slot.agent is not None:
+        slot.agent.mode = mode
+    from webbee.mode_store import save_mode
+    save_mode(slot.workspace, mode)
+
+
 def _live_session_id(slots: SlotManager) -> str:
     """The idle-steer poller's live-session seam (map §1): the ACTIVE slot's
     agent session id, or "" with no crash when the active slot has no agent
@@ -307,6 +325,30 @@ def _resolve_agent_factory(agent_factory, bundle: dict):
     return lambda c, tp, ws, m: AgentSession(c, tp, ws, m, intel=bundle["intel"], shadow=bundle["shadow"])
 
 
+async def _note_reattach(cfg, token_provider, workspace, sink) -> None:
+    """Boot reattach notice (T6.3, coding-remote flow perfection): best-
+    effort, entirely swallowed on any failure -- same division of labor as
+    `boot.replay_thread` right above its call site: a session listing is a
+    nice-to-have, never a boot blocker (a gateway that hasn't shipped the
+    route yet, a network blip, or a bad token all just mean silence).
+    Computes THIS repo's key off-loop (a git subprocess), fetches the user's
+    own active-session listing, and renders whatever
+    `active_sessions.boot_reattach_notice` decides -- 0-2 plain sink.note
+    lines, never raw session ids or other internals."""
+    try:
+        from webbee.active_sessions import boot_reattach_notice, fetch_active_sessions
+        from webbee.repo import compute_repo_key, find_repo_root
+
+        def _repo_key() -> str:  # git subprocess -- keep off the event loop
+            return compute_repo_key(find_repo_root(workspace))
+        repo_key = await asyncio.to_thread(_repo_key)
+        sessions = await fetch_active_sessions(cfg, token_provider)
+        for line in boot_reattach_notice(sessions, repo_key):
+            sink.note(line)
+    except Exception:
+        pass
+
+
 async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: WorkspaceResources,
                        agent_factory, intel_factory, shadow_factory, pane, sink, first: bool,
                        account) -> "tuple[SessionSlot, int]":
@@ -315,10 +357,11 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
     pane (or None, fallback has no dock) + sink: resolve/boot the per-
     WORKSPACE resources bundle, build the agent, wire the sink's local queue
     to THIS slot's own deque, and -- gated by `first` (map §6 replay
-    landmine) -- show the welcome banner and replay the durable thread. ONLY
-    the very first session slot the process ever creates does either; every
-    later tab (first=False) skips both. Returns `(slot, replayed)` (FIX7e)
-    -- `replayed` is `boot.replay_thread`'s own display-message count (0 when
+    landmine) -- show the welcome banner, replay the durable thread, and
+    (T6.3) note any OTHER running/parked session. ONLY the very first
+    session slot the process ever creates does any of that; every later tab
+    (first=False) skips all three. Returns `(slot, replayed)` (FIX7e) --
+    `replayed` is `boot.replay_thread`'s own display-message count (0 when
     `first=False`, or the replay itself skipped/failed/found nothing)."""
     bundle = await _resources_bundle(cfg, workspace, resources, intel_factory, shadow_factory)
     factory = _resolve_agent_factory(agent_factory, bundle)
@@ -342,6 +385,9 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
         # show the wrong (or duplicate) history, so only the first session
         # slot the process ever creates gets it.
         replayed = await boot.replay_thread(cfg, token_provider, sink)
+        # T6.3: after replay, tell the user about any session already
+        # running elsewhere -- same "first slot only" guard as replay above.
+        await _note_reattach(cfg, token_provider, workspace, sink)
     return slot, replayed
 
 
@@ -356,15 +402,24 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
     caller — `/new`, `_home_input`, every direct test) unless
     `_with_replayed=True` (FIX7e — the dock boot's OWN first-slot call,
     the only caller that needs `boot.replay_thread`'s count to decide
-    `slots.active_idx`), which returns `(slot, replayed)` instead."""
+    `slots.active_idx`), which returns `(slot, replayed)` instead.
+
+    T6.1 (mode persistence per-repo): `mode` is only the PROCESS baseline —
+    a repo this terminal remembered a mode for (mode_store.save_mode, via
+    `set_slot_mode`) overrides it here, off-loop (a git subprocess sits
+    behind it). Never autopilot: `save_mode` itself downgrades that to
+    'default' before it's ever written, so a loaded mode is always safe to
+    resume silently."""
     from webbee import tui
+    from webbee.mode_store import load_mode
     from webbee.render import RichSink
     from webbee.sizing import get_size
 
+    effective_mode = await asyncio.to_thread(load_mode, workspace) or mode
     width, _height = get_size(None)   # pre-app: same fallback tui.run_session's own sizing uses
     pane = tui.OutputPane(width=width)
     sink = RichSink(console=pane.console, on_output=pane.notify)
-    slot, replayed = await _finish_slot(cfg, token_provider, workspace, mode, resources=resources,
+    slot, replayed = await _finish_slot(cfg, token_provider, workspace, effective_mode, resources=resources,
                                         agent_factory=agent_factory, intel_factory=intel_factory,
                                         shadow_factory=shadow_factory, pane=pane, sink=sink,
                                         first=first, account=account)
@@ -501,6 +556,15 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     slots = SlotManager()
     resources = WorkspaceResources()   # per-workspace boot cache (map §6)
     steer_task = None   # assigned by _spawn_steer -- idle-steer poller (webbee.steer), cancelled on exit
+    # T6.2 (applied-mode report): the ONE session slot the steer poller is
+    # actually bound to -- set right before `_spawn_steer()` runs, on EITHER
+    # path (dock's first session slot / the fallback loop's only slot).
+    # `_spawn_steer`'s `mode_getter` reads `.mode` off THIS slot, never
+    # `slots.active()` -- the poller's `sid` (derived, or the FIRST turn's
+    # live_session_id) is bound to this same slot's workspace, so its
+    # applied-mode report must follow that slot even if a later tab becomes
+    # the one on screen.
+    first_session_slot: SessionSlot | None = None
     # Task 5 (map contract item 5): the dock fills this at construction time
     # with `switch`/`close` -- the SAME `_switch_to`/`_close_flow` a click or
     # a key goes through (history swap, close note) -- so /tab, /new and
@@ -531,9 +595,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
 
     def _cycle() -> None:
         slot = slots.active()
-        slot.mode = next_mode(slot.mode)
-        if slot.agent is not None:
-            slot.agent.mode = slot.mode
+        set_slot_mode(slot, next_mode(slot.mode))
 
     async def _handle(line: str, slot: SessionSlot) -> str:
         """Process one input line AGAINST an EXPLICIT slot (FIX1, W4a final
@@ -734,9 +796,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             if res.action == "mode" and res.new_mode:
                 # Home never reaches here -- "mode" is in _HOME_GATED_ACTIONS,
                 # so Home's own slot.mode is never mutated by a remote /mode.
-                slot.mode = res.new_mode
-                if slot.agent is not None:
-                    slot.agent.mode = res.new_mode
+                set_slot_mode(slot, res.new_mode)
             if res.message:
                 _say(slot, res.message)
             return "continue"
@@ -857,9 +917,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         if mode not in _MODES or mode == slot.mode:
             return
         if mode != "autopilot":
-            slot.mode = mode
-            if slot.agent is not None:
-                slot.agent.mode = mode
+            set_slot_mode(slot, mode)
             slot.sink.note(f"mode → {mode} [{surface}]")
             return
         asyncio.ensure_future(_confirm_autopilot(surface))
@@ -883,9 +941,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         ok = await ask(f"{surface} asks to switch to autopilot "
                        f"(auto-approve everything) — allow? [y/n]")
         if ok:
-            slot.mode = "autopilot"
-            if slot.agent is not None:
-                slot.agent.mode = "autopilot"
+            set_slot_mode(slot, "autopilot")
             slot.sink.note(f"mode → autopilot [{surface}] — approved at this terminal")
         else:
             slot.sink.note(f"autopilot request from {surface} declined — mode stays {slot.mode}")
@@ -896,6 +952,16 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         # guarded + every WorkspaceResources bundle's watcher_task via the
         # PUBLIC `resources.bundles()`, never `_by_root` poked directly).
         _cancel_all_background(steer_task, slots, resources)
+
+    def _mode_getter() -> str:
+        """T6.2 (applied-mode report): the mode of the slot the poller is
+        ACTUALLY bound to -- `first_session_slot`, set right before
+        `_spawn_steer()` runs below, never `slots.active()` (a different tab
+        than the one the poller's `sid` resolves to would report the wrong
+        mode). "" before that slot exists (can't happen once the poller is
+        actually spawned, but keeps this a total function for tests calling
+        it standalone)."""
+        return first_session_slot.mode if first_session_slot is not None else ""
 
     def _spawn_steer() -> None:
         nonlocal steer_task
@@ -914,7 +980,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             cfg, token_provider, workspace=workspace, marathon=not once,
             is_busy=_poller_busy,
             live_session_id=lambda: _live_session_id(slots),
-            submit=_steer_submit, on_mode=_on_mode, client=shared_client))
+            submit=_steer_submit, on_mode=_on_mode, mode_getter=_mode_getter,
+            client=shared_client))
 
     if use_dock:
         ok = False
@@ -942,6 +1009,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     intel_factory=intel_factory, shadow_factory=shadow_factory,
                     first=True, account=account, _with_replayed=True)
                 slots.add(session_slot)
+                first_session_slot = session_slot   # T6.2: what the poller's mode_getter reads
                 # FIX7e (W4a final review — land-on-Home): the session tab
                 # is only the more useful FIRST screen when the boot replay
                 # actually showed something -- a fresh/empty thread lands on
@@ -1025,6 +1093,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             shadow_factory=shadow_factory, pane=None, sink=sink,
             first=True, account=account)
         slots.add(fallback_slot)
+        first_session_slot = fallback_slot   # T6.2: what the poller's mode_getter reads
         _spawn_steer()
     try:
         while True:

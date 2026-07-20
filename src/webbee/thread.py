@@ -65,7 +65,8 @@ async def fetch_recent_thread(cfg, token_provider, session_id: str, *, client=No
     return (r.json() or {}).get("messages", [])
 
 
-async def fetch_pending_steer(cfg, token_provider, session_id: str, *, client=None) -> dict:
+async def fetch_pending_steer(cfg, token_provider, session_id: str, *, client=None,
+                              mode: str = "") -> dict:
     """Drain this user's pending-steer state (idle-steer pickup, liveness v2
     §B + full-queue-layer mode adoption) -- the /thread endpoint's sibling,
     same auth. Returns the gateway payload verbatim:
@@ -77,11 +78,20 @@ async def fetch_pending_steer(cfg, token_provider, session_id: str, *, client=No
       * "requested_mode" -- one-shot remote mode request {mode, surface} or
                             null (GETDEL on the gateway -- delivered exactly
                             once; older gateways omit the key entirely).
+    `mode=` (T6.2, applied-mode report): the polled session's CURRENT
+    coding mode, appended as `?mode={mode}` when non-empty -- the gateway
+    stores it as `applied_mode` so the panel/TG can show the terminal's REAL
+    mode instead of guessing. Omitted entirely when "" (default), so an
+    older gateway that doesn't expect the query param sees the exact same
+    request as before this feature.
     Non-swallowing like fetch_recent_thread above: the poller (webbee.steer)
     wraps each tick in its own try/except. `client=` reuses the repl's shared
     keep-alive client; None keeps the per-call client."""
     token = await token_provider()
-    r = await _request(cfg, client, "GET", f"/v1/agent/sessions/{session_id}/pending-steer", token=token)
+    path = f"/v1/agent/sessions/{session_id}/pending-steer"
+    if mode:
+        path += f"?mode={mode}"
+    r = await _request(cfg, client, "GET", path, token=token)
     return r.json() or {}
 
 

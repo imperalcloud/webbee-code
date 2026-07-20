@@ -81,6 +81,7 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                           submit, marathon: bool = True,
                           live_session_id=lambda: "",
                           on_mode=None,
+                          mode_getter=None,
                           interval: float = _POLL_INTERVAL,
                           client=None,
                           idle_after_s: float = 300.0,
@@ -115,6 +116,19 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                             terminal stops opening a fresh TCP+TLS handshake
                             every tick, forever. None (tests / no repl-owned
                             client) keeps today's per-call client.
+      * mode_getter()     -- sync, optional (T6.2, applied-mode report);
+                            returns the CURRENT mode of the session actually
+                            being polled (the repl passes a getter reading
+                            THAT slot -- never blindly `slots.active()`,
+                            which can be a different tab than the one `sid`
+                            above resolves to). Read fresh every tick and
+                            handed to fetch_pending_steer as `mode=`, so the
+                            gateway's applied-mode record follows a local
+                            mode change (Shift-Tab, /mode, a remote flip)
+                            within ONE poll tick -- ~`interval` seconds later
+                            at the fast cadence, no extra poke required.
+                            None/"" omits the query param entirely (old
+                            wiring, or no session polled yet).
 
     Adaptive cadence (Task 12): after `idle_after_s` (default 5 minutes)
     without activity, the tick relaxes from `interval` (4s) to
@@ -146,9 +160,13 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                             cfg, token_provider, workspace, marathon=marathon)
                     sid = derived
                 # Old-style test doubles for fetch_pending_steer don't accept
-                # a client kwarg -- only pass it when the repl actually gave
-                # us one, so back-compat call sites stay untouched.
+                # a client/mode kwarg -- only pass either when the repl
+                # actually gave us one, so back-compat call sites stay
+                # untouched.
                 fetch_kw = {"client": client} if client is not None else {}
+                mode = mode_getter() if mode_getter is not None else ""
+                if mode:
+                    fetch_kw["mode"] = mode
                 payload = await fetch_pending_steer(cfg, token_provider, sid, **fetch_kw) or {}
                 if payload.get("items"):
                     last_active = now()  # a successful drain = activity
