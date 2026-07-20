@@ -5,7 +5,8 @@ import re
 from webbee.account import Account
 from webbee.repl import (_cancel_all_background, _cancel_slot, _exit_dump,
                          _finish_slot, _live_session_id, _make_session_slot,
-                         _slot_ctx, _steer_target, run_marathon, run_repl)
+                         _slot_ctx, _steer_target, run_marathon, run_repl,
+                         set_slot_mode)
 from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
@@ -367,6 +368,72 @@ def test_next_mode_wired():
     assert next_mode("default") == "plan"   # cycle helper is what repl uses
 
 
+# ── set_slot_mode: the ONE place a slot's mode is ever assigned (T6.1) ───────
+
+def test_set_slot_mode_updates_slot_and_agent(monkeypatch):
+    import webbee.mode_store as MS
+    monkeypatch.setattr(MS, "save_mode", lambda ws, mode: None)   # isolate: unit test, no disk
+    agent = FakeAgent()
+    slot = SessionSlot(kind="session", workspace="/ws-a", label="a",
+                       pane=object(), sink=FakeSink(), agent=agent, mode="default")
+    set_slot_mode(slot, "plan")
+    assert slot.mode == "plan"
+    assert agent.mode == "plan"
+
+
+def test_set_slot_mode_never_crashes_on_agentless_home_slot(monkeypatch):
+    import webbee.mode_store as MS
+    monkeypatch.setattr(MS, "save_mode", lambda ws, mode: None)
+    home = SessionSlot(kind="home", workspace="/ws-home", label="Home",
+                       pane=object(), sink=None, agent=None)
+    set_slot_mode(home, "plan")   # must not raise despite agent is None
+    assert home.mode == "plan"
+
+
+def test_set_slot_mode_persists_for_this_slots_workspace(monkeypatch):
+    import webbee.mode_store as MS
+    calls = []
+    monkeypatch.setattr(MS, "save_mode", lambda ws, mode: calls.append((ws, mode)))
+    slot = SessionSlot(kind="session", workspace="/ws-a", label="a",
+                       pane=object(), sink=FakeSink(), agent=FakeAgent(), mode="default")
+    set_slot_mode(slot, "autopilot")
+    assert calls == [("/ws-a", "autopilot")]   # save_mode itself owns the never-persist-autopilot rule
+
+
+def test_three_mode_mutation_sites_all_route_through_set_slot_mode():
+    # Grep-based coverage (acceptable per the task): set_slot_mode replaces
+    # the three inline mutation sites -- Shift-Tab _cycle, the /mode command
+    # action, and the remote _on_mode flip (including _confirm_autopilot's
+    # approval branch). _cycle itself is a dock-only closure with no
+    # standalone entry point to drive behaviorally without prompt_toolkit,
+    # so this asserts the wiring statically; the /mode-action and remote-flip
+    # sites additionally get full behavior tests elsewhere in this file.
+    import inspect
+
+    import webbee.repl as R
+    src = inspect.getsource(R.run_repl)
+    assert "def _cycle" in src
+    cycle_body = src.split("def _cycle")[1].split("async def _handle")[0]
+    assert "set_slot_mode(slot, next_mode(slot.mode))" in cycle_body
+    assert "slot.mode = next_mode" not in cycle_body   # old two-line mutation is gone
+
+    mode_action = src.split('res.action == "mode" and res.new_mode:')[1][:300]
+    assert "set_slot_mode(slot, res.new_mode)" in mode_action
+
+    on_mode_body = src.split("def _on_mode")[1].split("async def _confirm_autopilot")[0]
+    assert "set_slot_mode(slot, mode)" in on_mode_body
+
+    confirm_body = src.split("async def _confirm_autopilot")[1].split("def _cancel_background")[0]
+    assert 'set_slot_mode(slot, "autopilot")' in confirm_body
+
+
+def test_mode_command_persists_mode_for_this_repo():
+    import webbee.mode_store as mode_store
+    sink, agent = _run(read_line=_lines("/mode plan", "/exit"))
+    assert agent.mode == "plan"
+    assert mode_store.load_mode(os.getcwd()) == "plan"
+
+
 # ── /steps + step drill-down (Task 20 P1b) ────────────────────────────────────
 
 class StepAgent(FakeAgent):
@@ -690,6 +757,127 @@ def test_boot_replay_skips_note_when_thread_empty(monkeypatch):
     assert not any("live" in n for n in sink.notes)
 
 
+# ── boot reattach notice (T6.3, coding-remote flow perfection) ───────────────
+# _note_reattach (called from _finish_slot, first=True only, right after
+# replay) fetches the user's own active-session listing and renders
+# webbee.active_sessions.boot_reattach_notice's verdict. Repo identity is
+# mocked here (webbee.repo.compute_repo_key/find_repo_root) so these tests
+# never shell out to git; the pure decision logic itself is covered in
+# test_active_sessions.py.
+
+def _patch_repo_key(monkeypatch, key="abc123"):
+    import webbee.repo as R
+    monkeypatch.setattr(R, "find_repo_root", lambda start: start)
+    monkeypatch.setattr(R, "compute_repo_key", lambda root: key)
+    return key
+
+
+def test_boot_notes_reattach_when_this_repo_has_a_running_session(monkeypatch):
+    key = _patch_repo_key(monkeypatch)
+    import webbee.active_sessions as AS
+
+    async def fake_fetch(cfg, tp, client=None):
+        return [{"session_id": f"marathon-user-1-r{key}"}]
+    monkeypatch.setattr(AS, "fetch_active_sessions", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert any("reattached" in n and "history" in n for n in sink.notes)
+
+
+def test_boot_notes_pending_approval_when_this_repos_session_is_parked(monkeypatch):
+    key = _patch_repo_key(monkeypatch)
+    import webbee.active_sessions as AS
+
+    async def fake_fetch(cfg, tp, client=None):
+        return [{"session_id": f"marathon-user-1-r{key}", "pending_consent": {"tool": "bash"}}]
+    monkeypatch.setattr(AS, "fetch_active_sessions", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert any("reattached" in n for n in sink.notes)
+    assert any("approval" in n and "panel" in n for n in sink.notes)
+
+
+def test_boot_notes_pointer_when_another_repo_has_a_parked_session(monkeypatch):
+    _patch_repo_key(monkeypatch, key="abc123")
+    import webbee.active_sessions as AS
+
+    async def fake_fetch(cfg, tp, client=None):
+        return [{"session_id": "marathon-user-1-rzzz999", "pending_consent": {"tool": "bash"}}]
+    monkeypatch.setattr(AS, "fetch_active_sessions", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert any("parked session waiting for approval in another repo" in n for n in sink.notes)
+    assert not any("reattached" in n for n in sink.notes)
+
+
+def test_boot_silent_when_no_active_sessions_anywhere(monkeypatch):
+    _patch_repo_key(monkeypatch)
+    import webbee.active_sessions as AS
+
+    async def fake_fetch(cfg, tp, client=None):
+        return []
+    monkeypatch.setattr(AS, "fetch_active_sessions", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("/exit"))
+    assert not any("reattached" in n or "parked session" in n for n in sink.notes)
+
+
+def test_boot_reattach_survives_repo_key_failure(monkeypatch):
+    import webbee.repo as R
+
+    def boom(root):
+        raise OSError("no git binary")
+    monkeypatch.setattr(R, "find_repo_root", lambda start: start)
+    monkeypatch.setattr(R, "compute_repo_key", boom)
+
+    import webbee.active_sessions as AS
+    called = []
+
+    async def fake_fetch(cfg, tp, client=None):
+        called.append(1)
+        return [{"session_id": "marathon-user-1-rabc123"}]
+    monkeypatch.setattr(AS, "fetch_active_sessions", fake_fetch)
+
+    sink, agent = _run(read_line=_lines("hello", "/exit"))
+    assert agent.tasks == ["hello"]           # boot completed cleanly, agent still works
+    assert not any("reattached" in n for n in sink.notes)
+
+
+def test_boot_reattach_survives_fetch_failure(monkeypatch):
+    _patch_repo_key(monkeypatch)
+    import webbee.active_sessions as AS
+
+    async def boom(cfg, tp, client=None):
+        raise RuntimeError("connection refused")
+    monkeypatch.setattr(AS, "fetch_active_sessions", boom)
+
+    sink, agent = _run(read_line=_lines("hello", "/exit"))
+    assert agent.tasks == ["hello"]
+    assert not any("reattached" in n for n in sink.notes)
+
+
+def test_boot_reattach_only_fires_for_first_session_slot(monkeypatch):
+    _patch_repo_key(monkeypatch)
+    import webbee.active_sessions as AS
+    calls = []
+
+    async def fake_fetch(cfg, tp, client=None):
+        calls.append(1)
+        return [{"session_id": "marathon-user-1-rabc123"}]
+    monkeypatch.setattr(AS, "fetch_active_sessions", fake_fetch)
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    asyncio.run(_drive())
+    assert calls == []            # first=False -> fetch_active_sessions never awaited
+
+
 # ── idle-steer pickup wiring (liveness v2 §B) ─────────────────────────────────
 # The poll loop itself lives in webbee.steer (unit-tested in test_steer.py);
 # these cover ONLY the repl wiring: the poller task starts at boot with the
@@ -773,6 +961,28 @@ def test_steer_poller_without_sink_busy_hook_defaults_idle(monkeypatch):
     monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
     sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent())
     assert captured["is_busy"]() is False   # FakeSink has no is_busy -> never blocks
+
+
+def test_steer_poller_gets_a_mode_getter_reading_the_first_session_slots_live_mode(monkeypatch):
+    # T6.2: _spawn_steer threads a mode_getter bound to the FIRST session
+    # slot (never blindly `slots.active()`) into poll_idle_steer -- read
+    # fresh, so a mode change made after boot (here: /mode plan) is already
+    # visible the next time the poller calls it.
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, workspace, mode_getter=None, **kw):
+        captured["mode_getter"] = mode_getter
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+    # A real task line ("hello") is needed so SurfaceAgent.run's internal
+    # `await asyncio.sleep(0)` actually yields to the event loop at least
+    # once -- the plain fallback read_line loop is otherwise fully sync
+    # (a slash command alone never cedes control, so the scheduled poller
+    # task would never get to run its body before /exit cancels it).
+    sink, agent = _run(read_line=_lines("/mode plan", "hello", "/exit"), agent=SurfaceAgent())
+    assert captured["mode_getter"] is not None
+    assert captured["mode_getter"]() == "plan"
 
 
 def test_steer_poller_once_mode_polls_coding_session(monkeypatch):
@@ -868,6 +1078,15 @@ def test_remote_downgrade_applies_instantly_with_note(monkeypatch):
     assert any(n == "mode → plan [telegram]" for n in sink.notes)
 
 
+def test_remote_downgrade_via_on_mode_persists_too(monkeypatch):
+    # T6.1: the remote flip goes through set_slot_mode exactly like the
+    # local /mode command -- the choice must survive to the next boot.
+    import webbee.mode_store as mode_store
+    _spy_on_mode(monkeypatch, ("plan", "telegram"))
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent())
+    assert mode_store.load_mode(os.getcwd()) == "plan"
+
+
 def test_remote_autopilot_applies_only_on_local_yes(monkeypatch):
     _spy_on_mode(monkeypatch, ("autopilot", "telegram"))
 
@@ -885,6 +1104,23 @@ def test_remote_autopilot_applies_only_on_local_yes(monkeypatch):
     assert sink.questions and "autopilot" in sink.questions[0]
     assert "telegram" in sink.questions[0] and "allow?" in sink.questions[0]
     assert any("approved at this terminal" in n for n in sink.notes)
+
+
+def test_remote_autopilot_approval_never_persists_as_autopilot(monkeypatch):
+    # Security posture (T6.1): even a locally-APPROVED remote autopilot
+    # upgrade is downgraded to 'default' on disk -- the next boot in this
+    # repo must NOT silently resume autopilot.
+    import webbee.mode_store as mode_store
+    _spy_on_mode(monkeypatch, ("autopilot", "telegram"))
+
+    class ConfirmSink(FakeSink):
+        async def ask_yes_no(self, question, timeout=60.0):
+            return True
+
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=SurfaceAgent(),
+                       sink=ConfirmSink())
+    assert agent.mode == "autopilot"                  # live process mode IS autopilot
+    assert mode_store.load_mode(os.getcwd()) == "default"   # but never remembered as such
 
 
 def test_remote_autopilot_declined_or_unconfirmable_keeps_mode(monkeypatch):
@@ -1152,6 +1388,64 @@ def test_make_session_slot_first_true_runs_replay(monkeypatch):
 
     slot = asyncio.run(_drive())
     assert calls == [slot.sink]   # first=True -> replay runs into THIS slot's sink
+
+
+# ── T6.1: _make_session_slot loads a repo's remembered mode ──────────────────
+
+def test_make_session_slot_uses_remembered_mode_over_process_baseline(monkeypatch):
+    import webbee.mode_store as MS
+    monkeypatch.setattr(MS, "load_mode", lambda ws: "plan")
+    captured = {}
+
+    def agent_factory(c, tp, ws, m):
+        captured["mode"] = m
+        return FakeAgent()
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=agent_factory, intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    slot = asyncio.run(_drive())
+    assert slot.mode == "plan"          # remembered mode wins over the "default" baseline
+    assert captured["mode"] == "plan"   # the agent itself is built with it too
+
+
+def test_make_session_slot_falls_back_to_baseline_when_nothing_remembered(monkeypatch):
+    import webbee.mode_store as MS
+    monkeypatch.setattr(MS, "load_mode", lambda ws: None)
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    slot = asyncio.run(_drive())
+    assert slot.mode == "default"
+
+
+def test_make_session_slot_never_loads_autopilot_from_cache(monkeypatch):
+    # save_mode already refuses to write 'autopilot' to disk, so load_mode
+    # can never legitimately return it -- but the wiring must not special-
+    # case it either way: whatever load_mode returns is used verbatim.
+    import webbee.mode_store as MS
+    monkeypatch.setattr(MS, "load_mode", lambda ws: None)   # the realistic case
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "autopilot",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    slot = asyncio.run(_drive())
+    assert slot.mode == "autopilot"   # an EXPLICIT process baseline is still honored
 
 
 def test_slot_ctx_reads_active_slot_and_flips_on_switch():
