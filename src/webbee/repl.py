@@ -503,7 +503,17 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
     The `InstanceLock` itself rides on `slot.instance_lock` (a dynamic
     attribute, same pattern as `agent.slot_id` below it) — `run_repl`'s own
     teardown closes it at process exit, releasing the flock for a future
-    process on this repo."""
+    process on this repo.
+
+    Perf note: the lock's own `git remote get-url` (via `compute_repo_key`)
+    is kicked off as a background thread task immediately, RIGHT AWAY --
+    never awaited until `_finish_slot` actually needs `slot_id` further
+    down -- so it runs CONCURRENTLY with `load_mode`'s own git subprocess
+    call (and `_isolate_workspace`, a no-op for `first=True` anyway)
+    instead of adding a second sequential git round-trip on top of boot's
+    existing one. A dock-boot test with a fixed sleep-then-assert margin
+    (several exist in test_repl.py) must never see this as new added
+    latency."""
     from uuid import uuid4
 
     from webbee import instance_lock as _instance_lock
@@ -517,17 +527,11 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
     if auto_slot_id:
         slot_id = "" if first else uuid4().hex[:6]
 
-    lock = None
-    lock_note = ""
+    repo_key_task = None
     if first:
         def _repo_key() -> str:   # runs `git remote get-url` -- keep off the event loop
             return compute_repo_key(find_repo_root(workspace))
-        lock = _instance_lock.acquire(await asyncio.to_thread(_repo_key))
-        if lock.held:
-            lock_note = ("another Webbee is already running in this repo — "
-                        "this window is a separate parallel session")
-            if auto_slot_id:
-                slot_id = uuid4().hex[:6]
+        repo_key_task = asyncio.ensure_future(asyncio.to_thread(_repo_key))
 
     effective_mode = await asyncio.to_thread(load_mode, workspace) or mode
     width, _height = get_size(None)   # pre-app: same fallback tui.run_session's own sizing uses
@@ -536,6 +540,17 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
     label = os.path.basename(os.path.normpath(workspace)) or workspace
     effective_workspace, wt_note = await _isolate_workspace(
         workspace, resources, first=first, slot_id=slot_id)
+
+    lock = None
+    lock_note = ""
+    if repo_key_task is not None:
+        lock = _instance_lock.acquire(await repo_key_task)
+        if lock.held:
+            lock_note = ("another Webbee is already running in this repo — "
+                        "this window is a separate parallel session")
+            if auto_slot_id:
+                slot_id = uuid4().hex[:6]
+
     slot, replayed = await _finish_slot(cfg, token_provider, effective_workspace, effective_mode,
                                         resources=resources, agent_factory=agent_factory,
                                         intel_factory=intel_factory, shadow_factory=shadow_factory,
