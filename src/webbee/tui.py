@@ -528,12 +528,21 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
 
     def _launch_inject(text):
         # Fire the fly-in as a background task (a key handler can't await):
-        # _inject_or_queue owns the iid mint + the local-queue fallback. The
-        # target deque is the ACTIVE slot's OWN pending -- the only way this
-        # branch is reachable at all is that slot being the busy one.
+        # _inject_or_queue owns the iid mint + the local-queue fallback.
+        # `slot` is captured HERE, SYNCHRONOUSLY, at Enter keypress time
+        # (FIX7a — mirrors the turn-start pinning everywhere else in this
+        # module) -- both the target deque AND the inject POST itself stay
+        # pinned to THIS slot even if the user switches tabs before the
+        # scheduled background task's body actually runs. `inject` itself
+        # keeps its existing 2-arg (text, iid) contract as far as
+        # `_inject_or_queue` is concerned -- the slot rides along in a thin
+        # wrapper closure, so `_inject_or_queue`'s own signature/tests need
+        # no change at all.
+        slot = _a()
         app = get_app()
         app.create_background_task(
-            _inject_or_queue(inject, text, _a().pending, invalidate=app.invalidate))
+            _inject_or_queue(lambda t, i: inject(t, i, slot), text, slot.pending,
+                             invalidate=app.invalidate))
 
     def _start_turn_in(slot, text):
         slot.turn.pop("stopped", None)   # a stale stop flag must never eat the next natural drain
@@ -551,7 +560,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # time" everywhere else in this function.
         done = False
         try:
-            await on_line(text)
+            await on_line(text, slot)
             done = True
         finally:
             slot.turn["task"] = None
@@ -585,13 +594,24 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         """Lockout-proof busy for the key handlers, on the ACTIVE slot: busy
         only while ITS turn TASK is genuinely alive. A turn that died without
         clearing the sink's busy flag (an error path that skipped end_turn)
-        must never brick the dock -- Enter/Esc/Ctrl-C/Ctrl-D all gate on
-        THIS, so a stale flag degrades to a cosmetic toolbar glitch instead
-        of an unusable input (Valentin, live 2026-07-15: 'working' spun and
-        NO key reacted). A Home slot (no sink) is never busy."""
-        slot = _a()
+        must never brick the dock -- Enter/Esc/Ctrl-C all gate on THIS, so a
+        stale flag degrades to a cosmetic toolbar glitch instead of an
+        unusable input (Valentin, live 2026-07-15: 'working' spun and NO key
+        reacted). A Home slot (no sink) is never busy. Thin wrapper over the
+        per-slot `_slot_busy` (FIX5) -- Ctrl-D's `_eof` uses THAT directly,
+        across every slot, not just the active one."""
+        return _slot_busy(_a())
+
+    def _slot_busy(slot) -> bool:
+        """Lockout-proof busy for an ARBITRARY slot (FIX5, generalizes
+        `_busy_live` above -- same predicate, parameterized): busy only
+        while ITS OWN turn TASK is genuinely alive AND its sink reports
+        busy. Ctrl-D's `_eof` needs this across EVERY slot, not just the
+        active one -- a background tab's live turn must never let a Ctrl-D
+        pressed on Home (or any other idle tab) exit right through it."""
         t = slot.turn.get("task")
-        ib = _sink_attr("is_busy")
+        sink = slot.sink
+        ib = getattr(sink, "is_busy", None) if sink is not None else None
         busy = bool(ib()) if callable(ib) else False
         return bool(busy and t is not None and not t.done())
 
@@ -612,7 +632,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             return
         if not text.strip() and sel["i"] is not None and steps_nav and not _busy_live():
             idx, sel["i"] = sel["i"], None
-            event.app.create_background_task(steps_nav["expand"](idx))
+            event.app.create_background_task(steps_nav["expand"](idx, slot))
             return
         if not text.strip():
             return
@@ -620,18 +640,22 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             # Queue MANAGEMENT runs NOW, even mid-turn (it never queues
             # itself): a display-only background task — the handler only
             # reads/clears the shared deque and prints, so it can't collide
-            # with the live turn and never touches turn["task"].
+            # with the live turn and never touches turn["task"]. `slot` is
+            # the ACTIVE-AT-KEYPRESS slot captured above (FIX1) — the SAME
+            # slot on_line acts against no matter what becomes active
+            # before this scheduled task's body actually runs.
             buf.history.append_string(text)
-            event.app.create_background_task(on_line(text))
+            event.app.create_background_task(on_line(text, slot))
             return
         if slot.sink is None:
             # Home: no busy/queue/inject semantics at all. A slash command
-            # still reaches on_line exactly like every other slot; plain
-            # text is the caller's own affair (Task 6 wires home_input --
-            # None here simply means "ignored").
+            # still reaches on_line exactly like every other slot (against
+            # the Home slot itself, FIX1); plain text is the caller's own
+            # affair (Task 6 wires home_input -- None here simply means
+            # "ignored").
             buf.history.append_string(text)
             if text.strip().startswith("/"):
-                event.app.create_background_task(on_line(text))
+                event.app.create_background_task(on_line(text, slot))
             elif home_input is not None:
                 event.app.create_background_task(home_input(text))
             return
@@ -685,16 +709,19 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
 
     @kb.add("c-d")
     def _eof(event):
-        # Ctrl-D policy (Task 5): closing the active SESSION tab is the
-        # natural action as long as another session tab survives it;
-        # otherwise fall through to the original behavior (quit when idle —
-        # unchanged, still gated on _busy_live so a running turn is never
-        # torn down by a stray EOF).
+        # Ctrl-D policy (Task 5, generalized FIX5): closing the active
+        # SESSION tab is the natural action as long as another session tab
+        # survives it; otherwise a running turn must never be torn down by
+        # a stray EOF -- but FIX5 widens that guard past the ACTIVE slot:
+        # a background tab's live turn (e.g. Home-spawned via _home_input,
+        # or any tab left running while you switched away) must ALSO block
+        # exit, not just whichever slot happens to be visible right now.
         if _should_close_on_eof(slots):
             _close_flow()
             return
-        if not _busy_live():
-            event.app.exit()
+        if any(_slot_busy(s) for s in slots.slots):
+            return
+        event.app.exit()
 
     sel = {"i": None}   # None = no selection; else 0-based step index
 
@@ -872,9 +899,24 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # no-op (the clicked tab is already active) and a stale idx (the
         # tab closed between render and release) by returning False -- when
         # it does, neither the history swap nor the redraw happen, so a
-        # click on the active tab is a true no-op, never a crash.
+        # click on the active tab is a true no-op, never a crash. `prev`
+        # captured BEFORE the switch (FIX7b) -- it's the slot we're LEAVING.
+        prev = slots.active()
         if slots.switch(idx):
             _swap_history(buf, slots.active())
+            # FIX7b: a draft mid-type must NOT survive a switch (it belongs
+            # to the tab you were looking at, not the one you're switching
+            # into -- history load already re-points the buffer's recall
+            # list; the buffer's own live TEXT needs the same reset), and
+            # the LEAVING slot's own pulled-queue-item carry (↑ pull-to-edit,
+            # see _rewrap_pulled) must be dropped -- otherwise a stale
+            # steer_iid can ride along into a totally different slot's
+            # later resubmit (the kernel's dedup ring would then wrongly
+            # dedup a genuinely new message against a landed twin that was
+            # never even the SAME conversation).
+            buf.reset()
+            prev.pulled["text"] = ""
+            prev.pulled["iid"] = ""
             if on_switch is not None:
                 on_switch(idx)
             get_app().invalidate()
@@ -884,7 +926,15 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # (Home guard, active-idx adjustment, cancel_slot, the post-close
         # note — all PT-free and shared verbatim with repl's `/close`), then
         # invalidates on a genuine close so the tab bar/pane repaint at once.
+        # FIX7d: the SURVIVOR (post-close active) slot's own history takes
+        # over the shared input buffer, exactly like any other switch — a
+        # closed tab's history dies with it, so the buffer must never keep
+        # pointing at it; the buffer's own draft is dropped too (same
+        # discipline as `_switch_to`'s FIX7b — a close ALSO changes which
+        # tab you're looking at).
         if close_active(slots, cancel_slot):
+            _swap_history(buf, slots.active())
+            buf.reset()
             get_app().invalidate()
             return True
         return False
@@ -899,6 +949,8 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # per-tab idx of their own, so they keep meaning "close what I'm
         # looking at" via `_close_flow`/`close_active` below.
         if close_at(slots, idx, cancel_slot):
+            _swap_history(buf, slots.active())   # FIX7d, same as _close_flow above
+            buf.reset()
             get_app().invalidate()
             return True
         return False
@@ -913,13 +965,24 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     if ui_hooks is not None:
         ui_hooks["switch"] = _switch_to
         ui_hooks["close"] = _close_flow
+        # FIX3: the Home-spawned first turn seam — repl's `_home_input` uses
+        # this so the NEW slot's turn is started through the SAME path a
+        # normal Enter-idle submit uses (`slot.turn["task"]` actually gets
+        # populated), instead of a bare `await` that ran the turn invisibly
+        # (no busy glyph, no Esc/Ctrl-C cancel -- nothing ever recorded it).
+        ui_hooks["start_turn_in"] = _start_turn_in
 
     def _tab_fragments_live():
         # Live like _toolbar/_queue_fragments: re-invoked every redraw, so a
         # status_glyph flip (consent armed in a background tab) or an
-        # active-slot change repaints the bar at once.
+        # active-slot change repaints the bar at once. forward=pane.
+        # forward_mouse(clamp="top") (FIX6): first refusal on every tab-bar
+        # click so a drag armed in the pane just below can still be
+        # extended/completed once it releases up here, mirroring the
+        # queue/todo panels' own forward=pane.forward_mouse below the pane.
         cols, _rows = sizing.get_size(get_app_or_none())
-        return tab_fragments(slots, on_switch=_switch_to, on_close=_close_tab_click, width=cols)
+        return tab_fragments(slots, on_switch=_switch_to, on_close=_close_tab_click, width=cols,
+                             forward=lambda ev: _pane().forward_mouse(ev, clamp="top"))
 
     # The tab bar — pinned at the very TOP, fixed height 1, NEVER hidden
     # (unlike the queue/todo panels below it): it IS the new look, even with
@@ -983,6 +1046,18 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         while True:
             await asyncio.sleep(0.25)
             _tick_once(slots, app, _busy_live)
+
+    # FIX7c (W4a final review — history seeding): the FIRST active slot's
+    # own history is pointed at from the START, before a single key is
+    # pressed -- not only on the FIRST actual `_switch_to` call. Without
+    # this, every line typed pre-switch recorded into the Buffer's own
+    # THROWAWAY default `InMemoryHistory()` (never touched `slot.history`,
+    # which stayed None); the first later switch away and back then MINTED
+    # a brand-new empty history for the slot (`_swap_history`'s own None
+    # check), silently losing every line typed before that first switch --
+    # ↑ recall on a slot you never left would work, but come back after a
+    # Home-and-back and it's gone.
+    _swap_history(buf, _a())
 
     tick = asyncio.ensure_future(_ticker())
     try:

@@ -231,3 +231,50 @@ def test_single_slot_home_alone_still_renders_the_bar():
 def test_empty_slot_manager_renders_nothing():
     mgr = SlotManager()
     assert tab_fragments(mgr, on_switch=_noop, on_close=_noop) == []
+
+
+# ── FIX6: drag first-refusal (a pane selection armed below the tab bar) ────
+
+def test_close_click_with_armed_drag_forward_consumes_event_never_closes():
+    switch_hits, close_hits = [], []
+    slots = _mk_slots(("alpha", _FakeSink()), active_idx=1)
+    forward = lambda ev: True   # noqa: E731 -- simulates an ARMED drag (pane.forward_mouse)
+    frags = tab_fragments(slots, on_switch=switch_hits.append, on_close=close_hits.append,
+                          forward=forward)
+    close_alpha = frags[3][2]
+    assert _up(close_alpha) is None    # consumed by forward -- same "stop here" contract as tui._forwarding
+    assert close_hits == []            # NO close fired
+    assert switch_hits == []
+
+
+def test_switch_click_with_armed_drag_forward_consumes_event_never_switches():
+    switch_hits = []
+    slots = _mk_slots(("alpha", _FakeSink()), active_idx=1)
+    forward = lambda ev: True   # noqa: E731
+    frags = tab_fragments(slots, on_switch=switch_hits.append, on_close=_noop, forward=forward)
+    alpha_handler = frags[2][2]
+    home_handler = frags[0][2]
+    assert _up(alpha_handler) is None and switch_hits == []
+    assert _up(home_handler) is None and switch_hits == []   # Home's own handler too
+
+
+def test_close_click_with_unarmed_forward_still_fires_close_as_before():
+    # forward=lambda ev: False (drag NOT armed) -- dispatch proceeds exactly
+    # like the forward=None (default) case every existing test above covers.
+    close_hits = []
+    slots = _mk_slots(("alpha", _FakeSink()), active_idx=1)
+    forward = lambda ev: False   # noqa: E731
+    frags = tab_fragments(slots, on_switch=_noop, on_close=close_hits.append, forward=forward)
+    close_alpha = frags[3][2]
+    assert _up(close_alpha) is None
+    assert close_hits == [1]
+
+
+def test_switch_click_with_unarmed_forward_still_fires_switch_as_before():
+    switch_hits = []
+    slots = _mk_slots(("alpha", _FakeSink()), active_idx=1)
+    forward = lambda ev: False   # noqa: E731
+    frags = tab_fragments(slots, on_switch=switch_hits.append, on_close=_noop, forward=forward)
+    alpha_handler = frags[2][2]
+    assert _up(alpha_handler) is None
+    assert switch_hits == [1]

@@ -60,10 +60,17 @@ def _default_intel_factory(cfg, workspace: str):
     return IntelService(root, compute_repo_key(root), cache_dir=cfg.cache_dir)
 
 
-async def replay_thread(cfg, token_provider, sink) -> None:
+async def replay_thread(cfg, token_provider, sink) -> int:
     """Boot replay of the durable per-user thread (Task 9): best-effort,
     entirely swallowed on any failure -- history is a nice-to-have,
-    never a boot blocker (network down, no such session yet, etc.)."""
+    never a boot blocker (network down, no such session yet, etc.).
+
+    Returns the count of replayed DISPLAY messages (FIX7e, W4a final review
+    — land-on-Home): 0 on a fresh/empty thread, or on ANY failure/skip --
+    the never-raise contract is unchanged, this is purely an additional
+    signal. repl's dock boot uses it to decide whether to land on the
+    session tab (there's something to show) or on Home (nothing yet --
+    the new-tab dashboard is the more useful first screen)."""
     try:
         from imperal_mcp.client import ImperalClient
         from webbee.thread import (conversational_text, fetch_recent_thread,
@@ -80,8 +87,9 @@ async def replay_thread(cfg, token_provider, sink) -> None:
             _shown += 1
         if _shown:
             sink.note("— live —")
+        return _shown
     except Exception:
-        pass  # replay is best-effort; never block boot
+        return 0  # replay is best-effort; never block boot
 
 
 async def start_intel(cfg, workspace: str, intel_factory):

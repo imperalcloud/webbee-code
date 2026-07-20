@@ -482,6 +482,146 @@ def test_forward_mouse_up_completes_copy_at_bottom_row_and_resets_state(monkeypa
     assert pane._edge_drag == 0
 
 
+def test_forward_mouse_clamp_top_extends_selection_to_top_row_and_arms_negative_edge_drag():
+    # FIX6: clamp="top" (the tab bar, ABOVE the pane) must clamp y to the
+    # pane's OWN top row (pane._offset) -- not the bottom row clamp="bottom"
+    # (the default, used by the queue/todo panels/toolbar BELOW the pane)
+    # uses -- and arm edge_drag=-1 (matching _SelectControl's own sign for a
+    # real top-edge drag), so the ticker keeps scrolling UP + growing the
+    # selection while the pointer sits parked on the tab bar.
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 20
+
+    down = MouseEvent(position=Point(1, 3), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                 # arms the drag INSIDE the pane
+
+    move = MouseEvent(position=Point(7, 0), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(move, clamp="top") is True
+    assert pane._sel[1] == (pane._offset, 7)          # x passed through, y clamped to TOP row
+    assert pane._edge_drag == -1                       # negative -- matches a real top-edge drag
+    assert pane.control._down_abs is not None          # still armed — only MOUSE_UP disarms
+
+
+def test_forward_mouse_clamp_top_up_completes_copy_at_top_row(monkeypatch):
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))
+    pane._offset = 10
+
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                  # Point is (x, y) → anchor abs (12, 1)
+
+    top = pane._offset                                 # the pane's OWN top row
+    up = MouseEvent(position=Point(1, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(up, clamp="top") is True
+
+    assert captured["text"] == pane._selected_text((12, 1), (top, 1))
+    assert pane.control._down is None
+    assert pane.control._down_abs is None
+    assert pane._sel is None
+    assert pane._edge_drag == 0
+
+
+def test_tab_bar_close_fragment_with_armed_pane_drag_completes_copy_not_close(monkeypatch):
+    # FIX6, end-to-end wiring: a drag armed inside the output pane, released
+    # on a tab's ✕ -- exactly the shape `tui._tab_fragments_live`'s
+    # `forward=lambda ev: _pane().forward_mouse(ev, clamp="top")` produces.
+    # The copy must complete (clipboard captured) and the close must NEVER
+    # fire; every drag field resets, same as any other completed selection.
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.slots import SessionSlot, SlotManager
+    from webbee.tabs import tab_fragments
+    from webbee.tui import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))
+    pane._offset = 10
+
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                  # arms the drag INSIDE the pane
+
+    slots = SlotManager()
+    slots.add(SessionSlot(kind="home", workspace=".", label="Home",
+                          pane=OutputPane(width=80), sink=None, agent=None))
+    slots.add(SessionSlot(kind="session", workspace=".", label="alpha",
+                          pane=pane, sink=_idle_sink(), agent=None))
+    slots.active_idx = 1
+    switch_hits, close_hits = [], []
+    forward = lambda ev: pane.forward_mouse(ev, clamp="top")   # noqa: E731 -- the REAL production seam
+    frags = tab_fragments(slots, on_switch=switch_hits.append, on_close=close_hits.append,
+                          forward=forward)
+    close_alpha = frags[3][2]                          # the tab's own ✕ fragment's handler
+
+    top = pane._offset
+    up = MouseEvent(position=Point(1, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert close_alpha(up) is None                      # consumed -- same contract as a real key binding
+
+    assert captured["text"] == pane._selected_text((12, 1), (top, 1))   # the copy completed
+    assert close_hits == []                              # NO close fired
+    assert switch_hits == []
+    # every drag field reset -- a stray SECOND click doesn't see a stale drag
+    assert pane.control._down_abs is None
+    assert pane._sel is None
+    assert pane._edge_drag == 0
+
+
+def test_tab_bar_close_fragment_with_no_armed_drag_still_closes_as_before():
+    # Sanity companion: an UNARMED pane (no drag in progress) must leave the
+    # ✕ click's normal close dispatch completely untouched.
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.slots import SessionSlot, SlotManager
+    from webbee.tabs import tab_fragments
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    slots = SlotManager()
+    slots.add(SessionSlot(kind="home", workspace=".", label="Home",
+                          pane=OutputPane(width=80), sink=None, agent=None))
+    slots.add(SessionSlot(kind="session", workspace=".", label="alpha",
+                          pane=pane, sink=_idle_sink(), agent=None))
+    slots.active_idx = 1
+    close_hits = []
+    forward = lambda ev: pane.forward_mouse(ev, clamp="top")   # noqa: E731
+    frags = tab_fragments(slots, on_switch=lambda i: None, on_close=close_hits.append,
+                          forward=forward)
+    close_alpha = frags[3][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert close_alpha(up) is None
+    assert close_hits == [1]
+
+
 def test_forward_mouse_ignores_other_event_types_while_armed():
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
@@ -1904,7 +2044,7 @@ def test_dock_end_to_end_type_ahead_queues_then_drains_fifo():
         gate = asyncio.Event()
         busy = {"v": False}
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             busy["v"] = True
             ran.append(text)
             await gate.wait()
@@ -2064,7 +2204,7 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
         gate = asyncio.Event()
         busy = {"v": False}
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             busy["v"] = True
             ran.append(text)
             try:
@@ -2111,6 +2251,87 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
     asyncio.run(scenario())
 
 
+def test_closing_a_busy_tab_with_queued_lines_never_ghost_drains():
+    # FIX2: closing a busy tab (Ctrl-W) with lines already queued must not
+    # drain them into a brand-new turn -- the REAL webbee.repl._cancel_slot
+    # (post-fix) flags turn["stopped"] before cancelling, mirroring a user
+    # Esc/Ctrl-C stop, so tui's own drain rule holds: nothing starts anywhere,
+    # and the queue simply disappears along with the slot it belonged to.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.repl import _cancel_slot
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        pane_a = tui.OutputPane(width=80)
+        ran = []
+        gate = asyncio.Event()
+        busy = {"v": False}
+
+        async def on_line(text, slot=None):
+            busy["v"] = True
+            ran.append(text)
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                pass                    # repl._run_turn_on absorbs a cancel too
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        sink_a = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                                 consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                             pane=pane_a, sink=sink_a, agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(slot_a)
+        slots.active_idx = 1
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    cancel_slot=_cancel_slot))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")
+                await _until(lambda: ran == ["first"])              # turn running in A
+                pipe.send_text("queued 1\r")
+                pipe.send_text("queued 2\r")
+                await _until(lambda: list(slot_a.pending) == ["queued 1", "queued 2"])
+
+                pipe.send_text("\x17")                                # Ctrl-W: close busy tab A
+                await _until(lambda: len(slots.slots) == 1)           # only Home left
+                await _until(lambda: not busy["v"])
+                await asyncio.sleep(0.1)                               # let any ghost drain surface
+
+                assert ran == ["first"]                # nothing else ever ran -- no ghost turn
+                assert list(slot_a.pending) == ["queued 1", "queued 2"]   # dies with the slot, untouched
+                assert slot_a.turn.get("task") is None
+                assert slots.active_idx == 0            # landed on Home
+
+                pipe.send_text("\x04")                  # idle, no sessions -> exit
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 def test_run_session_uses_caller_turn_dict():
     # The repl's poller gate (_poller_busy) reads slots.active().turn -- when
     # a caller-built slot carries its OWN turn dict object, run_session must
@@ -2135,7 +2356,7 @@ def test_run_session_uses_caller_turn_dict():
         busy = {"v": False}
         caller_turn = {"task": None}
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             busy["v"] = True
             await gate.wait()
             busy["v"] = False
@@ -2197,7 +2418,7 @@ def test_error_turn_holds_queue():
         busy = {"v": False}
         failed = {"v": False}
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             busy["v"] = True
             failed["v"] = False            # begin_turn clears the one-turn flag
             ran.append(text)
@@ -2272,7 +2493,7 @@ def test_dock_queue_command_runs_immediately_even_while_busy():
         busy = {"v": False}
         pend = deque()
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             if text.split()[0].lower() == "/queue":      # the repl handler: display-only
                 ran.append(text)
                 if "clear" in text:
@@ -2638,7 +2859,7 @@ def test_dock_end_to_end_panel_pull_reedit_requeue_and_clean_transcript():
         busy = {"v": False}
         pend = deque()
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             busy["v"] = True
             ran.append(text)
             await gate.wait()
@@ -2911,13 +3132,13 @@ def test_dock_end_to_end_busy_enter_injects_ok_and_failure_falls_back():
         gate = asyncio.Event()
         busy = {"v": False}
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             busy["v"] = True
             ran.append(text)
             await gate.wait()
             busy["v"] = False
 
-        async def inject(text, iid):
+        async def inject(text, iid, slot=None):
             injected.append((text, iid))
             return text == "flies in"                 # the second line fails
 
@@ -2957,6 +3178,88 @@ def test_dock_end_to_end_busy_enter_injects_ok_and_failure_falls_back():
     asyncio.run(scenario())
 
 
+def test_launch_inject_posts_into_the_slot_captured_at_keypress_not_whatever_is_active_later():
+    # FIX7a: the mid-turn inject fly-in's POST target is the slot CAPTURED
+    # SYNCHRONOUSLY at Enter keypress time (tui._launch_inject) -- a switch
+    # sent back-to-back right after (no await in between, so both land in
+    # the pipe's buffer and get dispatched in the SAME processing burst,
+    # before the scheduled `_inject_or_queue` background task's body has any
+    # chance to run) must never redirect the POST to whatever tab is active
+    # by the time that task's body actually calls `inject(text, iid, slot)`.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane_a, pane_b = tui.OutputPane(width=80), tui.OutputPane(width=80)
+        busy = {"v": False}
+        ran = []
+        turn_gate = asyncio.Event()
+
+        async def on_line(text, slot=None):
+            busy["v"] = True
+            ran.append(text)
+            await turn_gate.wait()
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        sink_a = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                                 consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane_a, sink=sink_a)
+        slot_a = slots.slots[0]
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=pane_b, sink=_idle_sink(), agent=None)
+        slots.add(slot_b)
+
+        calls = []
+
+        async def inject(text, iid, slot):
+            calls.append((text, iid, slot))
+            return True
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None, inject=inject))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")                       # starts a turn IN A
+                await _until(lambda: ran == ["first"])
+
+                pipe.send_text("fly this in\r")                 # busy(A) -> mid-turn inject launcher
+                pipe.send_text("\x1b1")                          # Alt+1 (switch to B) -- SAME burst, no await
+                await _until(lambda: calls != [])
+
+                assert len(calls) == 1
+                text, iid, slot = calls[0]
+                assert text == "fly this in"
+                assert slot is slot_a                               # the CAPTURED slot, never B
+
+                turn_gate.set()
+                await _until(lambda: not busy["v"])
+
+                pipe.send_text("\x04")
+                await _until(lambda: len(slots.slots) == 1)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 def test_dock_mounts_sticky_todo_panel_above_queue_panel():
     # The layout contract: root HSplit = [pane, TODO panel, QUEUE panel,
     # input, toolbar]. Both are ConditionalContainers occupying ZERO rows when
@@ -2978,7 +3281,7 @@ def test_dock_mounts_sticky_todo_panel_above_queue_panel():
             return {"tokens": 0, "credits": 0, "busy": False, "current": "",
                     "elapsed": 0.0, "tools": 0, "consent": False}
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         sink = SimpleNamespace(status=status, is_busy=lambda: False,
                                consent_pending=lambda: False, resolve_consent=lambda t: None,
@@ -3015,6 +3318,114 @@ def test_dock_mounts_sticky_todo_panel_above_queue_panel():
 # queue-drain/failure-read stay PINNED to the slot it started in even across
 # a mid-turn tab switch. No tab-bar UI yet (Task 4) -- these tests switch
 # tabs directly via `slots.active_idx`, exactly as a future keybinding will.
+
+def test_switching_tabs_drops_the_leaving_tabs_unsent_draft():
+    # FIX7b: a draft mid-type belongs to the tab you were looking at when
+    # you typed it, never the one you switch into -- _switch_to's
+    # buf.reset() must drop it (plan-mandated: drafts dropped, history
+    # load-task reset), not just repoint the recall history.
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot
+
+    async def scenario():
+        pane_a, pane_b = tui.OutputPane(width=80), tui.OutputPane(width=80)
+        ran = []
+
+        async def on_line(text, slot=None):
+            ran.append(text)
+
+        slots = mk_slots(pane=pane_a, sink=_idle_sink())
+        slots.add(SessionSlot(kind="session", workspace=".", label="b",
+                              pane=pane_b, sink=_idle_sink(), agent=None))
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("partial draft")          # no Enter -- just a draft in progress
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("\x1b1")                    # Alt+1 -- switch to B
+                await _until(lambda: slots.active_idx == 1)
+
+                pipe.send_text("\r")                        # Enter on an (expected) EMPTY buffer
+                await asyncio.sleep(0.1)
+                assert ran == []                             # the draft never resubmitted as a line
+
+                pipe.send_text("\x04")
+                await _until(lambda: len(slots.slots) == 1)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_switch_clears_the_leaving_slots_pulled_carry_so_a_stale_iid_cannot_leak():
+    # FIX7b: a pulled-but-never-resubmitted queue item's steer_iid must not
+    # outlive a switch AWAY from its own slot -- otherwise a LATER, wholly
+    # unrelated line that happens to match the pulled text verbatim (typed
+    # after switching away and back) would wrongly inherit a STALE dedup
+    # iid, misleading the kernel's ring into treating a genuinely NEW
+    # message as a duplicate of a pull that's long gone.
+    from collections import deque
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot
+    from webbee.tui import QueuedLine
+
+    async def scenario():
+        pane_a, pane_b = tui.OutputPane(width=80), tui.OutputPane(width=80)
+        ran = []
+
+        async def on_line(text, slot=None):
+            ran.append(text)
+
+        pending_a = deque([QueuedLine("queued text", "iid-1")])
+        slots = mk_slots(pane=pane_a, sink=_idle_sink(), pending=pending_a)
+        slot_a = slots.slots[0]
+        slots.add(SessionSlot(kind="session", workspace=".", label="b",
+                              pane=pane_b, sink=_idle_sink(), agent=None))
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x1b[A")                     # Up -- pulls "queued text" into the input
+                await asyncio.sleep(0.05)
+                assert slot_a.pulled["iid"] == "iid-1"        # armed
+
+                pipe.send_text("\x1b1")                        # Alt+1 -- switch away WITHOUT resubmitting
+                await _until(lambda: slots.active_idx == 1)
+                assert slot_a.pulled == {"text": "", "iid": ""}   # FIX7b: cleared on the way out
+
+                pipe.send_text("\x1b0")                        # Alt+0 -- switch back to A
+                await _until(lambda: slots.active_idx == 0)
+
+                pipe.send_text("queued text\r")                # coincidentally the SAME text, typed fresh
+                await _until(lambda: ran == ["queued text"])
+                assert getattr(ran[0], "iid", "") == ""         # NOT the stale iid-1 -- a genuinely new line
+
+                pipe.send_text("\x1b1")                          # switch to B -- A (idx 0) is unclosable here
+                await _until(lambda: slots.active_idx == 1)
+                pipe.send_text("\x04")
+                await _until(lambda: len(slots.slots) == 1)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
 
 def test_swap_history_creates_and_repoints_per_slot_history():
     from prompt_toolkit.buffer import Buffer
@@ -3074,7 +3485,7 @@ def test_enter_resolves_consent_on_the_active_slot_only():
         slots.add(SessionSlot(kind="session", workspace=".", label="b",
                               pane=pane_b, sink=sink_b, agent=None))
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3132,7 +3543,7 @@ def test_turn_pinned_to_originating_slot_drains_its_own_queue_after_switch():
         gate = asyncio.Event()
         busy_a = {"v": False}
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             busy_a["v"] = True
             ran.append(text)
             await gate.wait()
@@ -3189,6 +3600,82 @@ def test_turn_pinned_to_originating_slot_drains_its_own_queue_after_switch():
     asyncio.run(scenario())
 
 
+def test_on_line_receives_the_pinned_slot_never_whatever_becomes_active_later():
+    # FIX1 (W4a final review): on_line's CONTRACT is now on_line(text, slot)
+    # -- the dock must thread the slot a turn started in through EVERY call,
+    # so repl's _handle/_run_turn can act on it explicitly instead of
+    # re-resolving slots.active() when their background task's body actually
+    # runs. Companion to test_turn_pinned_to_originating_slot_drains_its_own_
+    # queue_after_switch above (which only proves TUI's OWN turn-task/queue
+    # stay pinned to slot A) -- this asserts the SLOT ARGUMENT itself, the
+    # thing repl needs to kill its internal active() resolution.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane_a, pane_b = tui.OutputPane(width=80), tui.OutputPane(width=80)
+        calls = []
+        gate = asyncio.Event()
+        busy_a = {"v": False}
+
+        async def on_line(text, slot):
+            calls.append((text, slot))
+            busy_a["v"] = True
+            await gate.wait()
+            busy_a["v"] = False
+
+        def status_a():
+            return {"tokens": 0, "credits": 0, "busy": busy_a["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        sink_a = SimpleNamespace(status=status_a, is_busy=lambda: busy_a["v"],
+                                 consent_pending=lambda: False, resolve_consent=lambda t: None)
+        sink_b = _idle_sink()
+        slots = mk_slots(pane=pane_a, sink=sink_a)
+        slot_a = slots.slots[0]
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=pane_b, sink=sink_b, agent=None)
+        slots.add(slot_b)
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")                       # starts a turn IN A (A active)
+                await _until(lambda: calls == [("first", slot_a)])
+                pipe.send_text("queued-in-a\r")                 # busy(A) -> queues into A's own deque
+                await _until(lambda: list(slot_a.pending) == ["queued-in-a"])
+
+                slots.active_idx = 1                            # switch to B mid-turn -- direct,
+                                                                 # deterministic (no key/race needed)
+                gate.set()                                       # A's turn completes naturally
+                await _until(lambda: calls == [("first", slot_a), ("queued-in-a", slot_a)])
+                # BOTH calls carried slot_a -- the drained line's on_line call
+                # was never handed slot_b, even though B is active right now.
+                assert not slot_b.pending and slot_b.turn["task"] is None
+
+                pipe.send_text("\x04")
+                await _until(lambda: len(slots.slots) == 1)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 def test_home_active_enter_routes_plain_text_to_home_input_not_on_line():
     # Home (sink=None) has no busy/queue semantics: a slash command still
     # reaches on_line like every other slot, but plain text routes to
@@ -3217,7 +3704,7 @@ def test_home_active_enter_routes_plain_text_to_home_input_not_on_line():
 
         on_line_calls, home_calls = [], []
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             on_line_calls.append(text)
 
         async def home_input(text):
@@ -3268,7 +3755,7 @@ def test_home_active_enter_with_no_home_input_ignores_plain_text():
         slots = SlotManager()
         slots.add(home)
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3280,6 +3767,116 @@ def test_home_active_enter_with_no_home_input_ignores_plain_text():
                 pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_home_input_first_turn_task_is_visible_and_esc_cancels_it():
+    # FIX3: _home_input must route the first turn through the dock's own
+    # start-turn seam (ui_hooks["start_turn_in"]) -- without it the
+    # Home-spawned first turn ran as a bare await, invisibly: new_slot.
+    # turn["task"] stayed None forever, so _busy_live() (and thus Esc/Ctrl-C)
+    # never saw it as a live turn to cancel.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.repl import _home_input
+    from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        slots = SlotManager()
+        slots.add(home)
+
+        gate = asyncio.Event()
+        busy = {"v": False}
+        ran = []
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        new_sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                                   consent_pending=lambda: False, resolve_consent=lambda t: None,
+                                   user_echo=lambda t: None)
+
+        async def fake_make_session_slot(cfg, tp, ws, mode, *, resources, shared_client,
+                                          agent_factory, intel_factory, shadow_factory, first):
+            return SessionSlot(kind="session", workspace=ws, label="new",
+                               pane=tui.OutputPane(width=80), sink=new_sink, agent=None)
+
+        import webbee.repl as repl_mod
+        orig = repl_mod._make_session_slot
+        repl_mod._make_session_slot = fake_make_session_slot
+
+        async def on_line(text, slot=None):
+            busy["v"] = True
+            ran.append(text)
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                pass
+            busy["v"] = False
+
+        async def never_called(slot, text):
+            raise AssertionError("fallback run_turn must not fire when a dock is present")
+
+        ui_hooks = {}
+
+        def home_input(text):
+            return _home_input(
+                text, slots=slots, cfg=None, token_provider=None, mode="default",
+                resources=WorkspaceResources(), shared_client=None, agent_factory=None,
+                intel_factory=None, shadow_factory=None, workspace=".",
+                ui_hooks=ui_hooks, run_turn=never_called)
+
+        try:
+            with create_pipe_input() as pipe:
+                with create_app_session(input=pipe, output=DummyOutput()):
+                    task = asyncio.create_task(tui.run_session(
+                        slots=slots, on_line=on_line, on_cycle=lambda: None,
+                        home_input=home_input, ui_hooks=ui_hooks))
+                    await asyncio.sleep(0.05)
+                    pipe.send_text("build a thing\r")
+                    await _until(lambda: ran == ["build a thing"])
+
+                    assert len(slots.slots) == 2
+                    new_slot = slots.slots[1]
+                    assert slots.active_idx == 1
+                    # THE fix: turn["task"] is populated -- not just "some
+                    # coroutine happens to be running, unobserved by anyone".
+                    live_task = new_slot.turn.get("task")
+                    assert live_task is not None
+                    assert not live_task.done()
+
+                    pipe.send_text("\x1b")                     # lone Esc -- busy, so it stops the turn
+                    # Esc found + cancelled the (now-visible) turn task: the
+                    # gated on_line's own except-CancelledError branch runs,
+                    # clearing busy -- before FIX3 turn["task"] stayed None
+                    # forever, so _busy_live() was always False and this Esc
+                    # would have taken the idle (step-clear) branch instead,
+                    # never touching the turn at all.
+                    await _until(lambda: not busy["v"], timeout=3.0)
+                    assert live_task.cancelled() or live_task.done()
+                    assert ran == ["build a thing"]             # nothing else ever ran
+                    assert new_slot.turn.get("task") is None    # cleared by the finally block
+
+                    pipe.send_text("\x04")                      # idle, single session -> exit
+                    ok = await asyncio.wait_for(task, 5)
+            assert ok is True
+        finally:
+            repl_mod._make_session_slot = orig
 
     asyncio.run(scenario())
 
@@ -3317,7 +3914,7 @@ def test_tab_bar_window_is_root_hsplit_first_child():
         slots.add(session)
         slots.active_idx = 1
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3426,7 +4023,7 @@ def test_ctrl_t_jumps_to_home_from_a_session_tab():
         slots.add(session)
         slots.active_idx = 1
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3461,7 +4058,7 @@ def test_alt_1_switches_from_home_to_session_tab_and_swaps_history():
         slots.active_idx = 0
         assert session.history is None
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3472,6 +4069,58 @@ def test_alt_1_switches_from_home_to_session_tab_and_swaps_history():
                 await _until(lambda: slots.active_idx == 1)
                 assert session.history is not None          # _swap_history fired, same as a click
                 pipe.send_text("\x04")                       # single session -> idle exit
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_lines_typed_before_the_first_switch_recall_after_home_and_back():
+    # FIX7c: the boot-active slot's history is seeded BEFORE app.run_async
+    # even starts -- a line typed before ANY switch must land in THAT
+    # slot's own persistent history, not the Buffer's throwaway default
+    # (which the OLD code left `buf.history` pointed at until the first
+    # actual `_switch_to` call minted a brand-new, EMPTY history for the
+    # slot -- silently losing everything typed before that first switch).
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="proj",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 1                          # boots landed on the session, like repl does
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                assert session.history is not None       # seeded from the START, before any key
+                seeded = session.history
+
+                pipe.send_text("line one\r")               # typed BEFORE ever switching tabs
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("\x14")                      # Ctrl-T -- jump to Home
+                await _until(lambda: slots.active_idx == 0)
+                pipe.send_text("\x1b1")                      # Alt+1 -- back to the session
+                await _until(lambda: slots.active_idx == 1)
+
+                assert session.history is seeded             # never replaced by a fresh, empty one
+                assert "line one" in seeded.get_strings()    # survived the round trip
+
+                pipe.send_text("\x04")                        # idle, single session -> exit
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
 
@@ -3500,7 +4149,7 @@ def test_ctrl_w_with_empty_buffer_closes_active_session_and_notes_survivor():
         slots.add(slot_b)
         slots.active_idx = 2                                # active = b, input empty
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3512,6 +4161,55 @@ def test_ctrl_w_with_empty_buffer_closes_active_session_and_notes_survivor():
                 assert slots.active_idx == 1                 # landed on the neighbor (a)
                 assert notes_a and "server-side" in notes_a[0] and "/new" in notes_a[0]
                 pipe.send_text("\x04")                        # single session left -> idle exit
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_close_flow_points_history_at_the_survivor_slot():
+    # FIX7d: closing a tab must repoint the shared input buffer's history at
+    # the SURVIVOR (post-close active) slot's own persistent history --
+    # a closed tab's history dies with it, so the buffer must never be left
+    # pointing at it.
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(slot_a)
+        slots.add(slot_b)
+        slots.active_idx = 2                                # active = b, input empty
+        assert slot_a.history is None                        # never touched yet
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x17")                        # Ctrl-W, empty buffer, active=b -> closes b
+                await _until(lambda: len(slots.slots) == 2)
+                assert slots.active_idx == 1                  # landed on the survivor (a)
+                assert slot_a.history is not None              # FIX7d: seeded on the way in
+
+                pipe.send_text("after close\r")                # typed into the buffer NOW
+                await asyncio.sleep(0.05)
+                assert "after close" in slot_a.history.get_strings()   # recorded into A's OWN history
+
+                pipe.send_text("\x04")                          # single session left -> idle exit
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
 
@@ -3539,7 +4237,7 @@ def test_ctrl_w_with_draft_text_falls_through_to_word_delete_not_close():
         slots.add(slot_b)
         slots.active_idx = 2
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3588,7 +4286,7 @@ def test_ctrl_d_closes_active_session_when_others_remain():
         slots.add(slot_b)
         slots.active_idx = 2                                  # active = b (session), idle
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3599,6 +4297,71 @@ def test_ctrl_d_closes_active_session_when_others_remain():
                 await _until(lambda: len(slots.slots) == 2)
                 assert slots.active_idx == 1
                 pipe.send_text("\x04")                        # now exits (single session, idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_d_on_home_is_a_noop_while_a_background_session_turn_is_alive():
+    # FIX5: Ctrl-D must not exit right through a LIVE turn running in a
+    # BACKGROUND session tab just because Home (or any other idle tab)
+    # happens to be the one visible -- _eof now checks EVERY slot
+    # (_slot_busy), not only the active one.
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        pane_a = tui.OutputPane(width=80)
+        gate = asyncio.Event()
+        busy = {"v": False}
+        ran = []
+
+        async def on_line(text, slot=None):
+            busy["v"] = True
+            ran.append(text)
+            await gate.wait()
+            busy["v"] = False
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        sink_a = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                                 consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                             pane=pane_a, sink=sink_a, agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(slot_a)
+        slots.active_idx = 1                                    # A active, about to start a turn
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")
+                await _until(lambda: ran == ["first"])            # A is now busy
+
+                pipe.send_text("\x14")                             # Ctrl-T -- jump to Home
+                await _until(lambda: slots.active_idx == 0)
+
+                pipe.send_text("\x04")                              # Ctrl-D on Home -- must NOT exit
+                await asyncio.sleep(0.15)
+                assert not task.done()                              # the dock is still running
+
+                gate.set()                                          # A's turn completes naturally
+                await _until(lambda: not busy["v"])
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("\x04")                               # Ctrl-D again -- idle now, exits
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
 
@@ -3632,7 +4395,7 @@ def test_tab_bar_close_click_closes_the_clicked_background_tab_not_the_active_on
         slots.add(slot_b)
         slots.active_idx = 2                                  # active = b
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3684,7 +4447,7 @@ def test_tab_bar_close_click_closes_the_active_tab_when_that_is_the_one_clicked(
         slots.add(slot_b)
         slots.active_idx = 2                                  # active = b
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -3723,7 +4486,7 @@ def test_key_processor_timeoutlen_tuned_down_below_default():
 
     async def scenario():
         slots = mk_slots(pane=tui.OutputPane(width=80), sink=_idle_sink())
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
@@ -3755,7 +4518,7 @@ def test_lone_escape_still_stops_the_turn_after_alt_digit_bindings_added():
         ran = []
         stopped = []
 
-        async def on_line(text):
+        async def on_line(text, slot=None):
             busy["v"] = True
             ran.append(text)
             try:
@@ -3810,14 +4573,14 @@ def test_ui_hooks_filled_with_switch_and_close_routing_through_the_real_flow():
         slots.active_idx = 0
         ui_hooks = {}
 
-        async def on_line(text): ...
+        async def on_line(text, slot=None): ...
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
                     slots=slots, on_line=on_line, on_cycle=lambda: None, ui_hooks=ui_hooks))
                 await asyncio.sleep(0.05)
-                assert set(ui_hooks) == {"switch", "close"}
+                assert set(ui_hooks) == {"switch", "close", "start_turn_in"}
                 assert ui_hooks["close"]() is False          # Home guarded -- no-op
                 assert len(slots.slots) == 2
 

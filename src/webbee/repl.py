@@ -86,6 +86,24 @@ async def _inject_via_gateway(cfg, token_provider, agent, sink,
     return ok
 
 
+async def _inject_into_slot(cfg, token_provider, slot: SessionSlot, text: str,
+                            steer_iid: str, client=None) -> bool:
+    """FIX7a (W4a final review) — the dock's inject leg, slot-explicit: tui's
+    `_launch_inject` captures `slot` SYNCHRONOUSLY at Enter keypress time and
+    hands it straight through, so the gateway POST targets THAT slot's own
+    agent/sink regardless of whatever tab becomes active before this
+    coroutine's body actually runs (was: `slots.active()` resolved here, at
+    call time — the same cross-tab hazard FIX1 closes for on_line). A Home
+    slot (or, in principle, any slot mid-teardown) has no agent to post
+    into — guarded here rather than relying on `_inject_via_gateway`'s own
+    `getattr(agent, "session_id", "")` None-tolerance, so the "no agent"
+    case is an explicit, obvious False rather than an incidental one."""
+    if slot.agent is None:
+        return False
+    return await _inject_via_gateway(cfg, token_provider, slot.agent, slot.sink,
+                                     text, steer_iid, client=client)
+
+
 def _gate_busy(sink, turn_ref: dict) -> bool:
     """Pure predicate behind `_poller_busy` (module-level so tests drive it
     directly, unlike the run_repl closure) -- LOCKOUT-PROOF like
@@ -118,6 +136,48 @@ def _slot_ctx(slot: SessionSlot, *, logged_in: bool) -> CommandContext:
                           session_tokens=getattr(sink, "session_tokens", 0),
                           session_credits=getattr(sink, "session_credits", 0),
                           git_branch=slot.git_branch, queued=tuple(slot.pending))
+
+
+# FIX4 (W4a final review — Home None-sink command crashes): actions that are
+# genuinely SESSION-scoped (an agent's steps, a workspace's checkpoints, this
+# session's spend/queue, account operations kept off the dashboard for
+# consistency) — dispatched while Home is active, they reply with ONE
+# consistent "open a tab" note instead of either crashing on `_sink.note`
+# (sink is None) or quietly doing session-shaped work against Home's own
+# placeholder fields. `/clear`/`/tabs`/`/tab N`/`/new`/`/close`/`/help`/
+# `/exit` are deliberately NOT in this set — those are tab-bar/global actions
+# and must keep working on Home (map §FIX4).
+_HOME_GATED_ACTIONS = frozenset({
+    "steps", "step_detail", "checkpoints", "rollback", "notify", "mode",
+    "cost", "queue", "queue_clear", "login", "logout", "sessions",
+    "sessions_revoke", "logout_others",
+})
+
+_HOME_GATE_NOTE = "open a session tab first — Ctrl+T or type a task"
+
+
+def _say(slot: SessionSlot, msg: str) -> None:
+    """Reply into `slot`'s own surface regardless of whether it has a live
+    sink -- a REAL session slot's `sink.note(msg)`, unchanged; a sink-less
+    slot (Home) prints the SAME message straight into its own pane console,
+    styled like a note (the SAME dim/bee accent + gutter `render._pad`/
+    `_clean` a sink's own `.note` uses), so a command dispatched while Home
+    is active still gets an honest answer instead of an unguarded
+    AttributeError crash on `None.note(...)`. Never raises: a pane with no
+    console (shouldn't happen -- every slot gets one) is simply a no-op."""
+    if slot.sink is not None:
+        slot.sink.note(msg)
+        return
+    console = getattr(slot.pane, "console", None)
+    if console is None:
+        return
+    from rich.text import Text
+
+    from webbee.render import _BEE, _clean, _pad
+    console.print(_pad(Text(_clean(msg), style=_BEE)))
+    notify = getattr(slot.pane, "notify", None)
+    if notify is not None:
+        notify()
 
 
 def _live_session_id(slots: SlotManager) -> str:
@@ -200,7 +260,20 @@ def _cancel_slot(slot: SessionSlot) -> None:
     Does NOT touch the server-side run at all -- browser-tab model, per the
     wiring map: the kernel's MarathonWorkflow keeps going: only the local
     await/stream-read this PROCESS was doing for the tab dies here, so `/new`
-    against the same repo later re-attaches to a run that never stopped."""
+    against the same repo later re-attaches to a run that never stopped.
+
+    FIX2 (W4a final review — ghost drain on close): `turn["stopped"] = True`
+    is set BEFORE the cancel, mirroring `_escape_action`/`_interrupt_action`
+    (the SAME "user is taking control" flag a Esc/Ctrl-C stop sets). Without
+    it, tui's `_run_turn` catches the CancelledError inside `agent.run` and
+    returns normally -- `done=True`, `stopped` absent -- so its finally block
+    happily DRAINS whatever was still queued into a brand-new turn on a slot
+    that no longer exists anywhere in the SlotManager: a ghost turn, invisible
+    to any tab, spending against a closed session. Setting the flag here
+    makes closing indistinguishable from any other user stop -- the queue is
+    preserved on the (now-detached) slot and simply goes away with it, never
+    drained."""
+    slot.turn["stopped"] = True
     task = slot.turn.get("task")
     if task is not None and not task.done():
         task.cancel()
@@ -236,7 +309,7 @@ def _resolve_agent_factory(agent_factory, bundle: dict):
 
 async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: WorkspaceResources,
                        agent_factory, intel_factory, shadow_factory, pane, sink, first: bool,
-                       account) -> SessionSlot:
+                       account) -> "tuple[SessionSlot, int]":
     """Shared tail of slot construction -- the dock's `_make_session_slot` AND
     the headless fallback loop both fall into this once they have their own
     pane (or None, fallback has no dock) + sink: resolve/boot the per-
@@ -244,7 +317,9 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
     to THIS slot's own deque, and -- gated by `first` (map §6 replay
     landmine) -- show the welcome banner and replay the durable thread. ONLY
     the very first session slot the process ever creates does either; every
-    later tab (first=False) skips both."""
+    later tab (first=False) skips both. Returns `(slot, replayed)` (FIX7e)
+    -- `replayed` is `boot.replay_thread`'s own display-message count (0 when
+    `first=False`, or the replay itself skipped/failed/found nothing)."""
     bundle = await _resources_bundle(cfg, workspace, resources, intel_factory, shadow_factory)
     factory = _resolve_agent_factory(agent_factory, bundle)
     agent = factory(cfg, token_provider, workspace, mode)
@@ -256,6 +331,7 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
     # echo can promote a landed local twin (matched by steer_iid) into the
     # one kernel-owned row. Reference share — never a copy.
     sink.local_pending = slot.pending
+    replayed = 0
     if first:
         if account is not None:
             sink.welcome(account, workspace, "terminal")
@@ -265,18 +341,22 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
         # placeholder, not per-workspace -- a second slot replaying it would
         # show the wrong (or duplicate) history, so only the first session
         # slot the process ever creates gets it.
-        await boot.replay_thread(cfg, token_provider, sink)
-    return slot
+        replayed = await boot.replay_thread(cfg, token_provider, sink)
+    return slot, replayed
 
 
 async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources: WorkspaceResources,
                              shared_client, agent_factory, intel_factory, shadow_factory,
-                             first: bool, account=None) -> SessionSlot:
+                             first: bool, account=None, _with_replayed: bool = False):
     """Builds ONE dock tab's atomic {agent, sink, pane} triple (map §6 —
     created together, a sink must never point at another slot's pane/
     console). `shared_client` isn't consumed here yet — reserved for Task 3's
     per-slot inject/steer wiring; accepted here for interface parity with the
-    seams this factory feeds."""
+    seams this factory feeds. Returns the bare `SessionSlot` (every existing
+    caller — `/new`, `_home_input`, every direct test) unless
+    `_with_replayed=True` (FIX7e — the dock boot's OWN first-slot call,
+    the only caller that needs `boot.replay_thread`'s count to decide
+    `slots.active_idx`), which returns `(slot, replayed)` instead."""
     from webbee import tui
     from webbee.render import RichSink
     from webbee.sizing import get_size
@@ -284,10 +364,11 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
     width, _height = get_size(None)   # pre-app: same fallback tui.run_session's own sizing uses
     pane = tui.OutputPane(width=width)
     sink = RichSink(console=pane.console, on_output=pane.notify)
-    return await _finish_slot(cfg, token_provider, workspace, mode, resources=resources,
-                              agent_factory=agent_factory, intel_factory=intel_factory,
-                              shadow_factory=shadow_factory, pane=pane, sink=sink,
-                              first=first, account=account)
+    slot, replayed = await _finish_slot(cfg, token_provider, workspace, mode, resources=resources,
+                                        agent_factory=agent_factory, intel_factory=intel_factory,
+                                        shadow_factory=shadow_factory, pane=pane, sink=sink,
+                                        first=first, account=account)
+    return (slot, replayed) if _with_replayed else slot
 
 
 def _home_target_workspace(slots: SlotManager, cwd: str) -> str:
@@ -314,14 +395,22 @@ async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mod
     (always `first=False`, always the process's BASELINE `mode`, per the
     replay landmine and the autopilot-never-inherited rule both documented
     on the `new_tab` action above) — then runs the typed text as that NEW
-    slot's first turn through `run_turn` (repl's own `_run_turn`, which
-    resolves `slots.active()` AT CALL TIME — now the slot this function just
-    switched into, so the ❯ echo and the turn both land there, never on
-    Home). No "tab opened" note (unlike `/new`): starting to type IS the
-    deliberate action here: announcing it too would just repeat the ❯ echo
-    that follows immediately after. Module-level + fully parameterized
-    (not a closure) so a test can drive it directly, same testing
-    philosophy as `_finish_slot`/`_make_session_slot`."""
+    slot's own first turn, explicitly against `new_slot` (FIX1: `run_turn` --
+    repl's `_run_turn` -- is slot-explicit now, never resolves
+    `slots.active()` internally). FIX3: the turn is started through
+    `ui_hooks["start_turn_in"]` (tui's own `_start_turn_in`, the SAME seam a
+    normal Enter-idle submit uses) when a dock is running, so
+    `new_slot.turn["task"]` is actually populated -- without this the
+    dock-spawned first turn ran invisibly: no busy glyph, no Esc/Ctrl-C
+    cancel, since nothing ever recorded it as "this slot's live turn". No
+    dock (`ui_hooks` has no `start_turn_in` -- fallback loop / direct tests)
+    falls back to a plain blocking `await run_turn(new_slot, text)`, same as
+    before this fix, since there is no turn-visibility contract to satisfy
+    outside a dock. No "tab opened" note (unlike `/new`): starting to type IS
+    the deliberate action here: announcing it too would just repeat the ❯
+    echo that follows immediately after. Module-level + fully parameterized
+    (not a closure) so a test can drive it directly, same testing philosophy
+    as `_finish_slot`/`_make_session_slot`."""
     ws = _home_target_workspace(slots, workspace)
     new_slot = await _make_session_slot(
         cfg, token_provider, ws, mode, resources=resources,
@@ -330,7 +419,11 @@ async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mod
     idx = slots.add(new_slot)
     ui_hooks.get("switch", slots.switch)(idx)
     new_slot.sink.user_echo(text)
-    await run_turn(text)
+    start_turn_in = ui_hooks.get("start_turn_in")
+    if start_turn_in is not None:
+        start_turn_in(new_slot, text)
+    else:
+        await run_turn(new_slot, text)
 
 
 def _schedule_home_refill(slots: SlotManager, idx: int, fill_kwargs: dict, *,
@@ -442,29 +535,43 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         if slot.agent is not None:
             slot.agent.mode = slot.mode
 
-    def _ctx() -> CommandContext:
-        return _slot_ctx(slots.active(), logged_in=state["logged_in"])
-
-    async def _handle(line: str) -> str:
-        """Process one input line. Returns 'exit' or 'continue'."""
+    async def _handle(line: str, slot: SessionSlot) -> str:
+        """Process one input line AGAINST an EXPLICIT slot (FIX1, W4a final
+        review) -- every caller pins the slot the line actually belongs to
+        (the dock's `_on_line(text, slot)`, the fallback loop's own
+        `slots.active()`, `steps_nav["expand"]`) instead of this function
+        re-resolving `slots.active()` internally, which used to let a drain
+        (or the turn itself) land in whatever tab happened to be VISIBLE by
+        the time its background task's body actually ran -- cross-tab
+        execution, never the tab the line was typed into. Returns 'exit' or
+        'continue'."""
         if not line.strip():
             return "continue"
-        res = dispatch(line, _ctx())
+        res = dispatch(line, _slot_ctx(slot, logged_in=state["logged_in"]))
         if res.handled:
-            slot = slots.active()
             _sink = slot.sink
             if res.exit:
                 return "exit"
+            if _sink is None and res.action in _HOME_GATED_ACTIONS:
+                # FIX4: Home has no sink/agent/workspace-scoped session to
+                # act against -- a consistent redirect beats either crashing
+                # on `_sink.note` (sink is None) or quietly running
+                # session-shaped logic against Home's own placeholder
+                # fields. Global/tab actions (help/clear/tabs/tab/new/close/
+                # exit) are NOT in `_HOME_GATED_ACTIONS` and fall through
+                # to their own handlers below, unaffected.
+                _say(slot, _HOME_GATE_NOTE)
+                return "continue"
             if res.action == "login":
                 # Device-code flow (RFC 8628) — rendering + polling in webbee.account.
                 email = await login_device_flow(cfg, auth, _sink)
                 state["logged_in"] = True
-                _sink.note(f"Signed in as {email}.")
+                _say(slot, f"Signed in as {email}.")
                 return "continue"
             if res.action == "logout":
                 await auth.logout(cfg)
                 state["logged_in"] = False
-                _sink.note("Signed out, local credentials removed.")
+                _say(slot, "Signed out, local credentials removed.")
                 return "continue"
             if res.action == "sessions":
                 rows = await sessions_client.list_sessions(cfg, token_provider)
@@ -478,22 +585,22 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 except ValueError:
                     idx = -1
                 if idx < 0 or idx >= len(rows):
-                    _sink.note("Usage: /sessions revoke <#> — run /sessions first to see the list.")
+                    _say(slot, "Usage: /sessions revoke <#> — run /sessions first to see the list.")
                     return "continue"
                 s = rows[idx]
                 if s.get("current"):
-                    _sink.note("That's this terminal — use /logout to sign out here.")
+                    _say(slot, "That's this terminal — use /logout to sign out here.")
                     return "continue"
                 ok = await sessions_client.revoke_session(cfg, token_provider, s["session_id"])
-                _sink.note(f"Revoked {s.get('label') or s.get('surface')}." if ok else "Failed to revoke session.")
+                _say(slot, f"Revoked {s.get('label') or s.get('surface')}." if ok else "Failed to revoke session.")
                 return "continue"
             if res.action == "logout_others":
                 n = await sessions_client.revoke_others(cfg, token_provider)
-                _sink.note(f"Signed out {n} other session(s)." if n >= 0 else "Failed to sign out other sessions.")
+                _say(slot, f"Signed out {n} other session(s)." if n >= 0 else "Failed to sign out other sessions.")
                 return "continue"
             if res.action == "steps":
                 from webbee.details import format_steps
-                _sink.note(format_steps(getattr(slot.agent, "steps", [])))
+                _say(slot, format_steps(getattr(slot.agent, "steps", [])))
                 return "continue"
             if res.action == "step_detail":
                 from webbee.details import build_step_ref, fetch_step_detail, format_steps
@@ -502,52 +609,52 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     _idx = int(res.arg) - 1
                     _step = _steps[_idx]
                 except (ValueError, IndexError):
-                    _sink.note(f"No such step. {format_steps(_steps)}")
+                    _say(slot, f"No such step. {format_steps(_steps)}")
                     return "continue"
                 if not _step.get("step_id") or not getattr(slot.agent, "session_id", ""):
-                    _sink.note("No detail ref for this step.")
+                    _say(slot, "No detail ref for this step.")
                     return "continue"
                 _detail = await fetch_step_detail(
                     cfg, token_provider, build_step_ref(slot.agent.session_id, _step["step_id"]))
                 if _detail:
                     _sink.step_detail(_detail)
                 else:
-                    _sink.note("Detail unavailable (expired or not recorded).")
+                    _say(slot, "Detail unavailable (expired or not recorded).")
                 return "continue"
             if res.action == "checkpoints":
                 shadow = _resources_for(slot.workspace).get("shadow")
                 if shadow is None:
-                    _sink.note("Reversibility is off (git unavailable).")
+                    _say(slot, "Reversibility is off (git unavailable).")
                 else:
-                    _sink.note(await asyncio.to_thread(shadow.describe))
+                    _say(slot, await asyncio.to_thread(shadow.describe))
                 return "continue"
             if res.action == "rollback":
                 shadow = _resources_for(slot.workspace).get("shadow")
                 if shadow is None:
-                    _sink.note("Reversibility is off (git unavailable).")
+                    _say(slot, "Reversibility is off (git unavailable).")
                 elif not res.arg:
-                    _sink.note("Usage: /rollback <id|cp-N|N>  (see /checkpoints)")
+                    _say(slot, "Usage: /rollback <id|cp-N|N>  (see /checkpoints)")
                 else:
                     _r = await asyncio.to_thread(shadow.rollback, res.arg)
-                    _sink.note(str(_r.get("content", "")))
+                    _say(slot, str(_r.get("content", "")))
                 return "continue"
             if res.action == "notify":
                 from webbee import remote as _remote
                 sid = getattr(slot.agent, "session_id", "")
                 if not sid:
-                    _sink.note("Start a coding turn first, then /notify to route it.")
+                    _say(slot, "Start a coding turn first, then /notify to route it.")
                     return "continue"
                 try:
                     if res.arg in ("tg", "panel", "both", "off"):
                         st = await _remote.set_remote(cfg, token_provider, sid, res.arg)
                     elif res.arg:
-                        _sink.note("Usage: /notify [tg|panel|both|off]")
+                        _say(slot, "Usage: /notify [tg|panel|both|off]")
                         return "continue"
                     else:
                         st = await _remote.get_remote(cfg, token_provider, sid)
-                    _sink.note(_remote.describe(st))
+                    _say(slot, _remote.describe(st))
                 except Exception as e:
-                    _sink.note(f"Remote control unavailable: {type(e).__name__}")
+                    _say(slot, f"Remote control unavailable: {type(e).__name__}")
                 return "continue"
             if res.action == "new_tab":
                 # Task 5: no path -> clone the ACTIVE slot's own workspace
@@ -580,8 +687,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 except (TypeError, ValueError):
                     idx = -1
                 if idx < 0 or idx >= len(slots.slots):
-                    if _sink is not None:
-                        _sink.note(f"No such tab '{res.arg}'. /tabs lists the open ones.")
+                    _say(slot, f"No such tab '{res.arg}'. /tabs lists the open ones.")
                     return "continue"
                 ui_hooks.get("switch", slots.switch)(idx)
                 return "continue"
@@ -594,42 +700,53 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 # Home-guard/cancel/note semantics either way.
                 close_fn = ui_hooks.get("close")
                 closed = close_fn() if close_fn is not None else close_active(slots, _cancel_slot)
-                if not closed and _sink is not None:
+                if not closed:
                     # Guarded by SlotManager.close's own idx<=0 invariant --
                     # the dock's Home tab, or (fallback loop) the only slot
                     # there is, since it always sits at index 0 too.
-                    _sink.note("Nothing to close.")
+                    _say(slot, "Nothing to close.")
                 return "continue"
             if res.action == "tabs_list":
+                # FIX4: works fully on Home (a global/tab action, never
+                # gated) -- unconditional _say instead of the old
+                # `if _sink is not None:` guard, which silently swallowed
+                # the listing instead of showing it.
                 lines = [f"{'●' if i == slots.active_idx else '○'}{i} {s.label} {s.status_glyph()}"
                          for i, s in enumerate(slots.slots)]
-                if _sink is not None:
-                    _sink.note("Open tabs:\n" + "\n".join(lines))
+                _say(slot, "Open tabs:\n" + "\n".join(lines))
                 return "continue"
             if res.action == "queue_clear":
                 # dispatch built the message (with the drop count) from the
                 # ctx snapshot; here we drop the live deque — the toolbar
-                # count follows on the sink's redraw below.
+                # count follows on the sink's redraw below. (Home never
+                # reaches here -- "queue_clear" is in _HOME_GATED_ACTIONS.)
                 slot.pending.clear()
             if res.action == "clear":
-                _sink.clear()
-                _sink.note(res.message)
+                # FIX4: works fully on Home too -- clears Home's OWN pane
+                # (there are no session counters to reset there, so only the
+                # sink branch resets them, exactly like before this fix).
+                if _sink is not None:
+                    _sink.clear()
+                else:
+                    slot.pane.console.clear()
+                _say(slot, res.message)
                 return "continue"
             if res.action == "mode" and res.new_mode:
+                # Home never reaches here -- "mode" is in _HOME_GATED_ACTIONS,
+                # so Home's own slot.mode is never mutated by a remote /mode.
                 slot.mode = res.new_mode
                 if slot.agent is not None:
                     slot.agent.mode = res.new_mode
             if res.message:
-                _sink.note(res.message)
+                _say(slot, res.message)
             return "continue"
 
         # A task for the agent. A drained type-ahead line minted for a
         # failed mid-turn inject still carries its steer_iid (tui.QueuedLine)
         # -- thread it so the kernel's dedup ring drops the twin if the
         # inject actually landed server-side (a plain typed line has none).
-        slot = slots.active()
         slot.sink.user_echo(line)
-        await _run_turn(line, steer_iid=getattr(line, "iid", ""))
+        await _run_turn(slot, line, steer_iid=getattr(line, "iid", ""))
         return "continue"
 
     async def _run_turn_on(slot: SessionSlot, line: str, surface: str = "", steer_iid: str = "") -> None:
@@ -670,13 +787,17 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             return
         _sink.end_turn(text)
 
-    async def _run_turn(line: str, surface: str = "", steer_iid: str = "") -> None:
-        """ONE agent turn -- the typed-line path: resolves the ACTIVE slot AT
-        CALL TIME (map §1), same as always. `_steer_submit` below bypasses
-        this and calls `_run_turn_on` directly against `_steer_target`'s pick,
-        which is NOT always the active slot (Home active -> the first session
-        slot)."""
-        await _run_turn_on(slots.active(), line, surface=surface, steer_iid=steer_iid)
+    async def _run_turn(slot: SessionSlot, line: str, surface: str = "", steer_iid: str = "") -> None:
+        """ONE agent turn -- the typed-line path (FIX1: slot-explicit
+        end-to-end, was: resolved `slots.active()` internally, map §1's
+        original design). The caller (`_handle`, `_home_input`) always hands
+        the slot the line actually belongs to, pinned at the moment the turn
+        started -- never whatever tab happens to be active when this
+        coroutine's body actually runs. `_steer_submit` below bypasses this
+        entirely and calls `_run_turn_on` directly against `_steer_target`'s
+        pick, which is NOT always the active slot (Home active -> the first
+        session slot)."""
+        await _run_turn_on(slot, line, surface=surface, steer_iid=steer_iid)
 
     async def _steer_submit(text: str, surface: str, steer_iid: str = "") -> None:
         """webbee.steer hands a drained remote instruction here: render it as
@@ -815,16 +936,17 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                                         pane=home_pane, sink=None, agent=None)
                 slots.add(home_slot)
 
-                session_slot = await _make_session_slot(
+                session_slot, replayed = await _make_session_slot(
                     cfg, token_provider, workspace, mode, resources=resources,
                     shared_client=shared_client, agent_factory=agent_factory,
                     intel_factory=intel_factory, shadow_factory=shadow_factory,
-                    first=True, account=account)
+                    first=True, account=account, _with_replayed=True)
                 slots.add(session_slot)
-                # W4a Task 2: always land in the session (Home is one Alt+0
-                # away) -- Task 6 refines this to land on Home when the boot
-                # replay showed nothing.
-                slots.active_idx = 1
+                # FIX7e (W4a final review — land-on-Home): the session tab
+                # is only the more useful FIRST screen when the boot replay
+                # actually showed something -- a fresh/empty thread lands on
+                # Home instead (the new-tab dashboard), one Alt+1 away.
+                slots.active_idx = 1 if replayed else 0
                 _spawn_steer()
                 # Task 6: fill Home in the background from the moment it
                 # exists -- never blocks reaching the session tab above, and
@@ -832,8 +954,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 # time anyone actually switches to it.
                 home_slot.bg_tasks.append(asyncio.ensure_future(home.fill_home(home_slot, **home_fill_kwargs)))
 
-                async def _on_line(text: str) -> None:
-                    if await _handle(text) == "exit":
+                async def _on_line(text: str, slot: SessionSlot) -> None:
+                    if await _handle(text, slot) == "exit":
                         from prompt_toolkit.application import get_app
                         get_app().exit()
 
@@ -842,14 +964,13 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         slots=slots, on_line=_on_line, on_cycle=_cycle,
                         steps_nav={
                             "count": lambda: len(getattr(slots.active().agent, "steps", [])),
-                            "expand": lambda i: _handle(f"/steps {i + 1}"),
+                            "expand": lambda i, slot: _handle(f"/steps {i + 1}", slot),
                         },
                         stop_turn=_stop_active_turn,
                         queued_run=lambda n: (slots.active().sink.queued_run(n)
                                               if slots.active().sink is not None else None),
-                        inject=lambda text, iid: _inject_via_gateway(
-                            cfg, token_provider, slots.active().agent, slots.active().sink, text, iid,
-                            client=shared_client),
+                        inject=lambda text, iid, slot: _inject_into_slot(
+                            cfg, token_provider, slot, text, iid, client=shared_client),
                         cancel_slot=_cancel_slot, ui_hooks=ui_hooks,
                         home_input=lambda text: _home_input(
                             text, slots=slots, cfg=cfg, token_provider=token_provider, mode=mode,
@@ -898,7 +1019,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         if sink is None:
             from webbee.render import RichSink
             sink = RichSink()
-        fallback_slot = await _finish_slot(
+        fallback_slot, _replayed = await _finish_slot(
             cfg, token_provider, workspace, mode, resources=resources,
             agent_factory=agent_factory, intel_factory=intel_factory,
             shadow_factory=shadow_factory, pane=None, sink=sink,
@@ -913,7 +1034,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 return
             if line is None:
                 return
-            if await _handle(line) == "exit":
+            if await _handle(line, slots.active()) == "exit":
                 return
     finally:
         _cancel_background()

@@ -336,12 +336,16 @@ class OutputPane:
         return self.copy_flash if _t.monotonic() < self._flash_until else ""
 
     # ---- W2 Task 8: selection capture past the pane's own Window --------
-    def forward_mouse(self, ev) -> bool:
+    def forward_mouse(self, ev, clamp: str = "bottom") -> bool:
         """Public seam neighbor windows call FIRST (via `tui._forwarding` /
         the queue+todo panels' `forward=` param) so a drag armed inside this
         pane can still be extended/completed once the pointer — and thus
         prompt_toolkit's per-position mouse routing — has moved onto them.
-        True = consumed (a drag was armed); False = untouched, caller falls
-        through to its own handling. Full behavior in selection.forward_mouse."""
+        `clamp` (FIX6) picks WHICH edge of the pane the forwarded event is
+        treated as: "bottom" (default — the queue/todo panels and toolbar,
+        all BELOW the pane) or "top" (the tab bar, ABOVE the pane — a drag
+        that scrolls up past the transcript into the tab row). True =
+        consumed (a drag was armed); False = untouched, caller falls through
+        to its own handling. Full behavior in selection.forward_mouse."""
         from webbee.selection import forward_mouse as _forward_mouse
-        return _forward_mouse(self, ev)
+        return _forward_mouse(self, ev, clamp=clamp)

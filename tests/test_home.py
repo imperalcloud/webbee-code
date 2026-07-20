@@ -295,8 +295,10 @@ def test_home_input_creates_slot_switches_and_runs_first_turn():
 
     run_turn_calls = []
 
-    async def fake_run_turn(text):
-        run_turn_calls.append((slots.active_idx, text))
+    async def fake_run_turn(slot, text):
+        # FIX1: run_turn is slot-explicit now -- _home_input hands it the
+        # NEW slot directly, never relying on slots.active() at call time.
+        run_turn_calls.append((slot, text))
 
     import webbee.repl as repl_mod
     orig = repl_mod._make_session_slot
@@ -316,7 +318,7 @@ def test_home_input_creates_slot_switches_and_runs_first_turn():
     assert slots.active_idx == 1            # switched into the new slot
     new_slot = slots.slots[1]
     assert new_slot.sink.echoed == ["build a thing"]   # the ❯ echo landed in the NEW slot
-    assert run_turn_calls == [(1, "build a thing")]    # the turn ran with the new slot active
+    assert run_turn_calls == [(new_slot, "build a thing")]    # the turn ran explicitly against the new slot
 
 
 class _EchoSink:
@@ -343,7 +345,7 @@ def test_home_input_new_slot_sink_records_echo(monkeypatch):
 
     monkeypatch.setattr("webbee.repl._make_session_slot", fake_make_session_slot)
 
-    async def fake_run_turn(text):
+    async def fake_run_turn(slot, text):
         pass
 
     asyncio.run(_home_input(
