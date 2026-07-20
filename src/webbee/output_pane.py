@@ -58,6 +58,7 @@ class OutputPane:
         self._view_h = 20                  # viewport height (updated from render_info)
         self._follow = True                # stick to the tail unless the user scrolled up
         self._sel = None                   # (abs_start, abs_end) during a drag → live highlight
+        self._edge_drag = 0                # +1/-1 while dragging at the bottom/top edge, else 0
         self._plain_cache = (0, [""])      # (write-pos, ANSI-stripped lines) for select/highlight
         self.copy_flash = ""               # transient toolbar note after a copy
         self._flash_until = 0.0
@@ -143,6 +144,21 @@ class OutputPane:
         self._follow = self._offset >= max_off   # re-arm tail-follow once back at bottom
         self._invalidate()
 
+    def edge_tick(self) -> None:
+        """Called by tui's `_ticker` every 0.25s: while the pointer sits at a
+        viewport edge during a drag, keep scrolling and keep growing the
+        selection — no MOUSE_MOVE arrives while the mouse is stationary, so
+        without this the drag would freeze at the edge instead of eating
+        past the screen. No-op unless a drag is armed AND still active."""
+        if self._edge_drag == 0 or self.control._down_abs is None:
+            return
+        self.scroll(3 * self._edge_drag)
+        start, end = self._sel
+        end_x = end[1]                       # keep the column from the current _sel end
+        row = self._offset + self._view_h - 1 if self._edge_drag > 0 else self._offset
+        self._sel = (start, (row, end_x))
+        self._invalidate()
+
     def notify(self) -> None:
         """After each sink print: follow the tail unless the user scrolled up."""
         self._trim()
@@ -167,6 +183,7 @@ class OutputPane:
         follow = self._follow
         top_record = 0 if follow else self._record_at_line(self._offset)
         self._sel = None                     # a mid-drag resize aborts the drag honestly
+        self._edge_drag = 0
         self.control._down = None
         self.control._down_abs = None
         self.console.width = new_width

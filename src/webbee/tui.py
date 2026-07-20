@@ -696,6 +696,10 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         while True:
             await asyncio.sleep(0.25)
             _width_watch(pane, app)
+            try:
+                pane.edge_tick()             # repeat-scroll while parked at a drag edge
+            except Exception:
+                pass                          # never kill the dock's only animation source
             if is_busy() or pane.flash():
                 app.invalidate()
 

@@ -15,7 +15,11 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
 
     Content fed to the control is only the visible slice, so the mouse row
     is a VIEWPORT row (0..view_h-1) — add `pane._offset` for the absolute
-    line.
+    line. While dragging, MOUSE_MOVE at a viewport edge (top or bottom row)
+    also nudges the scroll and arms `pane._edge_drag` (+1 bottom, -1 top, 0
+    elsewhere) so the dock's ticker (`OutputPane.edge_tick`) can keep
+    scrolling — and keep growing the selection — while the pointer sits
+    still at the edge (no MOUSE_MOVE arrives when the mouse is stationary).
     """
 
     class _SelectControl(FormattedTextControl):
@@ -41,12 +45,22 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
             if et == MouseEventType.MOUSE_MOVE:
                 if self._down_abs is None:
                     return NotImplemented
+                y = ev.position.y
+                if y >= pane._view_h - 1:
+                    pane.scroll(3)
+                    pane._edge_drag = 1
+                elif y <= 0:
+                    pane.scroll(-3)
+                    pane._edge_drag = -1
+                else:
+                    pane._edge_drag = 0
                 pane._sel = (self._down_abs, (ev.position.y + pane._offset, ev.position.x))
                 pane._invalidate()                 # grow the highlight as you drag
                 return None
             if et == MouseEventType.MOUSE_UP:
                 down, self._down = self._down, None
                 down_abs, self._down_abs = self._down_abs, None
+                pane._edge_drag = 0
                 if down is not None and (down.x, down.y) != (ev.position.x, ev.position.y):
                     pane._copy_selection(down_abs, (ev.position.y + pane._offset, ev.position.x))
                 pane._sel = None

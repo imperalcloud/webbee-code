@@ -172,6 +172,128 @@ def test_selection_survives_scroll_between_press_and_release(monkeypatch):
     assert captured["text"] == "ine12\nline13\nline14\nline15\nline16\nline17\nline1"
 
 
+# ── W2 Task 7: edge-triggered drag auto-scroll + repeating edge tick ─────────
+
+def test_drag_at_bottom_edge_scrolls_and_grows_selection():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))   # 100 lines
+    pane._offset = 0
+
+    down = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    move = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,     # bottom row
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._offset == 3 and pane._edge_drag == 1
+
+    # the pointer sits still at the edge — no more MOUSE_MOVE arrives, but the
+    # ticker's edge_tick() must keep scrolling AND keep growing the selection.
+    pane.edge_tick()
+    assert pane._offset == 6
+    assert pane._sel[1][0] == pane._offset + pane._view_h - 1
+
+    pane.edge_tick()
+    assert pane._offset == 9
+    assert pane._sel[1][0] == pane._offset + pane._view_h - 1
+
+    up = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+    assert pane._edge_drag == 0
+
+
+def test_edge_drag_resets_on_mouse_up_and_top_edge_mirrors():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 0
+
+    down = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    move_bottom = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,
+                             button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move_bottom)
+    assert pane._edge_drag == 1
+
+    up = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+    assert pane._edge_drag == 0        # MOUSE_UP resets the armed edge
+
+    # --- fresh drag, mirrored at the TOP edge ---
+    pane._offset = 20
+    down2 = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                       button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down2)
+    move_top = MouseEvent(position=Point(3, 0), event_type=MouseEventType.MOUSE_MOVE,   # top row
+                          button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move_top)
+    assert pane._offset == 17 and pane._edge_drag == -1
+
+    pane.edge_tick()
+    assert pane._offset == 14
+    assert pane._sel[1][0] == pane._offset
+
+    pane.edge_tick()
+    assert pane._offset == 11
+    assert pane._sel[1][0] == pane._offset
+
+
+def test_edge_tick_noop_when_not_dragging():
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 20
+
+    pane._edge_drag = 0                # not armed at all
+    pane.edge_tick()
+    assert pane._offset == 20
+
+    pane._edge_drag = 1                # armed flag alone isn't enough — needs a live drag too
+    pane.control._down_abs = None
+    pane.edge_tick()
+    assert pane._offset == 20
+
+
+def test_edge_drag_scroll_clamps_at_buffer_end():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(15)))   # max_off == 5
+    pane._offset = 5                                            # already at the bottom
+
+    down = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    move = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._offset == 5           # scroll(+3) clamps at max_off — free from pane.scroll
+
+    pane.edge_tick()
+    assert pane._offset == 5           # edge_tick's scroll clamps too
+
+
 # ── virtualization: render only the visible slice, follow the tail ────────────
 
 def test_pane_follows_tail_on_notify():
