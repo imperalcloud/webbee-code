@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.23
+
+If a task on your session is waiting for your terminal — sent from the panel
+or Telegram while the terminal was idle — the terminal now picks it up
+within seconds instead of the task stalling.
+
+- An idle terminal now notices when a running task on its own session is
+  waiting for a tool approval or result, and reconnects to it automatically
+  — no more silent stalls that eventually get marked "unresponsive".
+
 ## 0.3.22
 
 Open the same project in two tabs and they truly run in parallel — each tab
