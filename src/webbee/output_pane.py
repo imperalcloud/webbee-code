@@ -62,44 +62,10 @@ class OutputPane:
         self.copy_flash = ""               # transient toolbar note after a copy
         self._flash_until = 0.0
 
-        # Content fed to the control is only the visible slice, so the mouse row
-        # is a VIEWPORT row (0..view_h-1) — add `_offset` for the absolute line.
-        class _SelectControl(FormattedTextControl):
-            def __init__(self, **kw):
-                super().__init__(**kw)
-                self._down = None
-                self._down_abs = None   # (line, col) anchor, frozen at MOUSE_DOWN — never re-derived
-
-            def mouse_handler(self, ev):
-                et = ev.event_type
-                if et == MouseEventType.SCROLL_UP:
-                    pane.scroll(-3)
-                    return None
-                if et == MouseEventType.SCROLL_DOWN:
-                    pane.scroll(3)
-                    return None
-                if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.LEFT:
-                    self._down = ev.position           # viewport point — click-vs-drag test only
-                    self._down_abs = (ev.position.y + pane._offset, ev.position.x)
-                    pane._sel = (self._down_abs, self._down_abs)  # zero-width start (no highlight yet)
-                    pane._invalidate()
-                    return None
-                if et == MouseEventType.MOUSE_MOVE:
-                    if self._down_abs is None:
-                        return NotImplemented
-                    pane._sel = (self._down_abs, (ev.position.y + pane._offset, ev.position.x))
-                    pane._invalidate()                 # grow the highlight as you drag
-                    return None
-                if et == MouseEventType.MOUSE_UP:
-                    down, self._down = self._down, None
-                    down_abs, self._down_abs = self._down_abs, None
-                    if down is not None and (down.x, down.y) != (ev.position.x, ev.position.y):
-                        pane._copy_selection(down_abs, (ev.position.y + pane._offset, ev.position.x))
-                    pane._sel = None
-                    pane._invalidate()                 # clear the highlight (colours restored)
-                    return None
-                return NotImplemented
-
+        # The mouse-selection control lives in selection.py (file-ceiling
+        # headroom) — a factory closed over this pane, not a shared class.
+        from webbee.selection import make_select_control
+        _SelectControl = make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
         self.control = _SelectControl(text=self._formatted, focusable=False, show_cursor=False)
         self.window = Window(content=self.control, wrap_lines=False, always_hide_cursor=True)
 
