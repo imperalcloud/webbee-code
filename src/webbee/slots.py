@@ -80,13 +80,17 @@ class SlotManager:
         return sum(1 for s in self.slots if s.kind == "session")
 
 
-def close_active(slots: SlotManager, cancel_slot=None) -> bool:
-    """The shared tab-close flow (W4a Task 5) — PT-free so tui's Ctrl-W/✕
-    handler AND repl's `/close` command call the EXACT same function instead
-    of growing two copies of the same policy. Closes whichever tab is
-    CURRENTLY active via `slots.close(slots.active_idx)` — Home (index 0) is
-    already guarded there (never removable), so calling this while Home is
-    active is a safe no-op (returns False, `cancel_slot` never runs).
+def close_at(slots: SlotManager, idx: int, cancel_slot=None) -> bool:
+    """The shared tab-close flow (W4a Task 5, generalized in Task 7 so a
+    click can target ANY tab, not just the active one) — PT-free so tui's
+    ✕/Ctrl-W handlers AND repl's `/close` command call the EXACT same
+    function instead of growing separate copies of the same policy. Closes
+    the tab AT `idx` via `slots.close(idx)` — Home (index 0) is already
+    guarded there (never removable), so `idx == 0` is a safe no-op (returns
+    False, `cancel_slot` never runs). `slots.close` itself already resolves
+    the correct post-close `active_idx` no matter WHICH slot disappears
+    (the closed tab itself, one before it, or one after it — see its own
+    docstring), so this needs no idx-vs-active_idx branching at all.
 
     On a genuine close: `cancel_slot(removed)` runs first when given (repl's
     own callable — cancels the removed slot's OWN background tasks; the
@@ -95,7 +99,7 @@ def close_active(slots: SlotManager, cancel_slot=None) -> bool:
     note lands in the now-ACTIVE (post-close) slot's sink, when it has one:
     Home has none, and a minimal test sink may not implement `.note` either,
     so this is `getattr`-guarded rather than assumed."""
-    removed = slots.close(slots.active_idx)
+    removed = slots.close(idx)
     if removed is None:
         return False
     if cancel_slot is not None:
@@ -104,6 +108,14 @@ def close_active(slots: SlotManager, cancel_slot=None) -> bool:
     if note is not None:
         note("tab closed — the run keeps going server-side; /new in that repo re-attaches")
     return True
+
+
+def close_active(slots: SlotManager, cancel_slot=None) -> bool:
+    """Thin wrapper (Task 7): close whichever tab is CURRENTLY active —
+    Ctrl-W, Ctrl-D and repl's `/close` command all still mean "close what
+    I'm looking at", so they keep calling this instead of resolving
+    `slots.active_idx` themselves."""
+    return close_at(slots, slots.active_idx, cancel_slot)
 
 
 class WorkspaceResources:
@@ -124,3 +136,11 @@ class WorkspaceResources:
 
     def put(self, workspace: str, bundle: dict) -> None:
         self._by_root[self.key(workspace)] = bundle
+
+    def bundles(self) -> list[dict]:
+        """PUBLIC accessor (Task 7 ledger hygiene) — every bundle this
+        process has ever booted, one per distinct repo root, regardless of
+        how many slots share it. Callers outside this class (repl's exit-time
+        cancellation walk) must reach every watcher_task through THIS, never
+        by poking `_by_root` directly."""
+        return list(self._by_root.values())

@@ -128,6 +128,68 @@ def _live_session_id(slots: SlotManager) -> str:
     return getattr(agent, "session_id", "") if agent is not None else ""
 
 
+def _steer_target(slots: SlotManager) -> SessionSlot | None:
+    """Steer-poller targeting (Task 7, map contract item 1): a remote
+    instruction must land in a SESSION slot — Home has no sink/agent to run
+    a turn against, so routing a steer submit there would crash. The ACTIVE
+    slot already IS a session -> itself, exactly today's behavior. Home
+    active -> the FIRST session slot (lowest index) -- "remote steer must
+    never dead-end" (brief). No session slot exists at all (every tab closed
+    down to bare Home) -> None; both `_poller_busy` and `_steer_submit` treat
+    that as "nothing to submit into" rather than reaching for a None sink.
+    Module-level so a test drives it directly, same as `_live_session_id`."""
+    active = slots.active()
+    if active.kind == "session":
+        return active
+    for slot in slots.slots:
+        if slot.kind == "session":
+            return slot
+    return None
+
+
+def _exit_dump(slots: SlotManager) -> str:
+    """The dock's post-exit scrollback dump (Task 7, map contract item 2):
+    EVERY session slot's pane, in index order — the transcript keeps
+    everything, not just whichever tab happened to be visible when the dock
+    quit. Home is skipped outright (a live dashboard, not a conversation --
+    dumping it would just print stale UI chrome to real stdout). A
+    `── tab N: {label} ──` separator (N = the slot's own SlotManager index,
+    the same number `/tab N` and the tab bar use) lands BETWEEN panes, never
+    before the first or after the last -- one session slot degrades to a
+    bare `pane.dump()` with no separator at all, byte-identical to the
+    single-tab world this replaces. Pure (no I/O) so a test drives it
+    directly instead of needing a real dock + real stdout."""
+    sessions = [(i, s) for i, s in enumerate(slots.slots) if s.kind == "session"]
+    parts = []
+    for n, (i, s) in enumerate(sessions):
+        if n > 0:
+            parts.append(f"── tab {i}: {s.label} ──\n")
+        parts.append(s.pane.dump())
+    return "".join(parts)
+
+
+def _cancel_all_background(steer_task, slots: SlotManager, resources: WorkspaceResources) -> None:
+    """Exit-time teardown, final shape (Task 7, map contract item 4): the ONE
+    process-wide steer poller + EVERY slot's own bg_tasks (today only Home's
+    fill_home, map §1 -- any later per-slot background piece sweeps here too,
+    for free) + every distinct-repo-root WorkspaceResources bundle's
+    watcher_task -- via the PUBLIC `resources.bundles()` accessor (never the
+    private `_by_root` dict this file used to poke directly). `.done()`-
+    guarded throughout (same discipline as `_cancel_slot`): an already-
+    finished task is never double-cancelled. Module-level so a test drives it
+    directly with fake tasks, instead of needing a live run_repl exit."""
+    if steer_task is not None:
+        steer_task.cancel()
+    for s in slots.slots:
+        for t in s.bg_tasks:
+            if t is not None and not t.done():
+                t.cancel()
+    for bundle in resources.bundles():
+        wt = bundle.get("watcher_task")
+        if wt is not None and not wt.done():
+            wt.cancel()
+
+
 def _cancel_slot(slot: SessionSlot) -> None:
     """The tab-close flow's CLIENT-side teardown (Task 5) — the `cancel_slot`
     callable `webbee.slots.close_active` invokes on the slot it just removed
@@ -570,15 +632,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         await _run_turn(line, steer_iid=getattr(line, "iid", ""))
         return "continue"
 
-    async def _run_turn(line: str, surface: str = "", steer_iid: str = "") -> None:
-        """ONE agent turn -- the SAME path for a typed line and an idle-steer
-        pickup (liveness v2 §B), which threads the queued item's origin
-        `surface` (provenance) and dedup `steer_iid` (kernel dedup ring) into
-        the turn start-path. Only the echo differs at the call sites:
-        user_echo for a typed line, foreign_turn for a remote one. Reads the
-        ACTIVE slot at call time (map §1) -- a background/remote turn always
-        targets whichever slot is active right now."""
-        slot = slots.active()
+    async def _run_turn_on(slot: SessionSlot, line: str, surface: str = "", steer_iid: str = "") -> None:
+        """ONE agent turn against an EXPLICIT slot (Task 7 split -- was:
+        always `slots.active()` internally, which broke a steer submit that
+        deliberately targets a DIFFERENT slot than whatever's on screen, see
+        `_steer_target`). `_run_turn` below is the thin active()-resolving
+        wrapper every typed-line call site keeps using unchanged."""
         _sink = slot.sink
         _sink.begin_turn()
         kw = {"surface": surface} if surface else {}
@@ -611,23 +670,44 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             return
         _sink.end_turn(text)
 
+    async def _run_turn(line: str, surface: str = "", steer_iid: str = "") -> None:
+        """ONE agent turn -- the typed-line path: resolves the ACTIVE slot AT
+        CALL TIME (map §1), same as always. `_steer_submit` below bypasses
+        this and calls `_run_turn_on` directly against `_steer_target`'s pick,
+        which is NOT always the active slot (Home active -> the first session
+        slot)."""
+        await _run_turn_on(slots.active(), line, surface=surface, steer_iid=steer_iid)
+
     async def _steer_submit(text: str, surface: str, steer_iid: str = "") -> None:
         """webbee.steer hands a drained remote instruction here: render it as
         the remote user's own line, then run it as a normal turn (carrying the
-        item's dedup iid so the kernel can drop an at-least-once twin). Reads
-        the ACTIVE slot at call time (map §6 steer policy)."""
-        slots.active().sink.foreign_turn(surface, "user", text)
-        await _run_turn(text, surface=surface, steer_iid=steer_iid)
+        item's dedup iid so the kernel can drop an at-least-once twin).
+        Targets `_steer_target(slots)` (Task 7, map contract item 1) -- a
+        SESSION slot, never Home: the active slot when it's already a
+        session, otherwise the first session slot, so a remote instruction
+        never dead-ends just because Home happens to be on screen. No session
+        slot exists at all (every tab closed) -> fail-soft, sink-less
+        no-op -- the poller's own contract is silence on nothing-to-do, not a
+        crash or a note nobody would see anyway."""
+        slot = _steer_target(slots)
+        if slot is None:
+            return
+        slot.sink.foreign_turn(surface, "user", text)
+        await _run_turn_on(slot, text, surface=surface, steer_iid=steer_iid)
 
     def _poller_busy() -> bool:
-        """The idle-steer poller's busy gate: the ACTIVE slot's live turn
-        state (LOCKOUT-PROOF via _gate_busy -- a dead turn task overrides a
-        stuck busy flag) PLUS an armed local prompt (the autopilot confirm
-        arms the same pinned-input future a consent uses) -- submitting a
-        steer turn under an armed prompt could double-prompt the input, so
-        the poller holds off until it resolves. Both hooks getattr-guarded
-        (minimal test sinks)."""
-        slot = slots.active()
+        """The idle-steer poller's busy gate: the TARGET slot's (Task 7 --
+        was: blindly the active slot) live turn state (LOCKOUT-PROOF via
+        _gate_busy -- a dead turn task overrides a stuck busy flag) PLUS an
+        armed local prompt (the autopilot confirm arms the same pinned-input
+        future a consent uses) -- submitting a steer turn under an armed
+        prompt could double-prompt the input, so the poller holds off until
+        it resolves. No session slot to target at all -> treat as busy (hold
+        the poller) rather than fetch into a void `_steer_submit` would just
+        drop. Both hooks getattr-guarded (minimal test sinks)."""
+        slot = _steer_target(slots)
+        if slot is None:
+            return True
         return _gate_busy(slot.sink, slot.turn)
 
     async def _stop_active_turn() -> None:
@@ -690,20 +770,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             slot.sink.note(f"autopilot request from {surface} declined — mode stays {slot.mode}")
 
     def _cancel_background() -> None:
-        if steer_task is not None:
-            steer_task.cancel()
-        for s in slots.slots:
-            for t in s.bg_tasks:
-                if t is not None:
-                    t.cancel()
-        # Resources bundles are cached per repo ROOT (WorkspaceResources), one
-        # entry per distinct workspace -- iterating the cache itself (instead
-        # of per-slot) means a watcher shared by N same-repo slots is
-        # cancelled exactly once, never double-cancelled.
-        for bundle in resources._by_root.values():
-            wt = bundle.get("watcher_task")
-            if wt is not None:
-                wt.cancel()
+        # Task 7: the actual walk moved to the module-level, directly-tested
+        # `_cancel_all_background` (steer + every slot's bg_tasks, .done()-
+        # guarded + every WorkspaceResources bundle's watcher_task via the
+        # PUBLIC `resources.bundles()`, never `_by_root` poked directly).
+        _cancel_all_background(steer_task, slots, resources)
 
     def _spawn_steer() -> None:
         nonlocal steer_task
@@ -802,13 +873,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             except Exception:
                 pass
         if ok:
-            # the alt screen is gone — reprint the session transcript to real
-            # stdout so the conversation stays in the terminal scrollback.
-            # Task 3: slots.active().pane, not the fixed session_slot -- for
-            # now (no tab-bar UI, no /close) this is always the same slot,
-            # but the dump follows whichever tab was visible on exit.
-            if slots.slots:
-                sys.stdout.write(slots.active().pane.dump())
+            # the alt screen is gone — reprint EVERY session tab's own
+            # scrollback to real stdout (Task 7: was just the one slot that
+            # happened to be visible on exit -- `_exit_dump` walks all of
+            # them, Home skipped, a separator between panes when there's
+            # more than one).
+            dump = _exit_dump(slots)
+            if dump:
+                sys.stdout.write(dump)
                 sys.stdout.flush()
             return
         # dock unavailable/failed → fall through to the plain fallback loop

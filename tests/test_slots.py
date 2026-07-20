@@ -5,7 +5,7 @@ same-repo-root sharing (wiring map §6 boot split)."""
 import os
 import subprocess
 
-from webbee.slots import SessionSlot, SlotManager, WorkspaceResources, close_active
+from webbee.slots import SessionSlot, SlotManager, WorkspaceResources, close_active, close_at
 
 
 def _mk_repo(tmp_path):
@@ -263,3 +263,76 @@ def test_workspace_resources_distinct_roots_do_not_collide(tmp_path):
     res.put(str(root_b), bundle_b)
     assert res.get(str(root_a)) is bundle_a
     assert res.get(str(root_b)) is bundle_b
+
+
+def test_workspace_resources_bundles_returns_every_cached_bundle(tmp_path):
+    # PUBLIC accessor (Task 7 ledger hygiene) -- the exit-time cancellation
+    # walk must reach every bundle through THIS, never `_by_root` directly.
+    root_a = _mk_repo(tmp_path / "a")
+    root_b = _mk_repo(tmp_path / "b")
+    res = WorkspaceResources()
+    res.put(str(root_a), {"tag": "a"})
+    res.put(str(root_b), {"tag": "b"})
+    assert {b["tag"] for b in res.bundles()} == {"a", "b"}
+
+
+def test_workspace_resources_bundles_empty_when_nothing_cached():
+    assert WorkspaceResources().bundles() == []
+
+
+# --- close_at (W4a Task 7 -- close_active generalized to an explicit idx) ---
+
+
+def test_close_at_home_is_guarded_never_calls_cancel_slot():
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    calls = []
+    assert close_at(mgr, 0, calls.append) is False
+    assert calls == []
+    assert len(mgr.slots) == 1
+
+
+def test_close_at_closes_a_background_tab_without_disturbing_the_active_one():
+    # ✕ on a BACKGROUND tab (idx != active_idx) closes THAT tab; the active
+    # tab survives, with its index adjusted down when the removed tab sat
+    # before it.
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    victim = _mk_slot(label="a")
+    mgr.add(victim)
+    survivor = _mk_slot(label="b")
+    mgr.add(survivor)
+    mgr.active_idx = 2                          # active = b
+    seen = []
+    assert close_at(mgr, 1, seen.append) is True   # close a (background)
+    assert seen == [victim]
+    assert len(mgr.slots) == 2
+    assert mgr.slots[mgr.active_idx] is survivor   # still looking at b
+    assert mgr.active_idx == 1                     # index shifted down
+
+
+def test_close_at_closing_the_active_tab_matches_close_active():
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    mgr.add(_mk_slot(label="a"))
+    victim = _mk_slot(label="b")
+    mgr.add(victim)
+    mgr.active_idx = 2
+    seen = []
+    assert close_at(mgr, mgr.active_idx, seen.append) is True
+    assert seen == [victim]
+    assert mgr.active_idx == 1
+    assert mgr.slots[mgr.active_idx].label == "a"
+
+
+def test_close_active_is_a_thin_wrapper_over_close_at():
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    mgr.add(_mk_slot(label="a"))
+    victim = _mk_slot(label="b")
+    mgr.add(victim)
+    mgr.active_idx = 2
+    seen = []
+    assert close_active(mgr, seen.append) is True
+    assert seen == [victim]
+    assert mgr.active_idx == 1

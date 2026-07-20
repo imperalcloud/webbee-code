@@ -3,8 +3,9 @@ import os
 import re
 
 from webbee.account import Account
-from webbee.repl import (_cancel_slot, _finish_slot, _live_session_id,
-                         _make_session_slot, _slot_ctx, run_marathon, run_repl)
+from webbee.repl import (_cancel_all_background, _cancel_slot, _exit_dump,
+                         _finish_slot, _live_session_id, _make_session_slot,
+                         _slot_ctx, _steer_target, run_marathon, run_repl)
 from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
@@ -308,6 +309,23 @@ def test_mode_command_switches_agent_mode():
 def test_clear_command_clears_sink():
     sink, agent = _run(read_line=_lines("/clear", "/exit"))
     assert sink.cleared is True
+
+
+def test_clear_command_scopes_to_the_active_slot_only():
+    # Task 7 item 3: /clear must touch ONLY the ACTIVE slot's own sink --
+    # same "the action lands on the right slot's sink, not the original"
+    # proof style as test_new_tab_notes_on_the_new_slots_own_sink_not_the_original.
+    sink, agent = _run(read_line=_lines("/new /tmp", "/clear", "/tab 0", "/exit"))
+    # /clear ran while the NEW (real-sink) slot was active -- the ORIGINAL
+    # FakeSink was a BACKGROUND slot at that moment and must be untouched.
+    assert sink.cleared is False
+    assert not any("cleared" in n.lower() for n in sink.notes)
+
+    sink2, agent2 = _run(read_line=_lines("/new /tmp", "/tab 0", "/clear", "/exit"))
+    # Reversed order: /clear now runs while the ORIGINAL slot IS active --
+    # positive proof the active slot's own sink.clear() genuinely fires.
+    assert sink2.cleared is True
+    assert any("cleared" in n.lower() for n in sink2.notes)
 
 
 def test_ctrl_c_mid_turn_aborts_and_returns_to_prompt():
@@ -1163,6 +1181,43 @@ def test_slot_ctx_reads_active_slot_and_flips_on_switch():
     assert ctx_home.session_tokens == 0         # sink is None -> getattr default
 
 
+def test_slot_ctx_flips_between_two_session_slots_with_distinct_state():
+    # Task 7 item 3: /status, /cost and /queue all render straight from
+    # `_ctx()` -> `_slot_ctx(slots.active(), ...)` -- two REAL session slots
+    # (not Home vs. session) with their own mode/queue/spend prove the
+    # snapshot genuinely flips with the active slot, not just "Home reads as
+    # empty" (already covered above).
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace="/ws-home", label="Home",
+                        pane=object(), sink=None, agent=None))
+    sink_a = FakeSink()
+    sink_a.session_tokens, sink_a.session_credits = 100, 10
+    slot_a = SessionSlot(kind="session", workspace="/ws-a", label="a",
+                         pane=object(), sink=sink_a, agent=FakeAgent(),
+                         mode="plan", git_branch="feature-a")
+    slot_a.pending.append("a's queued line")
+    mgr.add(slot_a)
+    sink_b = FakeSink()
+    sink_b.session_tokens, sink_b.session_credits = 5, 1
+    slot_b = SessionSlot(kind="session", workspace="/ws-b", label="b",
+                         pane=object(), sink=sink_b, agent=FakeAgent(),
+                         mode="autopilot", git_branch="feature-b")
+    slot_b.pending.extend(["b1", "b2"])
+    mgr.add(slot_b)
+
+    mgr.active_idx = 1
+    ctx_a = _slot_ctx(mgr.active(), logged_in=True)
+    assert (ctx_a.mode, ctx_a.workspace, ctx_a.git_branch) == ("plan", "/ws-a", "feature-a")
+    assert ctx_a.queued == ("a's queued line",)
+    assert (ctx_a.session_tokens, ctx_a.session_credits) == (100, 10)
+
+    mgr.active_idx = 2
+    ctx_b = _slot_ctx(mgr.active(), logged_in=True)
+    assert (ctx_b.mode, ctx_b.workspace, ctx_b.git_branch) == ("autopilot", "/ws-b", "feature-b")
+    assert ctx_b.queued == ("b1", "b2")
+    assert (ctx_b.session_tokens, ctx_b.session_credits) == (5, 1)
+
+
 def test_live_session_id_survives_agent_none_on_home():
     mgr = SlotManager()
     mgr.add(SessionSlot(kind="home", workspace="/ws", label="Home",
@@ -1292,3 +1347,129 @@ def test_tabs_list_note_contains_one_line_per_tab_with_glyphs():
     assert len(lines) == 3                    # header + 2 tabs
     assert lines[1].startswith("●0")           # back on the original slot
     assert lines[2].startswith("○1")
+
+
+# ── W4a Task 7: multi-tab edges -- steer targeting, exit dump, cancellation ──
+# _steer_target/_exit_dump/_cancel_all_background are module-level and pure
+# (same DI-testing philosophy as _gate_busy/_live_session_id/_cancel_slot) so
+# each is driven directly here without needing a live dock or the fallback
+# loop's single-slot world (which can never grow a Home slot to exercise the
+# Home-routing/none-target branches at all).
+
+def test_steer_target_active_session_returns_itself():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    session = SessionSlot(kind="session", workspace=".", label="a",
+                          pane=object(), sink=FakeSink(), agent=None)
+    mgr.add(session)
+    mgr.active_idx = 1
+    assert _steer_target(mgr) is session
+
+
+def test_steer_target_home_active_routes_to_the_first_session_slot():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    first = SessionSlot(kind="session", workspace=".", label="a",
+                        pane=object(), sink=FakeSink(), agent=None)
+    second = SessionSlot(kind="session", workspace=".", label="b",
+                         pane=object(), sink=FakeSink(), agent=None)
+    mgr.add(first)
+    mgr.add(second)
+    mgr.active_idx = 0                          # Home is the ACTIVE tab
+    assert _steer_target(mgr) is first          # lowest-index session, never second
+
+
+def test_steer_target_none_when_no_session_slot_exists():
+    # Every tab closed down to bare Home -- both _poller_busy and
+    # _steer_submit must treat this as "nothing to submit into", not crash
+    # reaching for a None sink.
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    mgr.active_idx = 0
+    assert _steer_target(mgr) is None
+
+
+class _FakePane:
+    """Minimal `.dump()` double for `_exit_dump` -- doesn't need a real
+    OutputPane (or prompt_toolkit) at all, unlike an end-to-end dock test."""
+    def __init__(self, text):
+        self._text = text
+    def dump(self):
+        return self._text
+
+
+def test_exit_dump_single_session_slot_has_no_separator():
+    # Pinned: today's single-tab output must stay byte-identical to a bare
+    # `pane.dump()` -- no separator text appears at all with just one slot.
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=_FakePane("HOME"), sink=None, agent=None))
+    mgr.add(SessionSlot(kind="session", workspace=".", label="a",
+                        pane=_FakePane("transcript-a"), sink=None, agent=None))
+    assert _exit_dump(mgr) == "transcript-a"
+
+
+def test_exit_dump_multi_session_slots_get_separators_and_skip_home():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=_FakePane("HOME-STUFF"), sink=None, agent=None))
+    mgr.add(SessionSlot(kind="session", workspace=".", label="a",
+                        pane=_FakePane("A-TEXT"), sink=None, agent=None))
+    mgr.add(SessionSlot(kind="session", workspace=".", label="b",
+                        pane=_FakePane("B-TEXT"), sink=None, agent=None))
+    out = _exit_dump(mgr)
+    assert "HOME-STUFF" not in out                          # Home never dumped
+    # a separator lands BETWEEN panes only -- none before the first, and its
+    # index is the slot's OWN SlotManager index (matches /tab N + the tab
+    # bar's own numbering), not a 1-based session ordinal.
+    assert out == "A-TEXT── tab 2: b ──\nB-TEXT"
+
+
+def test_exit_dump_no_session_slots_is_empty():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=_FakePane("HOME"), sink=None, agent=None))
+    assert _exit_dump(mgr) == ""
+
+
+def test_cancel_all_background_sweeps_every_slots_bg_tasks_and_watchers(tmp_path):
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                         pane=object(), sink=None, agent=None)
+    live_a, done_a = _FakeTask(), _FakeTask(done=True)
+    slot_a.bg_tasks = [live_a, done_a, None]
+    slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                         pane=object(), sink=None, agent=None)
+    live_b = _FakeTask()
+    slot_b.bg_tasks = [live_b]
+    mgr.add(slot_a)
+    mgr.add(slot_b)
+
+    resources = WorkspaceResources()
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    root_a.mkdir(); root_b.mkdir()
+    live_watcher, done_watcher = _FakeTask(), _FakeTask(done=True)
+    resources.put(str(root_a), {"watcher_task": live_watcher})
+    resources.put(str(root_b), {"watcher_task": done_watcher})
+
+    steer = _FakeTask()
+    _cancel_all_background(steer, mgr, resources)
+
+    assert steer.cancelled is True
+    assert live_a.cancelled is True
+    assert done_a.cancelled is False        # already done -- never double-cancelled
+    assert live_b.cancelled is True
+    assert live_watcher.cancelled is True
+    assert done_watcher.cancelled is False  # via the PUBLIC bundles() accessor, same guard
+
+
+def test_cancel_all_background_survives_no_steer_task_and_empty_state():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    _cancel_all_background(None, mgr, WorkspaceResources())   # must not raise

@@ -3605,6 +3605,110 @@ def test_ctrl_d_closes_active_session_when_others_remain():
     asyncio.run(scenario())
 
 
+def test_tab_bar_close_click_closes_the_clicked_background_tab_not_the_active_one():
+    # Task 7 hygiene fix: clicking a SPECIFIC tab's ✕ must close THAT tab,
+    # even when a DIFFERENT tab is the one currently active -- "honest v1"
+    # (Task 5) always closed whichever tab was active, ignoring the clicked
+    # idx entirely.
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(slot_a)
+        slots.add(slot_b)
+        slots.active_idx = 2                                  # active = b
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                bar = get_app().layout.container.children[0]
+                frags = bar.content.text()
+                # frags: [home, sep, a-body, a-CLOSE, sep, b-body, b-close]
+                close_a = frags[3]
+                assert close_a[1] == " ✕"
+                ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                                button=MouseButton.LEFT, modifiers=frozenset())
+                close_a[2](ev)                                 # click ✕ on the BACKGROUND tab a
+                await asyncio.sleep(0.02)
+                assert len(slots.slots) == 2                   # a is gone
+                assert slots.slots[1] is slot_b                # b survives, untouched
+                assert slots.active_idx == 1                   # still pointed at b (index shifted)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_tab_bar_close_click_closes_the_active_tab_when_that_is_the_one_clicked():
+    # The other half of the fix: clicking the ✕ on the tab that IS active
+    # still closes it (unchanged from "honest v1" in this one case).
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        notes_a = []
+        slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(note=notes_a.append), agent=None)
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(slot_a)
+        slots.add(slot_b)
+        slots.active_idx = 2                                  # active = b
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                bar = get_app().layout.container.children[0]
+                frags = bar.content.text()
+                close_b = frags[6]
+                assert close_b[1] == " ✕"
+                ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                                button=MouseButton.LEFT, modifiers=frozenset())
+                close_b[2](ev)                                 # click ✕ on the ACTIVE tab b
+                await asyncio.sleep(0.02)
+                assert len(slots.slots) == 2                   # b is gone
+                assert slots.active_idx == 1                   # landed on the neighbor (a)
+                assert notes_a and "server-side" in notes_a[0]  # same close-note behavior as before
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 def test_key_processor_timeoutlen_tuned_down_below_default():
     # Registering ("escape", "<digit>") chords makes bare Escape a prefix of
     # a longer match, so the key-processor would otherwise wait its FULL
