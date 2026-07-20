@@ -281,3 +281,14 @@ class OutputPane:
         """The transient 'copied' note, while still fresh (else empty)."""
         import time as _t
         return self.copy_flash if _t.monotonic() < self._flash_until else ""
+
+    # ---- W2 Task 8: selection capture past the pane's own Window --------
+    def forward_mouse(self, ev) -> bool:
+        """Public seam neighbor windows call FIRST (via `tui._forwarding` /
+        the queue+todo panels' `forward=` param) so a drag armed inside this
+        pane can still be extended/completed once the pointer — and thus
+        prompt_toolkit's per-position mouse routing — has moved onto them.
+        True = consumed (a drag was armed); False = untouched, caller falls
+        through to its own handling. Full behavior in selection.forward_mouse."""
+        from webbee.selection import forward_mouse as _forward_mouse
+        return _forward_mouse(self, ev)

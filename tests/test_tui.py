@@ -294,6 +294,285 @@ def test_edge_drag_scroll_clamps_at_buffer_end():
     assert pane._offset == 5           # edge_tick's scroll clamps too
 
 
+# ── W2 Task 8: selection capture — neighbor windows forward drag/release ────
+# prompt_toolkit has NO mouse capture (events route by pointer POSITION, not
+# by who owns a drag): releasing below the output pane used to leave the
+# highlight stuck and the copy never fired. `OutputPane.forward_mouse` lets a
+# neighbor window (queue/todo panel, toolbar) hand a MOUSE_MOVE/MOUSE_UP back
+# to the pane FIRST, while a drag is armed.
+
+def test_forward_mouse_noop_when_no_drag_armed():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    assert pane.control._down_abs is None
+    up = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    move = MouseEvent(position=Point(1, 0), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(up) is False
+    assert pane.forward_mouse(move) is False
+
+
+def test_forward_mouse_move_extends_selection_to_bottom_row_and_arms_edge_drag():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 20
+
+    down = MouseEvent(position=Point(1, 3), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                 # arms the drag INSIDE the pane (Point is x,y)
+
+    # A neighbor window's own coordinate space (e.g. row 2 of the queue
+    # panel) — forward_mouse must ignore ev.position.y entirely and clamp to
+    # the pane's own bottom row instead.
+    move = MouseEvent(position=Point(7, 2), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(move) is True
+    assert pane._sel[1] == (pane._offset + pane._view_h - 1, 7)   # x passed through, y clamped
+    assert pane._edge_drag == 1
+    assert pane.control._down_abs is not None        # still armed — only MOUSE_UP disarms
+
+
+def test_forward_mouse_up_completes_copy_at_bottom_row_and_resets_state(monkeypatch):
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))
+    pane._offset = 10
+
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                 # Point is (x, y) → anchor abs (12, 1)
+
+    # Delivered at the SAME viewport point the press used — a real in-pane
+    # MOUSE_UP would skip the copy as a same-position click, but a FORWARDED
+    # release only ever reaches here because the pointer already left the
+    # pane, so it's a drag by definition; the click-vs-drag check must not
+    # apply.
+    bottom = pane._offset + pane._view_h - 1   # captured BEFORE the call — the
+                                                # post-copy notify() re-follows
+                                                # the tail and moves _offset on
+    up = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(up) is True
+
+    assert captured["text"] == pane._selected_text((12, 1), (bottom, 1))
+    assert pane.control._down is None
+    assert pane.control._down_abs is None
+    assert pane._sel is None
+    assert pane._edge_drag == 0
+
+
+def test_forward_mouse_ignores_other_event_types_while_armed():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._io.write("hello")
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    scroll = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
+                        button=MouseButton.LEFT, modifiers=frozenset())
+    assert pane.forward_mouse(scroll) is False
+    assert pane.control._down_abs is not None         # untouched — still armed
+
+
+def test_mouse_down_while_already_armed_resets_stale_edge_drag():
+    # W1-recon stuck-highlight hygiene: a release lost past a neighbor window
+    # (the exact bug this task fixes for queue/todo/toolbar, but SOME window
+    # is always uncovered — e.g. the input box) must not leave a stale
+    # `_edge_drag` armed forever; the NEXT press cleans it up.
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 0
+
+    down1 = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                       button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down1)
+    move = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,   # bottom edge
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._edge_drag == 1
+    assert pane.control._down_abs is not None          # no MOUSE_UP ever arrived — stuck
+
+    # A fresh MOUSE_DOWN, without an intervening MOUSE_UP. offset is now 3
+    # (the edge-scroll from `move`, above) — Point is (x, y), so this press
+    # at viewport (x=2, y=4) anchors abs (7, 2).
+    down2 = MouseEvent(position=Point(2, 4), event_type=MouseEventType.MOUSE_DOWN,
+                       button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down2)
+    assert pane._edge_drag == 0                        # stale flag cleared
+    assert pane.control._down_abs == (7, 2)             # re-armed at the NEW press
+    assert pane._sel == ((7, 2), (7, 2))
+
+
+def test_forwarding_wrapper_suppresses_wrapped_handler_when_drag_armed(monkeypatch):
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane, _forwarding
+
+    monkeypatch.setattr(clipboard, "copy_to_clipboard", lambda text: "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._io.write("abc")
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    calls = []
+    wrapped = _forwarding(lambda ev: calls.append(ev) or "handler-ran", pane)
+    up = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert wrapped(up) is None            # consumed by the pane, not the wrapped handler
+    assert calls == []
+    assert pane.control._down_abs is None  # the pane really did complete/reset the drag
+
+
+def test_forwarding_wrapper_falls_through_when_no_drag_armed():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane, _forwarding
+
+    pane = OutputPane(width=80)
+    calls = []
+    wrapped = _forwarding(lambda ev: calls.append(ev) or "handler-ran", pane)
+    up = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert wrapped(up) == "handler-ran"
+    assert calls == [up]
+
+
+def test_forwarding_wrapper_returns_notimplemented_for_a_none_handler(monkeypatch):
+    # The toolbar has no mouse handling of its own — _forwarding(None, pane)
+    # is wrapped purely to give the pane first refusal.
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane, _forwarding
+
+    monkeypatch.setattr(clipboard, "copy_to_clipboard", lambda text: "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._io.write("abc")
+    wrapped = _forwarding(None, pane)
+    up = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert wrapped(up) is NotImplemented                # no drag armed, no handler to fall to
+
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    assert wrapped(up) is None                          # armed now — consumed
+
+
+def test_release_below_pane_completes_copy_and_suppresses_queue_pull(monkeypatch):
+    # End-to-end: the ACTUAL seam tui wires — queue_fragments(forward=pane.
+    # forward_mouse) — delivers a forwarded MOUSE_UP to a queue row exactly
+    # like a real click would, and the copy completes instead of the pull.
+    from collections import deque
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.queue_panel import queue_fragments
+    from webbee.tui import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))
+    pane._offset = 10
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)                  # arm a drag on the pane
+
+    pulls = []
+    frags = queue_fragments(deque(["a", "b"]), pull=pulls.append, width=80,
+                            forward=pane.forward_mouse)
+    row_handler = [f[2] for f in frags if len(f) == 3][0]
+
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,   # the row's own y/x
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert row_handler(up) is None
+    assert pulls == []                                # NOT pulled — the pane claimed the release
+    assert "text" in captured                         # the copy fired
+    assert pane.control._down_abs is None
+
+
+def test_forward_noop_when_no_drag_armed_queue_pull_still_works():
+    # Mirror of the above with no drag armed: the wrapped pull fires exactly
+    # as before the forwarding seam existed — the wrapper is transparent.
+    from collections import deque
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.queue_panel import queue_fragments
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pulls = []
+    frags = queue_fragments(deque(["a", "b"]), pull=pulls.append, width=80,
+                            forward=pane.forward_mouse)
+    row_handler = [f[2] for f in frags if len(f) == 3][0]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert row_handler(up) is None
+    assert pulls == [0]
+
+
+def test_queue_header_toggle_forward_param_suppresses_toggle_when_armed(monkeypatch):
+    from collections import deque
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.queue_panel import queue_fragments
+    from webbee.tui import OutputPane
+
+    monkeypatch.setattr(clipboard, "copy_to_clipboard", lambda text: "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._io.write("abc")
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    hits = []
+    frags = queue_fragments(deque(["a"]), toggle=lambda: hits.append(1),
+                            forward=pane.forward_mouse)
+    header_handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert header_handler(up) is None
+    assert hits == []                                 # suppressed — the pane claimed it
+    assert pane.control._down_abs is None
+
+
 # ── virtualization: render only the visible slice, follow the tail ────────────
 
 def test_pane_follows_tail_on_notify():

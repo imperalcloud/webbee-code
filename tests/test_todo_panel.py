@@ -131,3 +131,33 @@ def test_todo_header_toggle_fires_on_mouse_up():
     scroll = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
                         button=MouseButton.LEFT, modifiers=frozenset())
     assert handler(scroll) is NotImplemented
+
+
+# ── W2 Task 8: selection capture — the header toggle gives an armed pane
+# drag first refusal (same `forward` seam as queue_panel's) ─────────────────
+
+def test_todo_toggle_handler_forward_param_suppresses_toggle_when_consumed():
+    # `forward` stands in for OutputPane.forward_mouse here — a stub is
+    # enough since todo_panel only needs to know it was CONSUMED.
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    hits = []
+    frags = todo_fragments([_t("a")], collapsed=False, toggle=lambda: hits.append(1),
+                           forward=lambda ev: True)
+    handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(up) is None
+    assert hits == []                                  # suppressed — forward claimed it
+
+
+def test_todo_toggle_handler_forward_param_falls_through_when_not_consumed():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    hits = []
+    frags = todo_fragments([_t("a")], collapsed=False, toggle=lambda: hits.append(1),
+                           forward=lambda ev: False)
+    handler = frags[0][2]
+    up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(up) is None and hits == [1]           # untouched — toggle fires as before

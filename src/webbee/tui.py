@@ -150,6 +150,27 @@ def _width_watch(pane, app) -> None:
             pass
 
 
+def _forwarding(handler, pane):
+    """W2 Task 8: prompt_toolkit routes mouse events by pointer POSITION,
+    not by who owns an in-progress drag, so a selection armed inside the
+    output pane needs its neighbor windows' own mouse handling to give it
+    first refusal — otherwise a release past the pane's Window just lands on
+    whatever's underneath and the drag never completes (stuck highlight,
+    copy never fires). Wraps `handler` (a plain mouse_handler(ev), or None
+    for a window that has no handler of its own — e.g. the toolbar) so
+    `pane.forward_mouse(ev)` is tried FIRST: consumed (a drag was armed) ⇒
+    stop here, return None; otherwise fall through to `handler(ev)`, or
+    NotImplemented when there's no wrapped handler at all — the toolbar's
+    case, where forwarding is the ONLY behavior being added."""
+    def _h(ev):
+        if pane.forward_mouse(ev):
+            return None
+        if handler is None:
+            return NotImplemented
+        return handler(ev)
+    return _h
+
+
 def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event, buf=None) -> None:
     """Esc key binding (P5g). While a turn is running, STOP it — cancel the LOCAL
     turn task (what actually tears the turn down, same as Ctrl-C) AND ask the
@@ -552,15 +573,24 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     def _toolbar():
         f = pane.flash()
         if f:
-            return [("class:tb.working", "  " + f)]   # transient copy confirmation
-        if sel["i"] is not None and steps_nav:
-            return [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
-        st = status()
-        return build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
-                             current=st["current"], elapsed=st["elapsed"],
-                             tools=st["tools"], consent=st["consent"],
-                             queued=len(pending) + len(remote_pending),
-                             reconnecting=st.get("reconnecting", 0))
+            frags = [("class:tb.working", "  " + f)]   # transient copy confirmation
+        elif sel["i"] is not None and steps_nav:
+            frags = [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
+        else:
+            st = status()
+            frags = build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
+                                  current=st["current"], elapsed=st["elapsed"],
+                                  tools=st["tools"], consent=st["consent"],
+                                  queued=len(pending) + len(remote_pending),
+                                  reconnecting=st.get("reconnecting", 0))
+        # W2 Task 8: the toolbar has no mouse handling of its own, so
+        # `_forwarding(None, pane)` is wrapped onto every fragment purely for
+        # drag-forwarding — a release that lands on the toolbar row while a
+        # pane selection is armed still completes the copy instead of
+        # sticking. `build_toolbar` itself stays untouched/2-tuple (its own
+        # unit tests unpack `for _, seg in frags`).
+        fwd = _forwarding(None, pane)
+        return [(style, text, fwd) for style, text in frags]
 
     # Dynamic height: EXACTLY the rows the wrapped input needs (1→cap), so the
     # box grows as you type and shrinks back — never a fixed huge block. Enter
@@ -622,10 +652,14 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         # Live like _toolbar: re-invoked every redraw, reads the shared deque
         # + the sink-owned remote list (pull serves the LOCAL rows only —
         # remote rows are display-only by construction in queue_fragments).
+        # forward=pane.forward_mouse (W2 Task 8): first refusal on every
+        # row/header click so a drag armed on the pane above can still be
+        # extended/completed once it releases on this panel.
         cols, cap = _panel_size()
         return queue_fragments(pending, pull=_pull_at, width=cols,
                                remote=remote_pending, collapsed=qp_ui["collapsed"],
-                               toggle=_toggle_queue, max_items=cap)
+                               toggle=_toggle_queue, max_items=cap,
+                               forward=pane.forward_mouse)
 
     # The LIVE pending-queue panel — pinned BETWEEN the output pane and the
     # input box; zero rows (hidden) while the queue is empty, so the empty
@@ -641,9 +675,11 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     def _todo_fragments():
         # Live like _queue_fragments: re-invoked every redraw, reads the
         # sink-owned current_todos list in place (todo frames mutate it).
+        # forward=pane.forward_mouse (W2 Task 8): same first-refusal seam.
         cols, cap = _panel_size()
         return todo_fragments(todos, width=cols, collapsed=tp_ui["collapsed"],
-                              toggle=_toggle_todos, max_items=cap)
+                              toggle=_toggle_todos, max_items=cap,
+                              forward=pane.forward_mouse)
 
     # The STICKY todo panel — pinned ABOVE the queue panel (the queue stays
     # adjacent to the input; its bottom row is the ↑-pullable newest). Same

@@ -37,6 +37,15 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                 pane.scroll(3)
                 return None
             if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.LEFT:
+                if self._down_abs is not None:
+                    # A previous drag never got its MOUSE_UP (prompt_toolkit has
+                    # no mouse capture — a release past a neighbor window used to
+                    # just vanish, the W1-recon stuck-highlight case). Clear the
+                    # stale edge-scroll flag before arming the new drag so
+                    # edge_tick doesn't act on a leftover edge from the drag that
+                    # never closed; `_down`/`_down_abs`/`_sel` are overwritten
+                    # below regardless, so they need no separate reset.
+                    pane._edge_drag = 0
                 self._down = ev.position           # viewport point — click-vs-drag test only
                 self._down_abs = (ev.position.y + pane._offset, ev.position.x)
                 pane._sel = (self._down_abs, self._down_abs)  # zero-width start (no highlight yet)
@@ -69,3 +78,51 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
             return NotImplemented
 
     return _SelectControl
+
+
+def forward_mouse(pane, ev) -> bool:
+    """W2 Task 8: prompt_toolkit has NO mouse capture — events route by
+    pointer POSITION, not by who owns an in-progress drag — so today
+    releasing (or moving) past the pane's Window while dragging just lands
+    on whatever neighbor window sits under the pointer, and the pane never
+    sees it: the highlight sticks forever and the copy never fires. Neighbor
+    windows (queue/todo panels, toolbar) call this FIRST, before their own
+    mouse handling.
+
+    No drag armed (`pane.control._down_abs is None`) → False immediately,
+    untouched — the caller falls through to its own handling. While armed,
+    only MOUSE_MOVE/MOUSE_UP are treated specially (anything else — a stray
+    SCROLL, say — is left to the neighbor too): the event is treated as if
+    it had hit the pane's BOTTOM row (y clamped to `_view_h - 1`; x passed
+    through unchanged), mirroring the edge-drag extension `edge_tick`
+    already performs while parked at the viewport edge. MOUSE_MOVE extends
+    `_sel` and arms `_edge_drag = 1` (unconditionally bottom — a forwarded
+    move only happens below the pane, never above it). MOUSE_UP completes
+    the copy exactly like the control's own MOUSE_UP, EXCEPT the click-vs-
+    drag same-position check is skipped on purpose: a forwarded release only
+    reaches here because the pointer already left the pane while the button
+    was down, so it is by definition a drag, never a click. Either way,
+    returns True (consumed)."""
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    control = pane.control
+    if control._down_abs is None:
+        return False
+    et = ev.event_type
+    if et not in (MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP):
+        return False
+    row = pane._offset + pane._view_h - 1
+    x = ev.position.x
+    if et == MouseEventType.MOUSE_MOVE:
+        pane._sel = (control._down_abs, (row, x))
+        pane._edge_drag = 1
+        pane._invalidate()
+        return True
+    # MOUSE_UP
+    down_abs, control._down_abs = control._down_abs, None
+    control._down = None
+    pane._edge_drag = 0
+    pane._copy_selection(down_abs, (row, x))
+    pane._sel = None
+    pane._invalidate()
+    return True

@@ -30,7 +30,7 @@ def _rows(todos) -> list:
 
 
 def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None,
-                    max_items=TP_MAX_ITEMS):
+                    max_items=TP_MAX_ITEMS, forward=None):
     """PURE builder: the panel as prompt_toolkit formatted text, re-invoked
     every redraw (same live mechanics as the queue panel) so every todo_write
     republish shows at once. Layout, top→bottom = plan order:
@@ -50,7 +50,12 @@ def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None,
     `collapsed` (Task 11 click-to-collapse, mirrors queue_panel exactly) folds
     the whole panel down to ONE header row ending `▸`; `▾` when expanded.
     Both only render when `toggle` is given — the header then carries a
-    3-tuple MOUSE_UP handler (see queue_panel._toggle_handler) that flips it."""
+    3-tuple MOUSE_UP handler (see queue_panel._toggle_handler) that flips it.
+
+    `forward` (W2 Task 8) is the same first-refusal seam as queue_panel's —
+    the pane's `OutputPane.forward_mouse`, given first refusal on the header
+    click so a drag armed on the pane above can still be extended/completed
+    once it releases on this panel."""
     rows = _rows(todos)
     if not rows:
         return []
@@ -58,7 +63,7 @@ def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None,
     marker = "" if toggle is None else (" ▸" if collapsed else " ▾")
     header = ("class:tp.header", f" 📋 Todos ({done}/{len(rows)}){marker}")
     if toggle is not None:
-        header = header + (_toggle_handler(toggle),)
+        header = header + (_toggle_handler(toggle, forward),)
     frags = [header]
     if collapsed:
         return frags
