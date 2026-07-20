@@ -14,6 +14,7 @@ _HELP = """Commands:
   /tab N             switch to tab N (see /tabs for the numbers)
   /close             close the active tab (the run keeps going server-side)
   /tabs              list open tabs
+  /rename <name>     rename the active tab (sticks -- auto-naming won't override it)
   /queue [clear]     messages queued while Webbee works (clear drops them all)
   /steps [N]         last turn's steps; N expands one (also: Up/Down + Enter)
   /checkpoints       the reversibility time machine — list workspace checkpoints
@@ -96,6 +97,10 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         return SlashResult(handled=True, action="tab_close")
     if cmd == "/tabs":
         return SlashResult(handled=True, action="tabs_list")
+    if cmd == "/rename":
+        # repl reports "Usage: /rename <name>" on an empty arg -- same split
+        # as /rollback (this file never crafts the usage message itself).
+        return SlashResult(handled=True, action="rename", arg=" ".join(args))
     if cmd == "/queue":
         # ctx.queued is the live deque's snapshot (threaded by the repl the
         # same way /status reads session state); the repl clears the actual

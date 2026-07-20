@@ -220,3 +220,19 @@ def test_help_mentions_tab_commands():
     for c in ("/new", "/tab", "/close", "/tabs"):
         assert c in msg
     assert not NO_CYRILLIC.search(msg)
+
+
+# ── /rename — W4c T3: tabs that name themselves ──────────────────────────────
+
+def test_rename_command_carries_the_name_verbatim():
+    r = dispatch("/rename billing fix", _ctx())
+    assert r.handled and r.action == "rename" and r.arg == "billing fix"
+
+
+def test_rename_command_with_no_arg_carries_empty_string():
+    r = dispatch("/rename", _ctx())
+    assert r.handled and r.action == "rename" and r.arg == ""
+
+
+def test_help_mentions_rename():
+    assert "/rename" in dispatch("/help", _ctx()).message

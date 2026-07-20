@@ -24,7 +24,7 @@ from webbee import sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
-from webbee.slots import close_active, close_at
+from webbee.slots import close_active, close_at, disarm_all, is_turn_alive
 from webbee.tabs import tab_fragments
 from webbee.todo_panel import todo_fragments, todo_height
 
@@ -38,11 +38,20 @@ _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # braille frames — animated whil
 # ordinary "a;b;c" text never matches (a literal "35;6;42M" the user typed
 # would be dropped too; accepted, it IS the residue shape).
 _MOUSE_RESIDUE = re.compile(r"(?:\x1b\[)?<?\d{1,4};\d{1,4};\d{1,4}[Mm]")
+# 0.3.25: stray DEC focus-in/out reports ("\x1b[I" / "\x1b[O") — same split-
+# sequence hazard as the mouse residue above, but from ANOTHER source (tmux/
+# a window manager still sending them even though configure_mouse_modes now
+# explicitly turns ?1004 off — see its own docstring). ESC-PREFIXED ONLY: a
+# bare "[I"/"[O" with no leading ESC is ordinary text (e.g. "see [I]" in a
+# citation) and must never be eaten.
+_FOCUS_RESIDUE = re.compile(r"\x1b\[[IO]")
 
 
 def scrub_mouse_residue(text: str) -> str:
-    """PURE. Drop leaked mouse-report fragments; everything else unchanged."""
-    return _MOUSE_RESIDUE.sub("", text or "")
+    """PURE. Drop leaked mouse-report AND focus-report fragments (0.3.25);
+    everything else unchanged."""
+    text = _MOUSE_RESIDUE.sub("", text or "")
+    return _FOCUS_RESIDUE.sub("", text)
 
 
 def configure_mouse_modes(output) -> None:
@@ -51,7 +60,17 @@ def configure_mouse_modes(output) -> None:
     while a button is held). Wheel scroll, clicks and drag-select all still
     work; the bare-move flood that desyncs the parser (phantom Escape + report
     tails typed into the input) disappears at the source. No-op for outputs
-    without write_raw (non-vt100)."""
+    without write_raw (non-vt100).
+
+    0.3.25 (focus/garbage hardening): both paths ALSO explicitly disable
+    DEC focus-reporting (?1004l) — a tmux pane switch, an OS-level window
+    focus change, or another program that left ?1004 armed can otherwise
+    leak `ESC[I`/`ESC[O` focus-in/out reports straight into THIS terminal's
+    stdin, landing as garbage in the input buffer exactly like the mouse
+    residue below. `_enable` turns it off the moment the dock's own mouse
+    tracking comes up (so nothing else's focus reporting can leak for the
+    whole session); `_disable` repeats it on teardown, belt & braces, same
+    posture as ?1003 above."""
     if not hasattr(output, "write_raw"):
         return
 
@@ -60,6 +79,7 @@ def configure_mouse_modes(output) -> None:
         output.write_raw("\x1b[?1002h")   # motion ONLY while a button is held
         output.write_raw("\x1b[?1015h")   # urxvt encoding
         output.write_raw("\x1b[?1006h")   # SGR encoding
+        output.write_raw("\x1b[?1004l")   # focus reporting OFF -- never wanted here
 
     def _disable():
         output.write_raw("\x1b[?1002l")
@@ -67,6 +87,7 @@ def configure_mouse_modes(output) -> None:
         output.write_raw("\x1b[?1000l")
         output.write_raw("\x1b[?1015l")
         output.write_raw("\x1b[?1006l")
+        output.write_raw("\x1b[?1004l")   # belt & braces: focus reporting stays off on exit too
 
     output.enable_mouse_support = _enable
     output.disable_mouse_support = _disable
@@ -448,7 +469,7 @@ def _restore_draft(buf, slot) -> None:
 async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
                       home_input=None, cancel_slot=None, ui_hooks=None,
-                      on_switch=None) -> bool:
+                      on_switch=None, on_new=None) -> bool:
     """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
     CALL TIME (W4a Task 3 — the single most structural change of the
     multisession-tabs wave: no more one session's objects captured once at
@@ -510,7 +531,24 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     on `_switch_to`, so this one seam covers every path. repl wires it to
     its own stale-Home-refill check (`home.is_stale` + `fill_home`
     re-scheduled as a bg task) -- this function has no idea what "Home" or
-    "stale" mean, it only calls the hook.
+    "stale" mean, it only calls the hook. `on_new` (0.3.25, optional): the
+    tab bar's trailing + chip fires this — a bare async callable, no args,
+    fired as a background task (`_new_tab_click`, same "can't await from a
+    mouse handler" shape as `_launch_inject`) — repl wires it to the EXACT
+    same flow `/new` (no arg) uses, which itself calls `ui_hooks["switch"]`
+    to land on the new tab, so the history/draft swap always runs through
+    `_switch_to` too, never bypassed. `None` (the default, and every test
+    that doesn't care) makes a + click a harmless no-op via `tabs.
+    tab_fragments`'s own contract.
+
+    Busy-close confirm (Part D): a ✕ click on a tab whose OWN turn task is
+    still alive (`slots.is_turn_alive`) arms `slot.close_armed` instead of
+    closing outright — `_close_tab_click` below — and a note lands in that
+    tab's own transcript; the tab bar then renders "✕?" (`tabs.
+    tab_fragments`) until either a second click on the SAME armed tab
+    actually closes it, or ANY switch/keypress disarms it again
+    (`slots.disarm_all`, wired into `_switch_to` and the Application's
+    `after_key_press` event below).
     Returns True on clean exit; False if prompt_toolkit is unavailable
     (the caller uses the plain fallback loop)."""
     try:
@@ -960,6 +998,11 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         prev.draft_cursor = buf.cursor_position
         if slots.switch(idx):
             entering = slots.active()
+            # Part D: any genuine switch disarms every tab's one-shot
+            # busy-close confirm -- an armed "✕?" left over from a click on
+            # a DIFFERENT tab (or this one, abandoned) must never linger
+            # past the moment the user looks elsewhere.
+            disarm_all(slots)
             _swap_history(buf, entering)
             # 0.3.24 (per-tab drafts, product decision -- was FIX7b's "drafts
             # dropped on switch"): a draft mid-type belongs to the tab you
@@ -1007,6 +1050,23 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # Ctrl-W/Ctrl-D/the /close command are UNCHANGED: they have no
         # per-tab idx of their own, so they keep meaning "close what I'm
         # looking at" via `_close_flow`/`close_active` below.
+        #
+        # Part D (busy-close confirm): a ✕ click on a tab whose OWN turn is
+        # still running arms `close_armed` instead of closing outright --
+        # the tab bar then renders "✕?" (tabs.tab_fragments) -- and a note
+        # lands in THAT tab's own transcript so it's obvious what just
+        # happened even if the click landed on a BACKGROUND tab you weren't
+        # even looking at. A SECOND click while already armed falls through
+        # to the real close below, same as an idle tab's very first click.
+        if 0 <= idx < len(slots.slots):
+            target = slots.slots[idx]
+            if is_turn_alive(target) and not target.close_armed:
+                target.close_armed = True
+                note = getattr(target.sink, "note", None)
+                if note is not None:
+                    note("tab is busy — click ✕ again to close (the server-side run keeps going)")
+                get_app().invalidate()
+                return False
         if close_at(slots, idx, cancel_slot):
             survivor = slots.active()
             _swap_history(buf, survivor)         # FIX7d, same as _close_flow above
@@ -1014,6 +1074,17 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             get_app().invalidate()
             return True
         return False
+
+    def _new_tab_click() -> None:
+        # 0.3.25: the tab bar's + chip -- mirrors `_launch_inject`'s "a mouse
+        # handler can't await" shape (fire-and-forget as a background task).
+        # `on_new` is the repl's own `_open_new_tab` (async, no args); `None`
+        # (no seam wired -- headless/no-dock callers, tests that don't care)
+        # is a harmless no-op, same contract `tabs.tab_fragments` already
+        # documents for a bare click with nothing wired.
+        if on_new is None:
+            return
+        get_app().create_background_task(on_new())
 
     # repl-owned hook seam (Task 5, map contract item 5): `/tab`, `/new` and
     # `/close` live in repl.py and only ever mutate `slots` directly -- filled
@@ -1046,29 +1117,41 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # extended/completed once it releases up here, mirroring the
         # queue/todo panels' own forward=pane.forward_mouse below the pane.
         cols, _rows = sizing.get_size(get_app_or_none())
-        return tab_fragments(slots, on_switch=_switch_to, on_close=_close_tab_click, width=cols,
+        return tab_fragments(slots, on_switch=_switch_to, on_close=_close_tab_click,
+                             on_new=_new_tab_click, width=cols,
                              forward=lambda ev: _pane().forward_mouse(ev, clamp="top"))
 
     # The tab bar — pinned at the very TOP, fixed height 1, NEVER hidden
     # (unlike the queue/todo panels below it): it IS the new look, even with
     # only Home showing. focusable=False keeps focus on the input.
+    # 0.3.25 (Valentin, live screenshot review): `style="class:tabbar"` seats
+    # every chip on its own solid bar (`"tabbar": "bg:#262626"` in the Style
+    # dict below) — a browser look, visually separated from the transcript
+    # above/below it instead of floating directly on the terminal's own bg.
     tab_bar = Window(FormattedTextControl(_tab_fragments_live, focusable=False),
-                     height=1, always_hide_cursor=True)
+                     height=1, always_hide_cursor=True, style="class:tabbar")
+    # ONE blank row of breathing room between the bar and the transcript —
+    # deliberately bare (no style at all): it renders as plain terminal
+    # background, transparent-looking, never a second colored stripe.
+    tab_bar_spacer = Window(height=1)
     # The single most structural change of the W4a wave (map §3): the pane
     # slot in the root layout is a DynamicContainer, not a bound window —
     # it re-resolves `slots.active().pane.window` on EVERY redraw, so a tab
     # switch repaints a different slot's transcript with no stale reference
     # left over anywhere in the tree.
     pane_container = DynamicContainer(lambda: _pane().window)
-    root = HSplit([tab_bar, pane_container, todo_panel, queue_panel, Frame(input_win), toolbar])
+    root = HSplit([tab_bar, tab_bar_spacer, pane_container, todo_panel, queue_panel,
+                   Frame(input_win), toolbar])
     style = Style.from_dict({
         "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
         "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
-        "tab": "#8a8a8a",                    # idle chip — dim text, no bg
+        "tabbar": "bg:#262626",              # 0.3.25: the bar itself — a browser-look strip the chips sit on
+        "tab": "#9e9e9e",                    # idle chip — dim text, no bg (brightened a notch, 0.3.25, to read clearly on `tabbar`'s bg)
         "tab.active": "bg:#e8a317 #1c1c1c bold",  # the ACTIVE chip — solid bee-yellow bg, dark text: unmistakable
-        "tab.alert": "#e8a317 bold",         # ⚠ consent waiting in a BACKGROUND tab — yellow text, no bg (only the active chip owns one)
-        "tab.close": "#8a8a8a",              # the ✕ on a background tab — dim, closing is never the default action
+        "tab.alert": "#e8a317 bold",         # ⚠ consent waiting in a BACKGROUND tab — yellow text, no bg (only the active chip owns one); also the armed "✕?" busy-close-confirm glyph (0.3.25)
+        "tab.close": "#9e9e9e",              # the ✕ on a background tab — dim, closing is never the default action (brightened alongside `tab`)
         "tab.close.active": "bg:#e8a317 #1c1c1c",  # the ✕ on the ACTIVE tab — same bg as its chip, reads as one contiguous block
+        "tab.new": "#6f6f6f",                # 0.3.25: the trailing + chip — dimmer than an idle tab, a quiet affordance, not a tab itself
         "tab.sep": "#3a3a3a",                # the │ between tabs — dim, consistent, exactly one per pair, none at the ends
         "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
         "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
@@ -1101,6 +1184,12 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     # nothing about which binding ultimately fires.
     app.timeoutlen = 0.2
     configure_mouse_modes(app.output)   # ?1002 button-event, never ?1003 any-event
+    # Part D: ANY keypress disarms every tab's busy-close confirm, same
+    # contract as a tab switch above -- prompt_toolkit's own KeyProcessor
+    # fires `after_key_press` for every key it resolves, key binding or
+    # plain buffer insert alike, so this is the one universal hook that
+    # needs no per-binding wiring at all.
+    app.key_processor.after_key_press += lambda _e: disarm_all(slots)
 
     async def _ticker():
         # animate the spinner + tick the elapsed clock while a turn runs.

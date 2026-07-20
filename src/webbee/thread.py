@@ -66,7 +66,7 @@ async def fetch_recent_thread(cfg, token_provider, session_id: str, *, client=No
 
 
 async def fetch_pending_steer(cfg, token_provider, session_id: str, *, client=None,
-                              mode: str = "") -> dict:
+                              mode: str = "", label: str = "") -> dict:
     """Drain this user's pending-steer state (idle-steer pickup, liveness v2
     §B + full-queue-layer mode adoption) -- the /thread endpoint's sibling,
     same auth. Returns the gateway payload verbatim:
@@ -92,13 +92,26 @@ async def fetch_pending_steer(cfg, token_provider, session_id: str, *, client=No
     mode instead of guessing. Omitted entirely when "" (default), so an
     older gateway that doesn't expect the query param sees the exact same
     request as before this feature.
+    `label=` (W4c T3, label sync): the polled session's CURRENT tab title
+    (auto-labeled or /rename'd), urlencoded and appended as `&label={label}`
+    (or `?label=` alone when `mode` is absent) -- the gateway stores it under
+    the SAME `imperal:coding_remote:label:{session_id}` key `/notify` already
+    writes to, so the panel/TG picks up a self-named or renamed tab within
+    one poll tick. Omitted entirely when "" (default), same back-compat
+    posture as `mode`.
     Non-swallowing like fetch_recent_thread above: the poller (webbee.steer)
     wraps each tick in its own try/except. `client=` reuses the repl's shared
     keep-alive client; None keeps the per-call client."""
     token = await token_provider()
     path = f"/v1/agent/sessions/{session_id}/pending-steer"
+    params = []
     if mode:
-        path += f"?mode={mode}"
+        params.append(f"mode={mode}")
+    if label:
+        from urllib.parse import quote
+        params.append(f"label={quote(label)}")
+    if params:
+        path += "?" + "&".join(params)
     r = await _request(cfg, client, "GET", path, token=token)
     return r.json() or {}
 

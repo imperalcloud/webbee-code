@@ -1003,6 +1003,22 @@ def test_steer_poller_gets_a_mode_getter_reading_the_first_session_slots_live_mo
     assert captured["mode_getter"]() == "plan"
 
 
+def test_steer_poller_gets_a_label_getter_reading_the_slots_live_label(monkeypatch):
+    # W4c T3: `_spawn_slot_poller` threads a label_getter bound to THIS
+    # slot -- read fresh, so an auto-label (or /rename) made after boot is
+    # already visible the next time the poller calls it.
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, workspace, label_getter=None, **kw):
+        captured["label_getter"] = label_getter
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+    sink, agent = _run(read_line=_lines("fix the login bug", "/exit"), agent=SurfaceAgent())
+    assert captured["label_getter"] is not None
+    assert captured["label_getter"]() == "fix the login bug"
+
+
 def test_steer_poller_once_mode_polls_coding_session(monkeypatch):
     import webbee.steer as SP
     captured = {}
@@ -1532,6 +1548,98 @@ def test_make_session_slot_first_true_keeps_slot_id_empty():
     assert slot.agent.slot_id == ""
 
 
+# ── 0.3.25 Part C: per-repo instance lock wiring in _make_session_slot ─────
+
+class _FakeLock:
+    def __init__(self, held):
+        self.held = held
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_first_true_primary_lock_keeps_legacy_slot_id_and_rides_on_the_slot(monkeypatch):
+    import webbee.instance_lock as IL
+    lock = _FakeLock(held=False)
+    monkeypatch.setattr(IL, "acquire", lambda repo_key: lock)
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=True)
+
+    slot = asyncio.run(_drive())
+    assert slot.slot_id == ""                # primary keeps the legacy id
+    assert slot.instance_lock is lock         # rides on the slot for later teardown
+    assert "already running" not in slot.pane.dump()
+
+
+def test_first_true_secondary_lock_mints_slot_id_and_notes():
+    async def _drive(lock):
+        import webbee.instance_lock as IL
+        orig = IL.acquire
+        IL.acquire = lambda repo_key: lock
+        try:
+            return await _make_session_slot(
+                _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+                resources=WorkspaceResources(), shared_client=None,
+                agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                intel_factory=lambda cfg, ws: _NoopIntel(),
+                shadow_factory=lambda cfg, ws: None, first=True)
+        finally:
+            IL.acquire = orig
+
+    slot = asyncio.run(_drive(_FakeLock(held=True)))
+    assert slot.slot_id and len(slot.slot_id) == 6   # minted, same as a later tab
+    assert all(c in "0123456789abcdef" for c in slot.slot_id)
+    assert slot.agent.slot_id == slot.slot_id
+    dump = slot.pane.dump()
+    assert "another Webbee is already running" in dump and "parallel session" in dump
+
+
+def test_first_false_never_touches_the_instance_lock_at_all(monkeypatch):
+    import webbee.instance_lock as IL
+    calls = []
+    monkeypatch.setattr(IL, "acquire", lambda repo_key: calls.append(repo_key) or _FakeLock(False))
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, "/tmp", "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    slot = asyncio.run(_drive())
+    assert calls == []                         # acquire() never called for a later tab
+    assert getattr(slot, "instance_lock", None) is None
+
+
+def test_explicit_slot_id_survives_a_secondary_lock_unchanged(monkeypatch):
+    # A caller-supplied slot_id (the deterministic-test DI seam) must never
+    # be overridden by the lock's own verdict -- only an AUTO-minted id
+    # (the real production path) is subject to it.
+    import webbee.instance_lock as IL
+    monkeypatch.setattr(IL, "acquire", lambda repo_key: _FakeLock(held=True))
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=True, slot_id="pinned")
+
+    slot = asyncio.run(_drive())
+    assert slot.slot_id == "pinned"
+    # the secondary note still lands -- only the id-minting is skipped
+    assert "already running" in slot.pane.dump()
+
+
 def test_make_session_slot_first_false_mints_a_short_hex_slot_id():
     async def _drive():
         return await _make_session_slot(
@@ -2005,6 +2113,81 @@ def test_tabs_list_note_contains_one_line_per_tab_with_glyphs():
     assert len(lines) == 3                    # header + 2 tabs
     assert lines[1].startswith("●0")           # back on the original slot
     assert lines[2].startswith("○1")
+
+
+# ── W4c T3: self-naming tabs -- auto-label from the first task ─────────────
+
+def test_first_task_auto_labels_the_tab():
+    from webbee.slots import auto_label
+    text = "please help me fix the failing auth test suite"
+    sink, agent = _run(read_line=_lines(text, "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert auto_label(text) in listing
+    assert text not in listing              # genuinely shortened, never verbatim
+
+
+def test_short_first_task_becomes_the_label_verbatim():
+    text = "fix the bug"
+    sink, agent = _run(read_line=_lines(text, "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert text in listing
+
+
+def test_second_task_never_relabels_an_already_auto_labeled_tab():
+    from webbee.slots import auto_label
+    sink, agent = _run(read_line=_lines("first task about the auth flow",
+                                        "second completely unrelated topic",
+                                        "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert auto_label("first task about the auth flow") in listing
+    assert "unrelated" not in listing
+
+
+def test_slash_command_first_line_never_counts_as_the_first_task():
+    # /status is fully handled by dispatch and never reaches the agent turn
+    # path at all -- the FIRST genuine task line is the one that labels.
+    text = "fix the thing"
+    sink, agent = _run(read_line=_lines("/status", text, "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert text in listing
+
+
+# ── /rename — a manual rename always wins over auto-label ──────────────────
+
+def test_rename_command_sets_the_slots_label():
+    sink, agent = _run(read_line=_lines("/rename billing fix", "/tabs", "/exit"))
+    assert any("tab renamed" in n and "billing fix" in n for n in sink.notes)
+    listing = sink.notes[-1]
+    assert "billing fix" in listing
+
+
+def test_rename_with_no_arg_shows_usage():
+    sink, agent = _run(read_line=_lines("/rename", "/exit"))
+    assert any("Usage: /rename" in n for n in sink.notes)
+
+
+def test_rename_before_first_task_blocks_auto_label():
+    sink, agent = _run(read_line=_lines("/rename billing", "unrelated task text here",
+                                        "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert "billing" in listing
+    assert "unrelated" not in listing
+
+
+def test_rename_after_first_task_overrides_the_auto_label():
+    from webbee.slots import auto_label
+    first = "please help me fix the failing auth suite"
+    sink, agent = _run(read_line=_lines(first, "/rename billing", "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert "billing" in listing
+    assert auto_label(first) not in listing
+
+
+def test_rename_sanitizes_and_caps_the_name():
+    sink, agent = _run(read_line=_lines("/rename " + "x" * 40, "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert ("x" * 32) in listing
+    assert ("x" * 33) not in listing
 
 
 # ── W4a Task 7: multi-tab edges -- exit dump, cancellation ───────────────────

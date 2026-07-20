@@ -16,3 +16,14 @@ import pytest
 def _isolate_mode_cache(tmp_path, monkeypatch):
     import webbee.mode_store as mode_store
     monkeypatch.setattr(mode_store, "_CACHE_DIR", str(tmp_path / "webbee-mode-cache"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_instance_lock_cache(tmp_path, monkeypatch):
+    """0.3.25 Part C: the per-repo instance lock writes a real flock'd file
+    under `~/.cache/webbee/instance-{repo_key}.lock` -- same rationale as
+    `_isolate_mode_cache` above (never touch the developer's REAL cache, and
+    keep every test's lock file hermetic to ITS OWN tmp dir so two unrelated
+    tests can never see each other's lock as "already held")."""
+    import webbee.instance_lock as instance_lock
+    monkeypatch.setattr(instance_lock, "_CACHE_DIR", str(tmp_path / "webbee-instance-lock-cache"))

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.25
+
+Tabs name themselves after your first message, a + button opens a tab like
+a browser, the tab bar got breathing room and a proper bar background, and
+stray terminal codes can't pollute the input anymore.
+
+- A session tab now renames itself from your first message — like a
+  browser page title — so you can tell tabs apart at a glance instead of
+  seeing the same folder name everywhere. `/rename <name>` sets your own
+  title any time and it sticks (auto-naming never overrides it).
+- A new + button at the end of the tab bar opens a new tab, just like a
+  browser — no more remembering the keyboard shortcut.
+- The tab bar now sits on its own subtle bar background with a blank row of
+  breathing room below it, separating it clearly from your conversation.
+- Clicking the ✕ or the + button now only reacts to a precise click on the
+  glyph itself — a near-miss next to it no longer accidentally closes a tab.
+- Closing a tab that's still busy now asks you to confirm first (click ✕
+  again) — the server-side run keeps going either way, this just protects
+  against an accidental close.
+- Opening the same project in two separate windows no longer makes them
+  freeze each other — the second window notices and starts its own
+  parallel session automatically.
+- Stray terminal focus-tracking codes (from switching windows or tmux
+  panes) can no longer leak into what you're typing.
+
 ## 0.3.24
 
 The tab bar got a real design: the active tab is a solid highlighted chip,

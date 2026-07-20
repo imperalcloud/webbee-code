@@ -578,7 +578,7 @@ def test_tab_bar_close_fragment_with_armed_pane_drag_completes_copy_not_close(mo
     forward = lambda ev: pane.forward_mouse(ev, clamp="top")   # noqa: E731 -- the REAL production seam
     frags = tab_fragments(slots, on_switch=switch_hits.append, on_close=close_hits.append,
                           forward=forward)
-    close_alpha = frags[3][2]                          # the tab's own ✕ fragment's handler
+    close_alpha = frags[4][2]                          # the tab's own ✕ GLYPH fragment's handler (pad, glyph, pad)
 
     top = pane._offset
     up = MouseEvent(position=Point(1, 0), event_type=MouseEventType.MOUSE_UP,
@@ -615,7 +615,7 @@ def test_tab_bar_close_fragment_with_no_armed_drag_still_closes_as_before():
     forward = lambda ev: pane.forward_mouse(ev, clamp="top")   # noqa: E731
     frags = tab_fragments(slots, on_switch=lambda i: None, on_close=close_hits.append,
                           forward=forward)
-    close_alpha = frags[3][2]
+    close_alpha = frags[4][2]
     up = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
                     button=MouseButton.LEFT, modifiers=frozenset())
     assert close_alpha(up) is None
@@ -1812,6 +1812,49 @@ def test_configure_mouse_modes_skips_outputs_without_write_raw():
     p = _Plain()
     configure_mouse_modes(p)                 # must not raise, must not add attrs
     assert not hasattr(p, "enable_mouse_support")
+
+
+# ---- focus-report hardening (0.3.25) ---------------------------------------
+# A tmux pane switch / OS window-focus change can leak DEC focus-in/out
+# reports ("\x1b[I" / "\x1b[O") into stdin, same split-sequence hazard as the
+# mouse residue above -- configure_mouse_modes now explicitly disables ?1004
+# in BOTH paths, and the scrubber drops any leaked report that slips through.
+
+def test_configure_mouse_modes_disables_focus_reporting_on_enable():
+    from webbee.tui import configure_mouse_modes
+    out = _FakeOutput()
+    configure_mouse_modes(out)
+    out.enable_mouse_support()
+    assert "\x1b[?1004l" in out.raw
+
+
+def test_configure_mouse_modes_disables_focus_reporting_on_disable():
+    from webbee.tui import configure_mouse_modes
+    out = _FakeOutput()
+    configure_mouse_modes(out)
+    out.disable_mouse_support()
+    assert "\x1b[?1004l" in out.raw
+
+
+def test_scrub_mouse_residue_removes_stray_focus_reports():
+    from webbee.tui import scrub_mouse_residue
+    out = scrub_mouse_residue("fix\x1b[Ithe\x1b[Otests")
+    assert out == "fixthetests"
+
+
+def test_scrub_mouse_residue_focus_report_requires_esc_prefix():
+    # A bare "[I"/"[O" with no leading ESC is ordinary text (e.g. a citation
+    # marker) -- never eaten, only the genuine ESC-prefixed report is.
+    from webbee.tui import scrub_mouse_residue
+    text = "see [I] and [O] in the docs"
+    assert scrub_mouse_residue(text) == text
+
+
+def test_scrub_mouse_residue_removes_both_mouse_and_focus_garbage_together():
+    from webbee.tui import scrub_mouse_residue
+    out = scrub_mouse_residue("roo35;6;42M\x1b[Itail\x1b[O")
+    assert "42M" not in out and "\x1b[I" not in out and "\x1b[O" not in out
+    assert out.startswith("roo")
 
 
 class _FakeBuf:
@@ -4148,6 +4191,67 @@ def test_tab_bar_window_is_root_hsplit_first_child():
     asyncio.run(scenario())
 
 
+# ── 0.3.25 (Valentin, live screenshot review): tab bar polish ───────────────
+
+def test_tab_bar_carries_the_tabbar_background_style():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        slots = mk_slots(pane=tui.OutputPane(width=80), sink=_idle_sink())
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                bar = get_app().layout.container.children[0]
+                assert bar.style == "class:tabbar"
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_root_layout_has_a_bare_spacer_row_right_after_the_tab_bar():
+    # ONE blank breathing-room row between the tab bar and the transcript --
+    # a plain Window (no style at all, never a ConditionalContainer -- it's
+    # unconditional, unlike the todo/queue panels further down).
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.containers import ConditionalContainer, Window
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        slots = mk_slots(pane=tui.OutputPane(width=80), sink=_idle_sink())
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                children = get_app().layout.container.children
+                spacer = children[1]
+                assert isinstance(spacer, Window)
+                assert not isinstance(spacer, ConditionalContainer)
+                assert spacer.style == ""            # no style at all -- bare terminal bg
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 # ── W4a Task 5: tab keys + commands + lifecycle ─────────────────────────────
 # Pure decision helpers first (same DI-testing philosophy as _escape_action),
 # then end-to-end dock coverage for Ctrl-T, Alt+N, Ctrl-W, Ctrl-D and the
@@ -4617,9 +4721,10 @@ def test_tab_bar_close_click_closes_the_clicked_background_tab_not_the_active_on
                 await asyncio.sleep(0.05)
                 bar = get_app().layout.container.children[0]
                 frags = bar.content.text()
-                # frags: [home, sep, a-body, a-CLOSE, sep, b-body, b-close]
-                close_a = frags[3]
-                assert close_a[1] == " ✕ "
+                # frags: [home, sep, a-body, a-pad, a-GLYPH, a-pad, sep,
+                #         b-body, b-pad, b-GLYPH, b-pad, sep, +-pad, +, +-pad]
+                close_a = frags[4]
+                assert close_a[1] == "✕"
                 ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
                                 button=MouseButton.LEFT, modifiers=frozenset())
                 close_a[2](ev)                                 # click ✕ on the BACKGROUND tab a
@@ -4669,8 +4774,8 @@ def test_tab_bar_close_click_closes_the_active_tab_when_that_is_the_one_clicked(
                 await asyncio.sleep(0.05)
                 bar = get_app().layout.container.children[0]
                 frags = bar.content.text()
-                close_b = frags[6]
-                assert close_b[1] == " ✕ "
+                close_b = frags[9]
+                assert close_b[1] == "✕"
                 ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
                                 button=MouseButton.LEFT, modifiers=frozenset())
                 close_b[2](ev)                                 # click ✕ on the ACTIVE tab b
@@ -4678,6 +4783,245 @@ def test_tab_bar_close_click_closes_the_active_tab_when_that_is_the_one_clicked(
                 assert len(slots.slots) == 2                   # b is gone
                 assert slots.active_idx == 1                   # landed on the neighbor (a)
                 assert notes_a and "server-side" in notes_a[0]  # same close-note behavior as before
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+# ── 0.3.25 Part D: busy-close confirm (click ✕ on a running tab) ───────────
+
+def test_close_click_on_a_busy_tab_arms_instead_of_closing():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        notes = []
+        session = SessionSlot(kind="session", workspace=".", label="alpha",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(note=notes.append), agent=None)
+        session.turn["task"] = _FakeTask()   # a live turn -- done() is always False
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 1
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                bar = get_app().layout.container.children[0]
+                close_glyph = bar.content.text()[4]
+                assert close_glyph[1] == "✕"
+                ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                                button=MouseButton.LEFT, modifiers=frozenset())
+                close_glyph[2](ev)
+                await asyncio.sleep(0.02)
+                assert len(slots.slots) == 2            # NOT closed
+                assert session.close_armed is True
+                assert any("busy" in n for n in notes)
+                # rendered as the armed "✕?" glyph now
+                armed_glyph = bar.content.text()[4]
+                assert armed_glyph[1] == "✕?"
+                session.turn["task"] = None             # let a real close through below
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_second_close_click_on_an_armed_busy_tab_actually_closes():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="alpha",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        session.close_armed = True   # already armed by an earlier click
+        session.turn["task"] = _FakeTask()
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 1
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                bar = get_app().layout.container.children[0]
+                armed_glyph = bar.content.text()[4]
+                assert armed_glyph[1] == "✕?"
+                ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                                button=MouseButton.LEFT, modifiers=frozenset())
+                armed_glyph[2](ev)
+                await asyncio.sleep(0.02)
+                assert len(slots.slots) == 1             # closed for real this time
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_switching_tabs_disarms_a_busy_close_confirm():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="alpha",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        session.close_armed = True
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 1
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x14")     # Ctrl-T -- jumps to Home, a genuine switch
+                await asyncio.sleep(0.02)
+                assert session.close_armed is False
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_any_keypress_disarms_a_busy_close_confirm():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="alpha",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        session.close_armed = True
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 1
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("x")        # an ordinary typed character
+                await asyncio.sleep(0.02)
+                assert session.close_armed is False
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+# ── 0.3.25: the tab bar's "+" chip opens a new tab like a browser ──────────
+
+def test_new_chip_click_fires_the_wired_on_new_callback():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        slots = mk_slots(pane=tui.OutputPane(width=80), sink=_idle_sink())
+        calls = []
+
+        async def on_new():
+            calls.append(1)
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None, on_new=on_new))
+                await asyncio.sleep(0.05)
+                bar = get_app().layout.container.children[0]
+                new_glyph = bar.content.text()[-2]
+                assert new_glyph[1] == "+"
+                ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                                button=MouseButton.LEFT, modifiers=frozenset())
+                new_glyph[2](ev)
+                await asyncio.sleep(0.02)
+                assert calls == [1]
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_new_chip_click_with_no_on_new_wired_is_a_harmless_noop_in_the_dock():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        slots = mk_slots(pane=tui.OutputPane(width=80), sink=_idle_sink())
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))   # no on_new
+                await asyncio.sleep(0.05)
+                bar = get_app().layout.container.children[0]
+                new_glyph = bar.content.text()[-2]
+                ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                                button=MouseButton.LEFT, modifiers=frozenset())
+                assert new_glyph[2](ev) is None   # consumed, never raises
                 pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
