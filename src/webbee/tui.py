@@ -21,6 +21,7 @@ import asyncio
 import re
 from collections import deque
 
+from webbee import sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
@@ -68,6 +69,22 @@ def configure_mouse_modes(output) -> None:
 
     output.enable_mouse_support = _enable
     output.disable_mouse_support = _disable
+
+
+def input_rows(text: str, cols: int, cap: int) -> int:
+    """PURE row-wrap estimator behind `_input_height` (module-level so tests
+    drive it directly with an injected size, mirroring repl._gate_busy).
+    Same wrap math as before the W2 proportional-sizing pass: `cols` is the
+    usable wrap width (frame + prompt already subtracted by the caller,
+    floored at 10 so a tiny/misreported width never collapses every line to
+    1-char rows); `cap` bounds growth (was: hardcoded 10, now the caller's
+    live `sizing.input_height_cap(rows)` — the box may grow to at most a
+    PROPORTION of the screen, not a fixed character count)."""
+    if not text:
+        return 1
+    cols = max(10, cols)
+    rows = sum(max(1, -(-len(ln) // cols)) for ln in text.split("\n"))
+    return min(cap, max(1, rows))
 
 
 def next_mode(mode: str) -> str:
@@ -379,7 +396,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     Returns True on clean exit; False if prompt_toolkit is unavailable (caller
     uses the plain fallback loop)."""
     try:
-        from prompt_toolkit.application import Application, get_app
+        from prompt_toolkit.application import Application, get_app, get_app_or_none
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
@@ -545,17 +562,20 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
                              queued=len(pending) + len(remote_pending),
                              reconnecting=st.get("reconnecting", 0))
 
-    # Dynamic height: EXACTLY the rows the wrapped input needs (1→10), so the box
-    # grows as you type and shrinks back — never a fixed huge block. Enter still
-    # submits (multiline=False); the pane above absorbs all remaining space.
+    # Dynamic height: EXACTLY the rows the wrapped input needs (1→cap), so the
+    # box grows as you type and shrinks back — never a fixed huge block. Enter
+    # still submits (multiline=False); the pane above absorbs all remaining
+    # space. Live size (W2 front-2, proportions not pixels): the wrap width
+    # comes from the input window's OWN render_info once it has rendered at
+    # least once (the true columns inside the frame, after the "❯ " prompt
+    # and any margin) — `cols - 4` is the pre-first-render/headless fallback
+    # the old shutil-based estimate used; the cap is a PROPORTION of the
+    # live rows (sizing.input_height_cap), not a fixed 10.
     def _input_height():
-        import shutil
-        text = buf.text
-        cols = max(10, shutil.get_terminal_size((100, 24)).columns - 4)  # frame + "❯ "
-        if not text:
-            return 1
-        rows = sum(max(1, -(-len(ln) // cols)) for ln in text.split("\n"))
-        return min(10, max(1, rows))
+        cols, rows = sizing.get_size(get_app_or_none())
+        ri = getattr(input_win, "render_info", None)
+        width = getattr(ri, "window_width", None) if ri is not None else None
+        return input_rows(buf.text, width or (cols - 4), sizing.input_height_cap(rows))
 
     def _prompt_fragments():
         # The ❯ takes the CURRENT mode's colour (same classes the toolbar uses)
@@ -582,6 +602,14 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     qp_ui = {"collapsed": False}
     tp_ui = {"collapsed": False}
 
+    def _panel_size():
+        """(cols, item-row cap) shared by both panels' fragment builders AND
+        their ConditionalContainer height lambdas — ONE size read so the
+        rendered rows and the reserved height can never disagree (W2
+        front-2: proportions, not pixels — was the fixed QP/TP_MAX_ITEMS)."""
+        cols, rows = sizing.get_size(get_app_or_none())
+        return cols, sizing.panel_cap(rows)
+
     def _toggle_queue():
         qp_ui["collapsed"] = not qp_ui["collapsed"]
         get_app().invalidate()
@@ -594,11 +622,10 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         # Live like _toolbar: re-invoked every redraw, reads the shared deque
         # + the sink-owned remote list (pull serves the LOCAL rows only —
         # remote rows are display-only by construction in queue_fragments).
-        import shutil
-        return queue_fragments(pending, pull=_pull_at,
-                               width=shutil.get_terminal_size((100, 24)).columns,
-                               remote=remote_pending,
-                               collapsed=qp_ui["collapsed"], toggle=_toggle_queue)
+        cols, cap = _panel_size()
+        return queue_fragments(pending, pull=_pull_at, width=cols,
+                               remote=remote_pending, collapsed=qp_ui["collapsed"],
+                               toggle=_toggle_queue, max_items=cap)
 
     # The LIVE pending-queue panel — pinned BETWEEN the output pane and the
     # input box; zero rows (hidden) while the queue is empty, so the empty
@@ -606,16 +633,17 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # focus on the input even when a row is clicked.
     queue_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_queue_fragments, focusable=False),
-                       height=lambda: queue_height(pending, remote_pending, qp_ui["collapsed"]),
+                       height=lambda: queue_height(pending, remote_pending, qp_ui["collapsed"],
+                                                   max_items=_panel_size()[1]),
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(pending) or bool(remote_pending)))
 
     def _todo_fragments():
         # Live like _queue_fragments: re-invoked every redraw, reads the
         # sink-owned current_todos list in place (todo frames mutate it).
-        import shutil
-        return todo_fragments(todos, width=shutil.get_terminal_size((100, 24)).columns,
-                              collapsed=tp_ui["collapsed"], toggle=_toggle_todos)
+        cols, cap = _panel_size()
+        return todo_fragments(todos, width=cols, collapsed=tp_ui["collapsed"],
+                              toggle=_toggle_todos, max_items=cap)
 
     # The STICKY todo panel — pinned ABOVE the queue panel (the queue stays
     # adjacent to the input; its bottom row is the ↑-pullable newest). Same
@@ -623,7 +651,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # is empty, focusable=False keeps focus on the input.
     todo_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_todo_fragments, focusable=False),
-                       height=lambda: todo_height(todos, tp_ui["collapsed"]),
+                       height=lambda: todo_height(todos, tp_ui["collapsed"],
+                                                  max_items=_panel_size()[1]),
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(todos)))
 

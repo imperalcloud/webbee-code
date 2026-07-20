@@ -452,6 +452,36 @@ def test_ticker_width_watch_swallows_reflow_error(monkeypatch):
     _width_watch(_BrokenPane(100), object())   # must not raise
 
 
+# ── W2 Task 5: input_rows — the pure estimator behind _input_height ─────────
+# Extracted like repl._gate_busy: module-level, dependency-injected (cols/cap
+# passed in), so a test drives the exact wrap math without a live app or
+# terminal. The closure (_input_height) feeds it sizing.get_size()'s rows via
+# sizing.input_height_cap — proportional, not the old hardcoded 10.
+
+def test_input_rows_pure_wrap_math():
+    from webbee.tui import input_rows
+    assert input_rows("", 40, 10) == 1                 # empty draft is always 1 row
+    assert input_rows("short", 40, 10) == 1
+    assert input_rows("x" * 90, 40, 10) == 3            # ceil(90/40) == 3
+    assert input_rows("a\nb\nc", 40, 10) == 3           # one row per line, no wrap needed
+
+
+def test_input_rows_uses_the_injected_cap_not_a_fixed_ten():
+    """rows=60 (tall terminal) -> cap 10 (ceiling); rows=24 -> cap 7 — the
+    SAME pure estimator, only the injected cap changes."""
+    from webbee.sizing import input_height_cap
+    from webbee.tui import input_rows
+    long_draft = "\n".join(["x" * 200] * 20)   # far more wrapped rows than any cap allows
+    assert input_height_cap(60) == 10 and input_height_cap(24) == 7
+    assert input_rows(long_draft, 40, input_height_cap(60)) == 10
+    assert input_rows(long_draft, 40, input_height_cap(24)) == 7
+
+
+def test_input_rows_floors_a_tiny_or_zero_width():
+    from webbee.tui import input_rows
+    assert input_rows("x" * 30, 0, 10) == 3             # cols floored at 10 -> ceil(30/10)
+
+
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
 # Previously Ctrl-C only cancelled the local asyncio task while the cloud
 # brain kept running server-side; Esc did nothing while busy. Both key
@@ -1338,6 +1368,31 @@ def test_panel_height_is_header_plus_rows_capped():
     assert queue_height(deque(["a"])) == 2                       # header + 1
     assert queue_height(deque(["a"] * QP_MAX_ITEMS)) == 6        # header + 5
     assert queue_height(deque(["a"] * 9)) == 7                   # header + 5 + more-row
+
+
+# ── W2 Task 5: proportional chrome — max_items overrides the fixed cap ─────
+# The dock feeds sizing.panel_cap(rows) through this param so a tall terminal
+# shows more queued rows and a short one shows fewer; QP_MAX_ITEMS stays the
+# DEFAULT for every direct/test caller that doesn't pass one.
+
+def test_queue_fragments_respects_max_items_param():
+    items = [f"item{i}" for i in range(9)]
+    frags = queue_fragments(deque(items), max_items=7)
+    text = _panel_text(frags)
+    assert "⋯ queued (9)" in text                        # header keeps the TRUE depth
+    assert "… +2 more" in text                           # only the oldest 2 hide now
+    assert all(t in text for t in items[2:])             # newest 7 shown
+    assert all(t not in text for t in items[:2])
+    # default (QP_MAX_ITEMS=5) is UNCHANGED when max_items isn't passed
+    default_text = _panel_text(queue_fragments(deque(items)))
+    assert "… +4 more" in default_text
+    assert all(t in default_text for t in items[4:])
+
+
+def test_queue_height_respects_max_items_param():
+    items = ["a"] * 9
+    assert queue_height(deque(items), max_items=7) == 1 + 7 + 1  # header + 7 + more-row
+    assert queue_height(deque(items)) == 1 + QP_MAX_ITEMS + 1    # default untouched
 
 
 def test_panel_item_is_one_truncated_row():

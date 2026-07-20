@@ -217,6 +217,34 @@ def test_welcome_signed_out_minimal():
     assert not NO_CYRILLIC.search(out)   # English UI only
 
 
+# ── W2 Task 5: replay-safe centered splash (Align, not baked .center(w)) ────
+# The old welcome() baked `.center(w)` padding into literal leading spaces at
+# BOOT width; a resize replay (OutputPane.reflow re-prints every retained
+# record at the NEW width) left that padding frozen — the splash went
+# off-center. Align.center measures + pads fresh at PRINT time, so a replay
+# at a different width re-centers correctly.
+
+def test_welcome_reflow_recenters_the_identity_line():
+    import re as _re
+    from webbee.account import Account
+    from webbee.output_pane import OutputPane
+    sgr = _re.compile(r"\x1b\[[0-9;]*m")
+    pane = OutputPane(width=100)
+    s = RichSink(console=pane.console, live_enabled=False,
+                input_fn=lambda p: "", clock=lambda: 0.0, on_output=pane.notify)
+    s.welcome(Account(signed_in=True, email="v@imperal.io"), "/x", "terminal")
+
+    pane.reflow(60)
+
+    plain = [sgr.sub("", ln) for ln in pane._all_lines()]
+    needle = "ICNLI AI Cloud OS · Agent"
+    target = next(ln for ln in plain if needle in ln)
+    leading = len(target) - len(target.lstrip(" "))
+    expected = (60 - len(needle)) // 2
+    assert abs(leading - expected) <= 1                # centered within 60, NOT the old 100
+    assert all(len(ln) <= 60 for ln in plain)           # no line overflows the new width
+
+
 def test_session_credits_accumulates_across_turns():
     s = _sink()
     s.begin_turn(); s.usage(100, 0.01); s.end_turn("a")

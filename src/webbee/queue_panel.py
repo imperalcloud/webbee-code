@@ -24,15 +24,17 @@ def one_line(text: str, width: int) -> str:
     return t
 
 
-def queue_height(pending, remote=None, collapsed=False) -> int:
+def queue_height(pending, remote=None, collapsed=False, max_items=QP_MAX_ITEMS) -> int:
     """PURE. Rows the panel needs: 1 header + one per SHOWN item + one
-    `… +K more` row when a queue is deeper than QP_MAX_ITEMS (each of the
+    `… +K more` row when a queue is deeper than `max_items` (each of the
     two sections — remote rows and local rows — caps independently). 0 when
     both are empty (the ConditionalContainer hides the panel then anyway).
     `collapsed=True` (Task 11 click-to-collapse) always costs exactly 1 row
-    when there's data — screen space back on demand. The cap keeps the
-    output pane dominant on small terminals; the toolbar's `⋯N queued`
-    segment stays the truth-teller for the full depth."""
+    when there's data — screen space back on demand. `max_items` defaults to
+    QP_MAX_ITEMS but the dock overrides it with a LIVE, terminal-proportional
+    cap (sizing.panel_cap) so a huge screen shows more and a tiny one shows
+    less — the toolbar's `⋯N queued` segment stays the truth-teller for the
+    full depth either way."""
     n = len(pending)
     r = len(remote or ())
     if not n and not r:
@@ -41,9 +43,9 @@ def queue_height(pending, remote=None, collapsed=False) -> int:
         return 1
     rows = 1
     if r:
-        rows += min(r, QP_MAX_ITEMS) + (1 if r > QP_MAX_ITEMS else 0)
+        rows += min(r, max_items) + (1 if r > max_items else 0)
     if n:
-        rows += min(n, QP_MAX_ITEMS) + (1 if n > QP_MAX_ITEMS else 0)
+        rows += min(n, max_items) + (1 if n > max_items else 0)
     return rows
 
 
@@ -94,7 +96,7 @@ def _toggle_handler(toggle):
 
 
 def queue_fragments(pending, pull=None, width: int = 0, remote=None,
-                     collapsed=False, toggle=None):
+                     collapsed=False, toggle=None, max_items=QP_MAX_ITEMS):
     """PURE builder: the panel as prompt_toolkit formatted text, re-invoked
     every redraw (same live mechanics as the toolbar) so every queue
     add/edit/drain shows at once. Layout, top→bottom = drain order (FIFO —
@@ -103,7 +105,9 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
 
         ⋯ queued (N) · ↑ edit last · click to edit
         [telegram] remote item   ← remote rows ABOVE local (qp.remote)
-        … +K more            ← only when N > QP_MAX_ITEMS (the OLDEST hide)
+        … +K more            ← only when N > max_items (the OLDEST hide;
+                                defaults to QP_MAX_ITEMS, overridden by the
+                                dock with a live sizing.panel_cap(rows))
         older item           ← muted (qp.item)
         newest item          ← accent (qp.last)
 
@@ -137,7 +141,7 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
         return frags
     if n:
         frags.append(("class:qp.item", " · ↑ edit last · click to edit"))
-    rstart = max(0, len(rem) - QP_MAX_ITEMS)
+    rstart = max(0, len(rem) - max_items)
     if rstart:
         frags.append(("class:qp.remote", f"\n   … +{rstart} more"))
     for r in rem[rstart:]:
@@ -149,7 +153,7 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
         row = "\n   " + one_line(f"{mark}[{origin}] {r.get('text') or ''}",
                                  width - 4 if width > 0 else 0)
         frags.append(("class:qp.remote", row))
-    start = max(0, n - QP_MAX_ITEMS)
+    start = max(0, n - max_items)
     if start:
         frags.append(("class:qp.item", f"\n   … +{start} more"))
     for i in range(start, n):

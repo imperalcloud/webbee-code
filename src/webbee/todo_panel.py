@@ -29,7 +29,8 @@ def _rows(todos) -> list:
     return out
 
 
-def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None):
+def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None,
+                    max_items=TP_MAX_ITEMS):
     """PURE builder: the panel as prompt_toolkit formatted text, re-invoked
     every redraw (same live mechanics as the queue panel) so every todo_write
     republish shows at once. Layout, top→bottom = plan order:
@@ -39,10 +40,12 @@ def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None):
         ✓ finished item      ← green glyph, dim struck text
         ▶ current item       ← bold bee-yellow — NEVER hidden by the cap
         ○ pending item       ← muted
-        … +K more            ← pending overflow beyond TP_MAX_ITEMS
+        … +K more            ← pending overflow beyond max_items
 
     Counts derive from the items themselves (the kernel republishes the FULL
     list on every todo_write). Empty/malformed-only list → [] (panel hidden).
+    `max_items` defaults to TP_MAX_ITEMS but the dock overrides it with a
+    LIVE, terminal-proportional cap (sizing.panel_cap).
 
     `collapsed` (Task 11 click-to-collapse, mirrors queue_panel exactly) folds
     the whole panel down to ONE header row ending `▸`; `▾` when expanded.
@@ -61,17 +64,17 @@ def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None):
         return frags
     show = rows
     hidden_done = 0
-    if len(show) > TP_MAX_ITEMS:
+    if len(show) > max_items:
         # History compresses first: collapse the completed items into one
         # summary row so the live part of the plan keeps its rows.
         active = [r for r in show if r[0] != "completed"]
         hidden_done = len(show) - len(active)
         show = active
     extra = 0
-    if len(show) > TP_MAX_ITEMS:
-        cut = show[TP_MAX_ITEMS:]
+    if len(show) > max_items:
+        cut = show[max_items:]
         extra = len(cut)
-        show = show[:TP_MAX_ITEMS]
+        show = show[:max_items]
         cur = next((r for r in cut if r[0] == "in_progress"), None)
         if cur is not None:
             show[-1] = cur   # what's happening NOW is never hidden by the cap
@@ -91,14 +94,15 @@ def todo_fragments(todos, width: int = 0, collapsed=False, toggle=None):
     return frags
 
 
-def todo_height(todos, collapsed=False) -> int:
+def todo_height(todos, collapsed=False, max_items=TP_MAX_ITEMS) -> int:
     """PURE. Rows the panel needs — derived from the SAME fragments the panel
     renders (header line + one per newline), so height can never desync from
-    the visible rows. `collapsed` (Task 11) falls out of that same derivation:
-    a collapsed header fragment has no newline, so this naturally yields 1
-    when there's data. 0 when the list is empty (the ConditionalContainer
-    hides the panel then anyway)."""
-    frags = todo_fragments(todos, collapsed=collapsed)
+    the visible rows; `max_items` is forwarded to `todo_fragments` for
+    exactly that reason. `collapsed` (Task 11) falls out of that same
+    derivation: a collapsed header fragment has no newline, so this
+    naturally yields 1 when there's data. 0 when the list is empty (the
+    ConditionalContainer hides the panel then anyway)."""
+    frags = todo_fragments(todos, collapsed=collapsed, max_items=max_items)
     if not frags:
         return 0
     return 1 + sum(f[1].count("\n") for f in frags)

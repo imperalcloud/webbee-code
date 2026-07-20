@@ -2,6 +2,7 @@ import asyncio
 import re
 import time
 
+from rich.align import Align
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.padding import Padding
@@ -9,6 +10,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from webbee.banner_art import WEBBEE_CODE
+from webbee.sizing import trunc
 
 _GUTTER = 2   # left margin (cols) — the single consistent transcript gutter.
               # Chrome lines prefix a 2-space string ("  "); block renderables
@@ -174,22 +176,23 @@ class RichSink:
         (true, enforced claims only — see WELCOME_PRIVACY above), and one hint
         line to get going. Runs BEFORE the dock starts. Clears the screen ONLY
         in the non-pane path (the full-screen dock owns its own alternate
-        screen — clearing there would corrupt it)."""
+        screen — clearing there would corrupt it).
+
+        Every line is wrapped in `Align.center` (W2 front-2, replay-safe)
+        instead of a baked `.center(w)` string: the OLD approach froze the
+        BOOT width's padding into literal leading spaces, so a resize replay
+        (OutputPane.reflow re-prints every retained record at the NEW width)
+        left the splash off-center — Align re-centers on every replay because
+        it measures the renderable and pads fresh against the console's
+        width at PRINT time, not at construction time."""
         if self._on_output is None:
             self.console.clear()
-        w = self.console.width
-
-        def _center_block(text: str) -> str:
-            lines = text.splitlines()
-            bw = max((len(line) for line in lines), default=0)
-            pad = " " * max(0, (w - bw) // 2)
-            return "\n".join(pad + line for line in lines)
 
         self.console.print()
-        self.console.print(Text(_center_block(WEBBEE_CODE), style=f"bold {_BEE}"))
-        self.console.print(Text("🐝".center(w), style=f"bold {_BEE}"))
-        self.console.print(Text("ICNLI AI Cloud OS · Agent".center(w), style=f"bold {_ACCENT}"))
-        self.console.print(Text("·  i m p e r a l . i o  ·".center(w), style="dim"))
+        self.console.print(Align.center(Text(WEBBEE_CODE, style=f"bold {_BEE}")))
+        self.console.print(Align.center(Text("🐝", style=f"bold {_BEE}")))
+        self.console.print(Align.center(Text("ICNLI AI Cloud OS · Agent", style=f"bold {_ACCENT}")))
+        self.console.print(Align.center(Text("·  i m p e r a l . i o  ·", style="dim")))
         self.console.print()
         if account.signed_in:
             who = account.email or ""
@@ -199,16 +202,15 @@ class RichSink:
                 who += f" · {account.plan} plan"
                 if account.plan_status and account.plan_status != "active":
                     who += f" ({account.plan_status})"
-            label = "Signed in as "
-            pad = " " * max(0, (w - len(label) - len(who)) // 2)
-            self.console.print(Text.assemble((pad + label, "dim"), (who, "white")))
+            self.console.print(Align.center(
+                Text.assemble(("Signed in as ", "dim"), (who, "white"))))
         else:
-            self.console.print(Text("not signed in — /login".center(w), style="dim"))
+            self.console.print(Align.center(Text("not signed in — /login", style="dim")))
         self.console.print()
-        self.console.print(Text(WELCOME_PRIVACY.center(w), style="white"))
-        self.console.print(Text(WELCOME_PRIVACY_DETAIL.center(w), style="dim"))
+        self.console.print(Align.center(Text(WELCOME_PRIVACY, style="white")))
+        self.console.print(Align.center(Text(WELCOME_PRIVACY_DETAIL, style="dim")))
         self.console.print()
-        self.console.print(Text(WELCOME_HINT.center(w), style="dim"))
+        self.console.print(Align.center(Text(WELCOME_HINT, style="dim")))
         self.console.print()
         self._nudge()
 
@@ -492,23 +494,27 @@ class RichSink:
         self._tools += 1
         arg = args.get("path") or args.get("pattern") or args.get("command") or ""
         self._pending = (tool, str(arg))
-        self._current = f"{tool} {str(arg)[:40]}".strip()
+        w = self.console.width
+        self._current = f"{tool} {str(arg)[:trunc(w, 0.3, 40)]}".strip()
         self._nudge()  # the completed line is printed in tool_result
 
     def tool_result(self, tool: str, ok: bool, summary: str) -> None:
         # One calm dim line: icon + tool (+arg), then the ✓/✗ RIGHT NEXT TO the
         # action (not pinned to the far right), then a dim summary. Only the
-        # ✓/✗ carries colour — the rest recedes (dim).
+        # ✓/✗ carries colour — the rest recedes (dim). Truncation lengths are
+        # a PROPORTION of the live console width (W2 front-2), floored at the
+        # old hardcoded counts so a narrow terminal never sees an empty line.
         _tool, arg = self._pending if self._pending[0] else (tool, "")
         icon = _ICON.get(_tool, "⚡")
         mark = "✓" if ok else "✗"
+        w = self.console.width
         self.console.print(Text.assemble(
             ("  " + icon + " ", "dim"),
             (_clean(_tool), "dim"),
-            (("  " + _clean(arg)[:40]) if arg else "", "dim"),
+            (("  " + _clean(arg)[:trunc(w, 0.3, 40)]) if arg else "", "dim"),
             ("   ", ""),
             (mark + " ", "green" if ok else "red"),
-            (_clean(summary)[:50], "dim"),
+            (_clean(summary)[:trunc(w, 0.35, 50)], "dim"),
         ))
         self._pending = ("", "")
         self._nudge()
@@ -521,8 +527,9 @@ class RichSink:
         sync reader (tests / non-tty)."""
         label = _clean(f"{app_id}·{tool}" if app_id else tool)
         sal = _clean(_salient_arg(args))
+        w = self.console.width
         self.console.print(Text.assemble(("  ? approve ", "yellow"), (label, "dim"),
-                                          (("  " + sal[:60]) if sal else "", "dim")))
+                                          (("  " + sal[:trunc(w, 0.4, 60)]) if sal else "", "dim")))
         fut = self._arm_consent(label, sal)
         if fut is None:                       # non-tty / no running app
             raw = self._input("     ")

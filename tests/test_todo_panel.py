@@ -87,6 +87,28 @@ def test_height_always_matches_the_rendered_lines():
         assert todo_height(items) == _text(frags).count("\n") + 1
 
 
+# ── W2 Task 5: proportional chrome — max_items overrides the fixed cap ─────
+# The dock feeds sizing.panel_cap(rows) through this param so a tall terminal
+# shows more todo rows and a short one shows fewer; TP_MAX_ITEMS stays the
+# DEFAULT for every direct/test caller that doesn't pass one.
+
+def test_todo_fragments_respects_max_items_param():
+    items = [_t(f"p{i}") for i in range(9)]
+    text = _text(todo_fragments(items, max_items=7))
+    assert "… +2 more" in text                          # only the tail 2 hide now
+    assert all(f"p{i}" in text for i in range(7))       # first 7 (plan order) shown
+    assert "p7" not in text and "p8" not in text
+    # default (TP_MAX_ITEMS=6) is UNCHANGED when max_items isn't passed
+    default_text = _text(todo_fragments(items))
+    assert f"… +{9 - TP_MAX_ITEMS} more" in default_text
+
+
+def test_todo_height_respects_max_items_param():
+    items = [_t(f"p{i}") for i in range(9)]
+    assert todo_height(items, max_items=7) == _text(todo_fragments(items, max_items=7)).count("\n") + 1
+    assert todo_height(items) == _text(todo_fragments(items)).count("\n") + 1   # default untouched
+
+
 # ── W1 front-3b task 11: click-to-collapse (header toggles to one row) ──────
 
 def test_todo_collapsed_single_row_and_height():
