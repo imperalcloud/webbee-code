@@ -432,6 +432,19 @@ def _swap_history(buf, slot) -> None:
     buf.history = slot.history
 
 
+def _restore_draft(buf, slot) -> None:
+    """0.3.24 (per-tab drafts — the browser-tab model: each tab keeps its own
+    form state): `buf.reset()` must run FIRST (it clears the history-load
+    task state -- unchanged from before this fix), THEN the buffer's live
+    text/cursor are set from `slot`'s OWN stashed draft -- restoring exactly
+    what was mid-type in THIS tab the last time it was left, never another
+    tab's. `min(...)` guards a shrunk/replaced draft never leaving the
+    cursor past the end of the text it's now landing on."""
+    buf.reset()
+    buf.text = slot.draft
+    buf.cursor_position = min(slot.draft_cursor, len(buf.text))
+
+
 async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
                       home_input=None, cancel_slot=None, ui_hooks=None,
@@ -656,6 +669,12 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         slot = _a()
         text = _rewrap_pulled(slot.pulled, scrub_mouse_residue(buf.text))
         buf.reset()
+        # 0.3.24: a genuine Enter retires THIS slot's own stashed draft too
+        # -- otherwise the NEXT switch-away-then-back (nothing typed in
+        # between) would restore text that was already sent, resurrecting a
+        # message the user believes is long gone.
+        slot.draft = ""
+        slot.draft_cursor = 0
         cp = _sink_attr("consent_pending")
         if cp and cp():
             rc = _sink_attr("resolve_consent")
@@ -933,22 +952,28 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # it does, neither the history swap nor the redraw happen, so a
         # click on the active tab is a true no-op, never a crash. `prev`
         # captured BEFORE the switch (FIX7b) -- it's the slot we're LEAVING.
+        # 0.3.24: stashed UNCONDITIONALLY, before the switch even resolves --
+        # harmless on a no-op switch (prev IS the still-active slot, so this
+        # is just re-saving its own current text over itself).
         prev = slots.active()
+        prev.draft = buf.text
+        prev.draft_cursor = buf.cursor_position
         if slots.switch(idx):
-            _swap_history(buf, slots.active())
-            # FIX7b: a draft mid-type must NOT survive a switch (it belongs
-            # to the tab you were looking at, not the one you're switching
-            # into -- history load already re-points the buffer's recall
-            # list; the buffer's own live TEXT needs the same reset), and
-            # the LEAVING slot's own pulled-queue-item carry (↑ pull-to-edit,
-            # see _rewrap_pulled) must be dropped -- otherwise a stale
-            # steer_iid can ride along into a totally different slot's
-            # later resubmit (the kernel's dedup ring would then wrongly
-            # dedup a genuinely new message against a landed twin that was
-            # never even the SAME conversation).
-            buf.reset()
-            prev.pulled["text"] = ""
-            prev.pulled["iid"] = ""
+            entering = slots.active()
+            _swap_history(buf, entering)
+            # 0.3.24 (per-tab drafts, product decision -- was FIX7b's "drafts
+            # dropped on switch"): a draft mid-type belongs to the tab you
+            # typed it into, browser-tab style -- switching away no longer
+            # destroys it, it comes right back when you switch back to THIS
+            # tab (`_restore_draft`, which still runs the history-load
+            # `buf.reset()` first). The leaving slot's own pulled-queue-item
+            # carry (↑ pull-to-edit, see _rewrap_pulled) is no longer cleared
+            # here either -- it now travels WITH the draft on its own slot,
+            # so resubmitting it unedited after a round trip still dedups
+            # correctly against a landed twin; `_rewrap_pulled`'s one-shot
+            # consume (on the Enter that actually resubmits, in whichever
+            # slot is active then) is what retires it, not a switch.
+            _restore_draft(buf, entering)
             if on_switch is not None:
                 on_switch(idx)
             get_app().invalidate()
@@ -961,12 +986,14 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # FIX7d: the SURVIVOR (post-close active) slot's own history takes
         # over the shared input buffer, exactly like any other switch — a
         # closed tab's history dies with it, so the buffer must never keep
-        # pointing at it; the buffer's own draft is dropped too (same
-        # discipline as `_switch_to`'s FIX7b — a close ALSO changes which
-        # tab you're looking at).
+        # pointing at it. 0.3.24: the buffer now loads the SURVIVOR's own
+        # draft (same `_restore_draft` a plain switch uses) instead of a
+        # bare reset -- the closed tab's own draft is simply gone with it,
+        # nothing to stash (it's not coming back).
         if close_active(slots, cancel_slot):
-            _swap_history(buf, slots.active())
-            buf.reset()
+            survivor = slots.active()
+            _swap_history(buf, survivor)
+            _restore_draft(buf, survivor)
             get_app().invalidate()
             return True
         return False
@@ -981,8 +1008,9 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # per-tab idx of their own, so they keep meaning "close what I'm
         # looking at" via `_close_flow`/`close_active` below.
         if close_at(slots, idx, cancel_slot):
-            _swap_history(buf, slots.active())   # FIX7d, same as _close_flow above
-            buf.reset()
+            survivor = slots.active()
+            _swap_history(buf, survivor)         # FIX7d, same as _close_flow above
+            _restore_draft(buf, survivor)        # 0.3.24, same as _close_flow above
             get_app().invalidate()
             return True
         return False

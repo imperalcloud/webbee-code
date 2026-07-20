@@ -27,6 +27,10 @@ class SessionSlot:
     pending: deque = field(default_factory=deque)
     turn: dict = field(default_factory=lambda: {"task": None})
     pulled: dict = field(default_factory=lambda: {"text": "", "iid": ""})
+    draft: str = ""                    # 0.3.24: per-tab unsent input -- stashed on switch-away,
+                                        # restored on switch-back (browser-tab model: each tab
+                                        # keeps its own form state); cleared on genuine submit.
+    draft_cursor: int = 0              # cursor position within `draft`, restored alongside it
     qp_ui: dict = field(default_factory=lambda: {"collapsed": False})
     tp_ui: dict = field(default_factory=lambda: {"collapsed": False})
     mode: str = "default"
