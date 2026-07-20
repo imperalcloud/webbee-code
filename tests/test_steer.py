@@ -621,6 +621,116 @@ def test_initial_delay_zero_never_sleeps_extra(monkeypatch):
     assert sleeps == [SP._POLL_INTERVAL]   # ONE sleep total, the ordinary tick
 
 
+# ── attach-on-poll: the gateway's `attach` field → attach_turn seam ──────────
+# The drain found NO items, but the polled session's stream tail holds an
+# unanswered tool_request/confirm_request a marathon turn (woken elsewhere)
+# already dispatched -- the poller hands it to `attach_turn`, same discipline
+# as `submit` (runs inside this task, is_busy re-checked right before).
+
+def test_attach_field_calls_attach_turn_once(monkeypatch):
+    attached = []
+    fetches = []
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        fetches.append(1)
+        if len(fetches) == 1:
+            return {"items": [], "attach": {"task_id": "t1", "last_id": "5-0", "kind": "tool"}}
+        return {"items": []}  # served -- the gateway's tail is answered now
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        raise AssertionError("no items were fetched -- submit must not fire")
+
+    async def attach_turn(attach):
+        attached.append(attach)
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              attach_turn=attach_turn, interval=0.01),
+           until=lambda: len(fetches) >= 3)
+    assert attached == [{"task_id": "t1", "last_id": "5-0", "kind": "tool"}]
+
+
+def test_attach_deferred_not_called_when_busy_right_before(monkeypatch):
+    attached = []
+    busy_answers = [False, True, False]  # top-gate, pre-attach(busy!), top-gate again
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        return {"items": [], "attach": {"task_id": "t1", "last_id": "5-0", "kind": "tool"}}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    def is_busy():
+        return busy_answers.pop(0) if busy_answers else False
+
+    async def submit(text, surface, steer_iid=""):
+        raise AssertionError("no items were fetched -- submit must not fire")
+
+    async def attach_turn(attach):
+        attached.append(attach)
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=is_busy,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              attach_turn=attach_turn, interval=0.01),
+           until=lambda: attached)
+    # Deferred on the FIRST tick (busy right before the call) -- called on
+    # a LATER tick once idle again. Nothing lost, called exactly once.
+    assert attached == [{"task_id": "t1", "last_id": "5-0", "kind": "tool"}]
+
+
+def test_attach_field_ignored_without_attach_turn_seam(monkeypatch):
+    # Old wiring (no attach_turn kwarg) against a new gateway: the field is
+    # dropped silently, exactly like an unwired requested_mode -- no crash,
+    # no attempt to call a None seam.
+    fetches = []
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        fetches.append(1)
+        return {"items": [], "attach": {"task_id": "t1", "last_id": "5-0", "kind": "tool"}}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+
+    async def submit(text, surface, steer_iid=""):
+        raise AssertionError("no items -- submit must not fire")
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              interval=0.01),
+           until=lambda: len(fetches) >= 3)
+    assert len(fetches) >= 3   # kept polling, never crashed on the unhandled field
+
+
+def test_attach_absent_never_calls_attach_turn(monkeypatch):
+    # Mutual exclusivity per the gateway contract (attach only set when the
+    # drain found no items) -- but even if items ARE present, an absent
+    # `attach` key must never call the seam.
+    attached = []
+
+    async def fake_fetch(cfg, tp, session_id, **kw):
+        return {"items": [{"text": "go", "surface": "telegram", "ts": 1}]}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+    submitted = []
+
+    async def submit(text, surface, steer_iid=""):
+        submitted.append(text)
+
+    async def attach_turn(attach):
+        attached.append(attach)
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace=".", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "marathon-u-r1",
+                              attach_turn=attach_turn, interval=0.01),
+           until=lambda: submitted)
+    assert submitted == ["go"]
+    assert attached == []
+
+
 def test_slot_id_threaded_into_derivation_when_no_live_session_yet(monkeypatch):
     polled = []
 
