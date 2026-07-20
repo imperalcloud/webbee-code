@@ -29,6 +29,8 @@ class SessionSlot:
     history: object | None = None      # prompt_toolkit InMemoryHistory (made in tui task)
     steer_backlog: deque = field(default_factory=deque)   # reserved (W4b)
     bg_tasks: list = field(default_factory=list)          # per-slot cancellables
+    _last_fill: float = 0.0            # Home only (Task 6): monotonic ts of the last fill_home run
+    _filling: bool = False             # Home only (Task 6): a fill_home is in flight -- re-entrancy guard
 
     def status_glyph(self) -> str:
         """Tab glyph: ⚠ consent waiting beats ▶ busy beats ✓ idle; Home ◆.

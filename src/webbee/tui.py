@@ -434,7 +434,8 @@ def _swap_history(buf, slot) -> None:
 
 async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
-                      home_input=None, cancel_slot=None, ui_hooks=None) -> bool:
+                      home_input=None, cancel_slot=None, ui_hooks=None,
+                      on_switch=None) -> bool:
     """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
     CALL TIME (W4a Task 3 — the single most structural change of the
     multisession-tabs wave: no more one session's objects captured once at
@@ -485,7 +486,13 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     at construction time, so repl's `/tab`/`/new`/`/close` commands route
     through the EXACT same switch/close path the keys and clicks use (the
     history swap on every switch, the close note) instead of mutating
-    `slots` directly and missing it.
+    `slots` directly and missing it. `on_switch` (Task 6, optional): called
+    with the NEW active idx after every successful `_switch_to` -- click,
+    Ctrl-T, Alt+N, or a repl command via `ui_hooks["switch"]` all converge
+    on `_switch_to`, so this one seam covers every path. repl wires it to
+    its own stale-Home-refill check (`home.is_stale` + `fill_home`
+    re-scheduled as a bg task) -- this function has no idea what "Home" or
+    "stale" mean, it only calls the hook.
     Returns True on clean exit; False if prompt_toolkit is unavailable
     (the caller uses the plain fallback loop)."""
     try:
@@ -863,6 +870,8 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # click on the active tab is a true no-op, never a crash.
         if slots.switch(idx):
             _swap_history(buf, slots.active())
+            if on_switch is not None:
+                on_switch(idx)
             get_app().invalidate()
 
     def _close_flow() -> bool:

@@ -2,8 +2,9 @@ import asyncio
 import contextlib
 import os
 import sys
+import time
 
-from webbee import __version__, boot
+from webbee import __version__, boot, home
 from webbee.account import login_device_flow
 from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
@@ -227,6 +228,75 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
                               first=first, account=account)
 
 
+def _home_target_workspace(slots: SlotManager, cwd: str) -> str:
+    """Home's own workspace pick (Task 6 `home_input`): the most recently
+    OPENED session tab's own directory — continue wherever you're already
+    working instead of a bare process cwd — falling back to `cwd` only when
+    no session tab exists at all yet. Deliberately NOT `slots.active()`:
+    this is only ever called while Home itself is the active slot (that's
+    the only way `home_input` fires at all), so `active()` would just be
+    Home's own (uninteresting) workspace field."""
+    for slot in reversed(slots.slots):
+        if slot.kind == "session":
+            return slot.workspace
+    return cwd
+
+
+async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mode: str,
+                      resources: WorkspaceResources, shared_client, agent_factory,
+                      intel_factory, shadow_factory, workspace: str,
+                      ui_hooks: dict, run_turn) -> None:
+    """Home's Enter path (Task 6, wired into `tui.run_session` as
+    `home_input=`): typing a task on Home opens a session tab in one motion
+    — the SAME `_make_session_slot`/switch path the `/new` command uses
+    (always `first=False`, always the process's BASELINE `mode`, per the
+    replay landmine and the autopilot-never-inherited rule both documented
+    on the `new_tab` action above) — then runs the typed text as that NEW
+    slot's first turn through `run_turn` (repl's own `_run_turn`, which
+    resolves `slots.active()` AT CALL TIME — now the slot this function just
+    switched into, so the ❯ echo and the turn both land there, never on
+    Home). No "tab opened" note (unlike `/new`): starting to type IS the
+    deliberate action here: announcing it too would just repeat the ❯ echo
+    that follows immediately after. Module-level + fully parameterized
+    (not a closure) so a test can drive it directly, same testing
+    philosophy as `_finish_slot`/`_make_session_slot`."""
+    ws = _home_target_workspace(slots, workspace)
+    new_slot = await _make_session_slot(
+        cfg, token_provider, ws, mode, resources=resources,
+        shared_client=shared_client, agent_factory=agent_factory,
+        intel_factory=intel_factory, shadow_factory=shadow_factory, first=False)
+    idx = slots.add(new_slot)
+    ui_hooks.get("switch", slots.switch)(idx)
+    new_slot.sink.user_echo(text)
+    await run_turn(text)
+
+
+def _schedule_home_refill(slots: SlotManager, idx: int, fill_kwargs: dict, *,
+                          now: float | None = None, fill_home=None) -> bool:
+    """The switch-to-Home refill hook (Task 6, wired as `tui.run_session`'s
+    `on_switch`): fires on EVERY tab switch (click, Ctrl-T, Alt+N, or a
+    `/tab`/`/new` command via `ui_hooks["switch"]` — they all resolve to the
+    same `tui._switch_to`), but only actually schedules work when `idx` is
+    Home (0) AND its content is stale (`home.is_stale`) — a fresh Home
+    (just booted, or refilled within the last `ttl`) is a no-op on every
+    other switch. `fill_home` itself is the REAL concurrency guard against a
+    genuine double-fill (its own `_filling` flag, checked first thing,
+    before any await) — this wrapper's own job is only to avoid spawning a
+    throwaway task when nothing is stale at all. `fill_home=`/`now=` are DI
+    seams for tests; production always resolves `webbee.home.fill_home` +
+    `time.monotonic()`. Returns True iff a bg task was appended (test-
+    visible signal), never raises."""
+    if idx != 0 or not slots.slots:
+        return False
+    if fill_home is None:
+        fill_home = home.fill_home
+    slot = slots.slots[0]
+    if not home.is_stale(slot, now if now is not None else time.monotonic()):
+        return False
+    slot.bg_tasks.append(asyncio.ensure_future(fill_home(slot, **fill_kwargs)))
+    return True
+
+
 async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None, read_line=input,
                    agent_factory=None, auth=None, account_fetcher=None,
                    sessions_client=None, intel_factory=None, shadow_factory=None) -> None:
@@ -289,6 +359,17 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     # end up existing.
     account = await account_fetcher(cfg, token_provider)
     state["logged_in"] = account.signed_in
+
+    # Task 6: the exact kwargs `home.fill_home` needs, minted once and
+    # reused for both the boot fill and every later stale-switch refill
+    # (`_schedule_home_refill`) — `account_fetcher` is threaded through
+    # verbatim so Home's OWN identity-tile fetch is independent of the
+    # process-wide `account` above (best-effort, may re-fetch — Home is
+    # filled in the background regardless of whether it ever becomes
+    # visible, so it never blocks boot on a second network round-trip).
+    home_fill_kwargs = dict(cfg=cfg, token_provider=token_provider, slots=slots,
+                            account_fetcher=account_fetcher, sessions_client=sessions_client,
+                            resources=resources, version=__version__)
 
     def _resources_for(ws: str) -> dict:
         return resources.get(ws) or {}
@@ -656,12 +737,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 from webbee.sizing import get_size
                 width, _height = get_size(None)   # pre-app: same fallback, one code path
 
-                # Home slot (Task 6 fills its content -- here just an empty
-                # pane) at index 0; the first session slot (cwd workspace) at
-                # index 1.
+                # Home slot at index 0; the first session slot (cwd
+                # workspace) at index 1.
                 home_pane = tui.OutputPane(width=width)
-                slots.add(SessionSlot(kind="home", workspace=workspace, label="Home",
-                                      pane=home_pane, sink=None, agent=None))
+                home_slot = SessionSlot(kind="home", workspace=workspace, label="Home",
+                                        pane=home_pane, sink=None, agent=None)
+                slots.add(home_slot)
 
                 session_slot = await _make_session_slot(
                     cfg, token_provider, workspace, mode, resources=resources,
@@ -674,6 +755,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 # replay showed nothing.
                 slots.active_idx = 1
                 _spawn_steer()
+                # Task 6: fill Home in the background from the moment it
+                # exists -- never blocks reaching the session tab above, and
+                # is very likely already done (or well under way) by the
+                # time anyone actually switches to it.
+                home_slot.bg_tasks.append(asyncio.ensure_future(home.fill_home(home_slot, **home_fill_kwargs)))
 
                 async def _on_line(text: str) -> None:
                     if await _handle(text) == "exit":
@@ -694,6 +780,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                             cfg, token_provider, slots.active().agent, slots.active().sink, text, iid,
                             client=shared_client),
                         cancel_slot=_cancel_slot, ui_hooks=ui_hooks,
+                        home_input=lambda text: _home_input(
+                            text, slots=slots, cfg=cfg, token_provider=token_provider, mode=mode,
+                            resources=resources, shared_client=shared_client, agent_factory=agent_factory,
+                            intel_factory=intel_factory, shadow_factory=shadow_factory,
+                            workspace=workspace, ui_hooks=ui_hooks, run_turn=_run_turn),
+                        on_switch=lambda idx: _schedule_home_refill(slots, idx, home_fill_kwargs),
                     )
                 finally:
                     _cancel_background()
