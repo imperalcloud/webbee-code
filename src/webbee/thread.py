@@ -78,6 +78,14 @@ async def fetch_pending_steer(cfg, token_provider, session_id: str, *, client=No
       * "requested_mode" -- one-shot remote mode request {mode, surface} or
                             null (GETDEL on the gateway -- delivered exactly
                             once; older gateways omit the key entirely).
+      * "attach"         -- {task_id, last_id, kind} or null (attach-on-
+                            poll): set ONLY when "items" above came back
+                            empty AND this session's stream tail still
+                            holds an unanswered tool_request/confirm_request
+                            (a marathon turn woken elsewhere dispatched it
+                            while this terminal sat idle). webbee.steer
+                            hands it to the `attach_turn` seam; older
+                            gateways omit the key entirely.
     `mode=` (T6.2, applied-mode report): the polled session's CURRENT
     coding mode, appended as `?mode={mode}` when non-empty -- the gateway
     stores it as `applied_mode` so the panel/TG can show the terminal's REAL

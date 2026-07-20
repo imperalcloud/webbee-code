@@ -95,6 +95,7 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                           idle_interval: float = 30.0,
                           slot_id: str = "",
                           initial_delay: float = 0.0,
+                          attach_turn=None,
                           _monotonic=None) -> None:
     """Run forever (until cancelled): every ~`interval`s of idle time, drain
     the pending-steer queue and hand the FIRST item to
@@ -153,6 +154,26 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                             same instant. 0.0 (default) skips the sleep
                             entirely -- byte-identical to before this param
                             existed.
+      * attach_turn(attach)-- async, optional (attach-on-poll); called with
+                            the fetch's `attach` field ({task_id, last_id,
+                            kind} or falsy) -- set by the gateway ONLY when
+                            the drain found no items AND the polled
+                            session's stream tail holds an unanswered
+                            tool_request/confirm_request (a marathon turn
+                            woken elsewhere dispatched it while this
+                            terminal sat idle, and nothing attached the
+                            stream to let the kernel re-dispatch it). Same
+                            discipline as `submit` above: runs INSIDE this
+                            task (polling pauses for its whole duration),
+                            and `is_busy()` is re-checked right before the
+                            call -- a local turn winning the race meanwhile
+                            simply defers (the gateway keeps holding the
+                            pending request until it's answered, so the
+                            next tick's fetch reports the SAME `attach`
+                            again -- nothing is lost). None (old wiring, or
+                            an older gateway that never sends `attach`) is a
+                            silent no-op, byte-identical to before this
+                            param existed.
 
     Adaptive cadence (Task 12): after `idle_after_s` (default 5 minutes)
     without activity, the tick relaxes from `interval` (4s) to
@@ -204,6 +225,23 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                     # pre-submit busy re-check below -- a fetched item then
                     # defers until the person at the terminal has answered.
                     await asyncio.sleep(0)
+                attach = payload.get("attach")
+                if attach and attach_turn is not None and not backlog:
+                    # Attach-on-poll: the drain found NO items, but the
+                    # gateway says THIS session's stream tail is still
+                    # holding an unanswered request -- re-check is_busy
+                    # right before, same discipline as the pre-submit race
+                    # below (a local line/turn can win meanwhile; deferring
+                    # loses nothing, the gateway keeps reporting the SAME
+                    # `attach` until it's actually answered).
+                    if is_busy():
+                        continue
+                    last_active = now()  # an attach pickup = activity
+                    await attach_turn(attach)
+                    if _cancel_absorbed():
+                        raise asyncio.CancelledError
+                    failures = 0
+                    continue
             if not backlog:
                 continue
             item = backlog.popleft()

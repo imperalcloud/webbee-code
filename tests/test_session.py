@@ -1553,3 +1553,128 @@ def test_steps_capped_at_200():
         s.steps.append({"step_id": str(i)})
     assert len(s.steps) == 200
     assert s.steps[0]["step_id"] == "50"
+
+
+# ── attach-on-poll: AgentSession.attach() — idle terminal picks up a ─────────
+# kernel-dispatched task ------------------------------------------------------
+# A marathon turn woken by a panel/Telegram message while this terminal sat
+# idle can dispatch a local tool_request/confirm_request that nothing
+# attaches. The gateway's /pending-steer `attach` field hands the client
+# task_id/last_id; attach() derives the session id itself (webbee.steer.
+# derive_session_id) and simply opens the SSE -- NO start POST at all -- then
+# runs the EXACT SAME frame loop `run()` uses (_serve_stream).
+
+def _run_attach(monkeypatch, fake_stream, sink, *, task_id="OURS", start_id="0-0",
+                derived_sid="marathon-user-1-rabc", executor_calls=None):
+    import httpx
+
+    import webbee.session as S
+    import webbee.steer as SR
+    import webbee.stream as ST
+    import webbee.tools as T
+
+    async def fake_derive(cfg, tp, workspace, *, marathon=True, slot_id=""):
+        return derived_sid
+
+    monkeypatch.setattr(SR, "derive_session_id", fake_derive)
+
+    class _RecExecutor:
+        def __init__(self, root, indexer=None, shadow=None):
+            pass
+
+        def run(self, tool, args):
+            if executor_calls is not None:
+                executor_calls.append((tool, args))
+            return {"ok": True, "content": "ran"}
+
+    monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
+    monkeypatch.setattr(ST, "stream_frames", fake_stream)
+
+    posts = []
+
+    class _ResultResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, **kw):
+            posts.append(path)
+            return _ResultResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    result = asyncio.run(sess.attach(sink, task_id=task_id, start_id=start_id))
+    return result, posts, sess
+
+
+def test_attach_posts_no_start_session(monkeypatch):
+    # attach() defaults marathon=True (the whole feature is about a marathon
+    # turn a panel/Telegram message woke) -- a plain `final` there is only a
+    # per-milestone marker (see _serve_stream's own `final` branch), so the
+    # goal-ending frame is `marathon_complete`, exactly like a normal
+    # marathon run().
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
+        yield {"type": "marathon_complete", "task_id": "OURS", "text": "done"}
+
+    class _Sink:
+        def progress(self, *a): ...
+
+    result, posts, sess = _run_attach(monkeypatch, _stream, _Sink())
+    assert result == "done"
+    assert "/v1/agent/sessions" not in posts  # NO start POST -- attach never mints a turn
+    assert sess.session_id == "marathon-user-1-rabc"  # the DERIVED id, not a fresh one
+
+
+def test_attach_serves_redispatched_tool_request_and_posts_result(monkeypatch):
+    # Opening the SSE (client_connected) is what makes the kernel re-dispatch
+    # the pending request in the first place -- once it lands on the stream,
+    # attach() must run it and post the result exactly like a normal turn.
+    executed = []
+
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
+        yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
+               "tool": "read_file", "args": {"path": "a"}}
+        yield {"type": "marathon_complete", "task_id": "OURS", "text": "done"}
+
+    class _Sink:
+        def tool_start(self, *a): ...
+        def tool_result(self, *a): ...
+        def progress(self, *a): ...
+
+    result, posts, sess = _run_attach(monkeypatch, _stream, _Sink(), executor_calls=executed)
+    assert result == "done"
+    assert executed == [("read_file", {"path": "a"})]
+    assert posts.count("/v1/agent/sessions/marathon-user-1-rabc/result") == 1
+
+
+def test_attach_honors_given_task_id_filters_foreign_frames(monkeypatch):
+    # C7 safety carries over unchanged: a frame stamped with a DIFFERENT
+    # task_id than the one attach() was told to resume must never execute
+    # or end this attach turn -- only the given task_id's own final does.
+    executed = []
+
+    async def _stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
+        yield {"type": "tool_request", "task_id": "OTHER", "req_id": "rX",
+               "tool": "bash", "args": {}}
+        yield {"type": "final", "task_id": "OTHER", "text": "wrong turn"}
+        yield {"type": "marathon_complete", "task_id": "OURS", "text": "done"}
+
+    class _Sink:
+        def foreign_turn(self, *a): ...
+        def progress(self, *a): ...
+
+    result, posts, sess = _run_attach(monkeypatch, _stream, _Sink(), task_id="OURS",
+                                      executor_calls=executed)
+    assert result == "done"                        # ended on the GIVEN task_id's final
+    assert executed == []                           # foreign tool_request never dispatched
+    assert posts == []                              # no /result POST for the foreign frame
+    assert sess._task_id == "OURS"

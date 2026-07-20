@@ -977,6 +977,72 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         slot.sink.foreign_turn(surface, "user", text)
         await _run_turn_on(slot, text, surface=surface, steer_iid=steer_iid)
 
+    async def _attach_turn_on(slot: SessionSlot, attach_info: dict) -> None:
+        """poll_idle_steer's `attach_turn` seam (attach-on-poll, URGENT
+        live-user-pain fix): a kernel-side marathon turn woken by a panel/
+        Telegram message dispatched a local tool_request/confirm_request
+        while THIS terminal sat idle-but-online -- nothing attached the
+        stream, so the dispatch just burned tool_wait (5-65min) before the
+        kernel parked it "unresponsive". `attach_info` is the gateway's
+        {task_id, last_id, kind} (GET /pending-steer's additive `attach`
+        field); `slot.agent.attach()` opens the SSE with NO start POST at
+        all -- doing so alone fires client_connected server-side, which is
+        what makes the kernel re-dispatch the pending request. `marathon=not
+        once` (the SAME flag `_spawn_slot_poller` already threads into
+        poll_idle_steer/derive_session_id for THIS slot's poller) so a
+        --once slot's attach derives its "coding-"-prefixed id, never the
+        "marathon-" one -- a mismatched prefix would derive a DIFFERENT,
+        wrong session id than the one whose `attach` field this actually is.
+
+        Runs through the SAME slot-explicit start seam `_home_input` uses
+        (`ui_hooks["start_attach_in"]`, tui's own `_start_attach_in`) so
+        `slot.turn["task"]` is genuinely set under a dock -- Esc/Ctrl-C can
+        cancel it locally exactly like a typed turn, and begin_turn/
+        end_turn/busy-gate/queue-drain semantics are identical to any other
+        turn (mirrors `_run_turn_on`'s own shape). The fallback loop (no
+        dock, no ui_hooks entry) just awaits the coroutine directly -- no
+        Esc/Ctrl-C key handling exists there to satisfy. Either way this
+        BLOCKS for the whole turn: poll_idle_steer's `attach_turn` contract
+        requires pausing polling for its duration, same discipline as
+        `submit`/`_steer_submit_on` above."""
+        async def _drive() -> None:
+            _sink = slot.sink
+            _sink.begin_turn()
+            _note = getattr(_sink, "note", None)
+            if _note is not None:
+                _note("⚡ attaching — a running task on this session needs this terminal")
+            task_id = str(attach_info.get("task_id") or "")
+            start_id = str(attach_info.get("last_id") or "0-0")
+            try:
+                text = await slot.agent.attach(_sink, task_id=task_id, start_id=start_id,
+                                               marathon=not once)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                _sink.abort()
+                _sink.note("Interrupted.")
+                _sink.end_turn("")   # clear busy (poller starvation guard)
+                return
+            except Exception as e:  # network/auth/etc — never crash the poller
+                _mark = getattr(_sink, "mark_turn_failed", None)
+                if _mark is not None:
+                    _mark()
+                if type(e).__name__ in ("StreamAuthError", "NotLoggedInError"):
+                    _sink.note("Session expired or access revoked — run /login to sign in again.")
+                else:
+                    _sink.note(f"Error: {type(e).__name__}: {e}")
+                _sink.end_turn("")
+                if slot.pending:
+                    _sink.note(f"⏸ queue held: {len(slot.pending)} queued message(s) wait "
+                               "— ↑ pulls the next into the input, /queue clear drops them")
+                return
+            _sink.end_turn(text)
+
+        coro = _drive()
+        start_attach_in = ui_hooks.get("start_attach_in")
+        if start_attach_in is not None:
+            await start_attach_in(slot, coro)
+        else:
+            await coro
+
     async def _stop_active_turn() -> None:
         """tui.run_session's `stop_turn` leg (Esc/Ctrl-C) -- resolves the
         ACTIVE slot's agent AT CALL TIME (W4a Task 3: the injected callable
@@ -1006,7 +1072,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         shared `first_session_slot`: `is_busy`/`mode_getter` read its OWN
         sink/turn/mode, `live_session_id` its OWN agent, `submit` renders the
         remote line into its OWN pane and runs the turn through
-        `_run_turn_on(slot, ...)`. Staggered (item 3): each poller's FIRST
+        `_run_turn_on(slot, ...)`, and `attach_turn` (attach-on-poll) runs
+        `_attach_turn_on(slot, ...)` against this SAME slot when the
+        gateway's drain reports an unanswered request already dispatched on
+        this session. Staggered (item 3): each poller's FIRST
         tick carries a small incrementing offset (0, 1, 2, 0, 1, 2... seconds
         -- `poll_idle_steer`'s own `initial_delay`) so several tabs opened
         back-to-back don't all hit the gateway in the same instant. Appended
@@ -1025,6 +1094,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 slot, text, surface, steer_iid),
             on_mode=lambda mode, surface: _on_mode(slot, mode, surface),
             mode_getter=lambda: slot.mode,
+            attach_turn=lambda attach_info: _attach_turn_on(slot, attach_info),
             client=shared_client, slot_id=slot.slot_id, initial_delay=offset))
         slot.bg_tasks.append(task)
 

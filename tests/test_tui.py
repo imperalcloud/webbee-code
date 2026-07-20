@@ -3881,6 +3881,95 @@ def test_home_input_first_turn_task_is_visible_and_esc_cancels_it():
     asyncio.run(scenario())
 
 
+# ── attach-on-poll: ui_hooks["start_attach_in"] -- Esc cancels an in-flight
+# attach turn exactly like a typed one ──────────────────────────────────────
+
+def test_start_attach_in_task_is_visible_and_esc_cancels_it():
+    # Mirrors test_home_input_first_turn_task_is_visible_and_esc_cancels_it:
+    # an attach turn (poll_idle_steer's attach_turn seam, repl._attach_turn_on)
+    # must be genuinely tracked in slot.turn["task"] under a dock -- otherwise
+    # _busy_live() never sees it as live and Esc/Ctrl-C can't cancel it.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        gate = asyncio.Event()
+        busy = {"v": False}
+        ran = []
+        cancelled = {"v": False}
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        session = SessionSlot(kind="session", workspace=".", label="proj",
+                              pane=tui.OutputPane(width=80), sink=sink, agent=None)
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 1
+
+        async def _attach_coro():
+            # Mirrors what repl._attach_turn_on's own _drive() does around
+            # slot.agent.attach(): flips the sink busy while "running" the
+            # attach turn, absorbs the Esc cancel like any other turn.
+            busy["v"] = True
+            ran.append("attaching")
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                cancelled["v"] = True
+                raise
+            finally:
+                busy["v"] = False
+
+        async def on_line(text, slot=None):
+            raise AssertionError("no typed line in this scenario -- attach is external")
+
+        ui_hooks = {}
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None, ui_hooks=ui_hooks))
+                await asyncio.sleep(0.05)
+
+                # The seam repl's attach_turn wiring uses under a dock.
+                start_attach_in = ui_hooks["start_attach_in"]
+                live_task = start_attach_in(session, _attach_coro())
+                await _until(lambda: ran == ["attaching"])
+
+                assert session.turn.get("task") is live_task
+                assert not live_task.done()
+
+                pipe.send_text("\x1b")   # lone Esc -- busy, so it stops the turn
+                await _until(lambda: cancelled["v"], timeout=3.0)
+                assert live_task.cancelled() or live_task.done()
+                assert session.turn.get("task") is None   # cleared by _finish_natural_turn
+
+                pipe.send_text("\x04")   # idle, single session -> exit
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 # ── W4a Task 4: the tab bar mounts at the TOP of the root layout ────────────
 
 def test_tab_bar_window_is_root_hsplit_first_child():
@@ -4580,7 +4669,7 @@ def test_ui_hooks_filled_with_switch_and_close_routing_through_the_real_flow():
                 task = asyncio.create_task(tui.run_session(
                     slots=slots, on_line=on_line, on_cycle=lambda: None, ui_hooks=ui_hooks))
                 await asyncio.sleep(0.05)
-                assert set(ui_hooks) == {"switch", "close", "start_turn_in"}
+                assert set(ui_hooks) == {"switch", "close", "start_turn_in", "start_attach_in"}
                 assert ui_hooks["close"]() is False          # Home guarded -- no-op
                 assert len(slots.slots) == 2
 
