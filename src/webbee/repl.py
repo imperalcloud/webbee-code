@@ -573,11 +573,19 @@ async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mod
     ui_hooks.get("switch", slots.switch)(idx)
     if spawn_poller is not None:
         spawn_poller(new_slot)
-    new_slot.sink.user_echo(text)
     start_turn_in = ui_hooks.get("start_turn_in")
     if start_turn_in is not None:
+        # 0.3.24 fix: the dock's start-turn seam threads through on_line ->
+        # `_handle`, which ALREADY echoes the typed line itself for every
+        # non-command line (the SAME canonical echo every other typed line
+        # in the dock gets) -- echoing here too doubled it up in the new
+        # tab's transcript (Valentin, live on 0.3.22/0.3.23).
         start_turn_in(new_slot, text)
     else:
+        # No dock: `run_turn` (repl's `_run_turn`) never echoes on its own
+        # (it only runs the agent turn), so this IS the one echo the typed
+        # line gets.
+        new_slot.sink.user_echo(text)
         await run_turn(new_slot, text)
 
 

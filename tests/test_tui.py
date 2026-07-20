@@ -3319,12 +3319,13 @@ def test_dock_mounts_sticky_todo_panel_above_queue_panel():
 # a mid-turn tab switch. No tab-bar UI yet (Task 4) -- these tests switch
 # tabs directly via `slots.active_idx`, exactly as a future keybinding will.
 
-def test_switching_tabs_drops_the_leaving_tabs_unsent_draft():
-    # FIX7b: a draft mid-type belongs to the tab you were looking at when
-    # you typed it, never the one you switch into -- _switch_to's
-    # buf.reset() must drop it (plan-mandated: drafts dropped, history
-    # load-task reset), not just repoint the recall history.
-    from prompt_toolkit.application import create_app_session
+def test_switching_tabs_preserves_the_draft_and_restores_it_on_return():
+    # 0.3.24 (per-tab drafts, product decision -- supersedes FIX7b's "drafts
+    # dropped on switch"): a draft mid-type belongs to the tab you typed it
+    # into, browser-tab style -- it must survive a switch AWAY and come back
+    # verbatim (text + cursor) on a switch BACK, while the tab you switched
+    # INTO in between never sees it.
+    from prompt_toolkit.application import create_app_session, get_app
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
@@ -3349,14 +3350,27 @@ def test_switching_tabs_drops_the_leaving_tabs_unsent_draft():
                 await asyncio.sleep(0.05)
                 pipe.send_text("partial draft")          # no Enter -- just a draft in progress
                 await asyncio.sleep(0.05)
+                get_app().current_buffer.cursor_position = 7   # mid-text, not just "at the end"
 
                 pipe.send_text("\x1b1")                    # Alt+1 -- switch to B
                 await _until(lambda: slots.active_idx == 1)
+                assert get_app().current_buffer.text == ""      # B never sees A's draft
 
-                pipe.send_text("\r")                        # Enter on an (expected) EMPTY buffer
+                pipe.send_text("\r")                        # Enter on B's (genuinely empty) buffer
                 await asyncio.sleep(0.1)
-                assert ran == []                             # the draft never resubmitted as a line
+                assert ran == []                             # nothing resubmitted on B
 
+                pipe.send_text("\x1b0")                      # Alt+0 -- switch back to A
+                await _until(lambda: slots.active_idx == 0)
+                assert get_app().current_buffer.text == "partial draft"   # restored verbatim
+                assert get_app().current_buffer.cursor_position == 7      # cursor restored too
+
+                # Exit via B -- idx 0 is structurally unclosable in this
+                # 2-slot fixture (SlotManager.close's own Home-guard treats
+                # index 0 as never closable, session or not), same escape
+                # route the pre-0.3.24 version of this test used.
+                pipe.send_text("\x1b1")
+                await _until(lambda: slots.active_idx == 1)
                 pipe.send_text("\x04")
                 await _until(lambda: len(slots.slots) == 1)
                 pipe.send_text("\x04")
@@ -3366,16 +3380,123 @@ def test_switching_tabs_drops_the_leaving_tabs_unsent_draft():
     asyncio.run(scenario())
 
 
-def test_switch_clears_the_leaving_slots_pulled_carry_so_a_stale_iid_cannot_leak():
-    # FIX7b: a pulled-but-never-resubmitted queue item's steer_iid must not
-    # outlive a switch AWAY from its own slot -- otherwise a LATER, wholly
-    # unrelated line that happens to match the pulled text verbatim (typed
-    # after switching away and back) would wrongly inherit a STALE dedup
-    # iid, misleading the kernel's ring into treating a genuinely NEW
-    # message as a duplicate of a pull that's long gone.
+def test_home_draft_is_isolated_from_a_session_tabs_draft():
+    # Companion to the round-trip test above, specifically for Home: typing
+    # on Home (never submitted -- home_input owns plain text there, no
+    # Enter needed for this test) must not leak into a session tab's buffer,
+    # and Home's own draft must survive a round trip exactly like a session
+    # tab's does.
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="a",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 0
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    home_input=lambda text: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("home draft")
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("\x1b1")                    # Alt+1 -- switch to the session tab
+                await _until(lambda: slots.active_idx == 1)
+                assert get_app().current_buffer.text == ""      # session tab never sees Home's draft
+
+                pipe.send_text("session draft")
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("\x1b0")                      # Alt+0 -- back to Home
+                await _until(lambda: slots.active_idx == 0)
+                assert get_app().current_buffer.text == "home draft"   # Home's OWN draft restored
+
+                pipe.send_text("\x1b1")                      # back to the session tab
+                await _until(lambda: slots.active_idx == 1)
+                assert get_app().current_buffer.text == "session draft"   # its own draft, untouched
+
+                pipe.send_text("\x1b0")
+                await _until(lambda: slots.active_idx == 0)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_submitting_a_line_clears_that_slots_draft_so_it_never_resurrects():
+    # 0.3.24: a genuine submit must retire the stashed draft too -- otherwise
+    # switching away and back after sending a message would restore text
+    # that was already sent, silently resurrecting it in the input box.
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot
+
+    async def scenario():
+        pane_a, pane_b = tui.OutputPane(width=80), tui.OutputPane(width=80)
+        ran = []
+
+        async def on_line(text, slot=None):
+            ran.append(text)
+
+        slots = mk_slots(pane=pane_a, sink=_idle_sink())
+        slots.add(SessionSlot(kind="session", workspace=".", label="b",
+                              pane=pane_b, sink=_idle_sink(), agent=None))
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("go\r")                       # type + submit, idle slot -> starts a turn
+                await _until(lambda: ran == ["go"])
+
+                pipe.send_text("\x1b1")                        # switch away
+                await _until(lambda: slots.active_idx == 1)
+                pipe.send_text("\x1b0")                        # ...and back
+                await _until(lambda: slots.active_idx == 0)
+                assert get_app().current_buffer.text == ""      # NOT resurrected
+
+                pipe.send_text("\x1b1")
+                await _until(lambda: slots.active_idx == 1)
+                pipe.send_text("\x04")
+                await _until(lambda: len(slots.slots) == 1)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_switch_preserves_the_leaving_slots_pulled_carry_so_resubmit_unchanged_still_dedups():
+    # 0.3.24 (product decision, supersedes FIX7b's "pulled cleared on the
+    # way out"): pulled now travels WITH the draft, on its own slot -- a
+    # pulled-but-not-yet-resubmitted queue item survives a switch away and
+    # back, and resubmitting it UNCHANGED after the round trip still reuses
+    # its ORIGINAL steer_iid, so the kernel's dedup ring can still catch a
+    # landed twin exactly as if the user had never glanced at another tab.
+    # `_rewrap_pulled`'s one-shot consume still retires it -- on the Enter
+    # that actually resubmits, not on the switch.
     from collections import deque
 
-    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.application import create_app_session, get_app
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
@@ -3407,14 +3528,17 @@ def test_switch_clears_the_leaving_slots_pulled_carry_so_a_stale_iid_cannot_leak
 
                 pipe.send_text("\x1b1")                        # Alt+1 -- switch away WITHOUT resubmitting
                 await _until(lambda: slots.active_idx == 1)
-                assert slot_a.pulled == {"text": "", "iid": ""}   # FIX7b: cleared on the way out
+                assert slot_a.pulled == {"text": "queued text", "iid": "iid-1"}   # SURVIVES the switch
+                assert slot_a.draft == "queued text"                              # draft travels with it
 
                 pipe.send_text("\x1b0")                        # Alt+0 -- switch back to A
                 await _until(lambda: slots.active_idx == 0)
+                assert get_app().current_buffer.text == "queued text"   # restored, unedited
 
-                pipe.send_text("queued text\r")                # coincidentally the SAME text, typed fresh
+                pipe.send_text("\r")                            # resubmit UNCHANGED -- no retyping
                 await _until(lambda: ran == ["queued text"])
-                assert getattr(ran[0], "iid", "") == ""         # NOT the stale iid-1 -- a genuinely new line
+                assert getattr(ran[0], "iid", "") == "iid-1"    # ORIGINAL iid preserved -- dedup intact
+                assert slot_a.pulled == {"text": "", "iid": ""}  # one-shot: consumed by THIS Enter, not the switch
 
                 pipe.send_text("\x1b1")                          # switch to B -- A (idx 0) is unclosable here
                 await _until(lambda: slots.active_idx == 1)
@@ -4016,7 +4140,7 @@ def test_tab_bar_window_is_root_hsplit_first_child():
                 assert not isinstance(bar, ConditionalContainer)   # ALWAYS visible
                 text = "".join(f[1] for f in bar.content.text())
                 assert "◆ Home" in text                            # Home always first
-                assert "●1 proj" in text                           # active session, marked ●N
+                assert "● 1·proj" in text                          # active session, marked ●N
                 pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
@@ -4495,7 +4619,7 @@ def test_tab_bar_close_click_closes_the_clicked_background_tab_not_the_active_on
                 frags = bar.content.text()
                 # frags: [home, sep, a-body, a-CLOSE, sep, b-body, b-close]
                 close_a = frags[3]
-                assert close_a[1] == " ✕"
+                assert close_a[1] == " ✕ "
                 ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
                                 button=MouseButton.LEFT, modifiers=frozenset())
                 close_a[2](ev)                                 # click ✕ on the BACKGROUND tab a
@@ -4546,7 +4670,7 @@ def test_tab_bar_close_click_closes_the_active_tab_when_that_is_the_one_clicked(
                 bar = get_app().layout.container.children[0]
                 frags = bar.content.text()
                 close_b = frags[6]
-                assert close_b[1] == " ✕"
+                assert close_b[1] == " ✕ "
                 ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
                                 button=MouseButton.LEFT, modifiers=frozenset())
                 close_b[2](ev)                                 # click ✕ on the ACTIVE tab b

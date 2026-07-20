@@ -1,17 +1,29 @@
-"""The tab bar — THE visible piece of the browser-in-terminal (W4a Task 4).
-`tab_fragments` is a PURE builder, queue_panel discipline (unit-tested
-without an Application, no prompt_toolkit import at module top — only
-inside the mouse handlers): it renders ONE row, Home always first (glyph
-fixed ◆, label "Home", NEVER a close ✕), then every session slot numbered
-by its own SlotManager list index (the same index `slots.switch(idx)`/
-`slots.close(idx)` take), glyph from `slot.status_glyph()` (⚠/▶/○). The
-ACTIVE tab (Home or session) is accented (`class:tab.active`); a
-NON-active session tab whose glyph is ⚠ gets `class:tab.alert` — the
-consent badge Valentin sees from whichever tab he's looking at, not just
-the one waiting. Each tab's body is a 3-tuple fragment (MOUSE_UP ->
-on_switch(idx), NotImplemented otherwise — wheel keeps working, same
-event discipline as queue_panel._item_handler); each SESSION tab's
-trailing ` ✕` is its OWN fragment (MOUSE_UP -> on_close(idx)). Unlike the
+"""The tab bar — THE visible piece of the browser-in-terminal (W4a Task 4;
+chip redesign 0.3.24 — Valentin: tabs were hard to notice and hard to
+control, needed clear separators and uniform spacing). `tab_fragments`
+is a PURE builder, queue_panel discipline (unit-tested without an
+Application, no prompt_toolkit import at module top — only inside the
+mouse handlers): it renders ONE row of padded CHIPS, each `" {glyph}
+{label} "` — ONE leading + ONE trailing space baked INSIDE the styled
+fragment itself, so every chip carries identical breathing room regardless
+of style. Home is always first (glyph fixed ◆, label "Home", NEVER a close
+✕); every session slot is numbered by its own SlotManager list index (the
+same index `slots.switch(idx)`/`slots.close(idx)` take) and shaped
+`" {marker} {idx}·{label} {glyph} "` — `marker` (●/○) is THIS tab's own
+active/inactive dot, `glyph` is `slot.status_glyph()` (⚠/▶/○). The ACTIVE
+tab's chip is a SOLID bee-yellow block (`class:tab.active` — background,
+not just text, so it's unmistakable at a glance); a NON-active session
+tab whose glyph is ⚠ gets `class:tab.alert` (yellow text, no bg — only the
+active chip owns a background, so the alert never competes with it). A
+dim `" │ "` (`class:tab.sep`) sits between every pair of tabs — exactly
+one, never at the ends — so the eye always finds the boundary. Each tab's
+body is a 3-tuple fragment (MOUSE_UP -> on_switch(idx), NotImplemented
+otherwise — wheel keeps working, same event discipline as
+queue_panel._item_handler); each SESSION tab's trailing `" ✕ "` is its OWN
+padded fragment (MOUSE_UP -> on_close(idx)), styled `class:tab.close.
+active` instead of the plain dim `class:tab.close` when its tab is the
+active one — same bg as its chip, so the close glyph reads as part of the
+SAME contiguous block rather than a separate dim afterthought. Unlike the
 queue/todo panels this bar is NEVER hidden — even a single slot (Home
 alone) renders it; it IS the new look."""
 
@@ -19,6 +31,8 @@ TAB_STYLE_ACTIVE = "class:tab.active"
 TAB_STYLE_IDLE = "class:tab"
 TAB_STYLE_ALERT = "class:tab.alert"
 TAB_STYLE_CLOSE = "class:tab.close"
+TAB_STYLE_CLOSE_ACTIVE = "class:tab.close.active"
+TAB_STYLE_SEP = "class:tab.sep"
 
 _SEP = " │ "
 _MIN_LABEL = 8
@@ -76,11 +90,11 @@ def tab_fragments(slots, *, on_switch, on_close, width: int = 0, forward=None):
     `SlotManager` (or anything shaped like one — `.slots` + `.active_idx`);
     slot 0 is always treated as Home. `width` (0 = unknown/no truncation —
     headless or pre-first-render) is divided evenly across every SESSION
-    label after subtracting Home's own fixed text, the ` │ ` separators and
-    each session tab's own marker/index/glyph/close overhead, then each
-    label is `_fit` to its share. Returns [] only when `slots` has no slots
-    at all (never happens in practice — Home always occupies index 0).
-    `forward` (FIX6, optional — `None` preserves every existing caller's
+    label after subtracting Home's own fixed chip text, the ` │ ` separators
+    and each session tab's own marker/index/glyph/padding/close overhead,
+    then each label is `_fit` to its share. Returns [] only when `slots` has
+    no slots at all (never happens in practice — Home always occupies index
+    0). `forward` (FIX6, optional — `None` preserves every existing caller's
     behavior verbatim) is threaded into EVERY mouse handler this function
     hands out (Home's own switch handler included) so a drag armed in the
     output pane just below gets first refusal on every tab-bar click."""
@@ -91,14 +105,14 @@ def tab_fragments(slots, *, on_switch, on_close, width: int = 0, forward=None):
     home = slot_list[0]
     sessions = list(enumerate(slot_list[1:], start=1))
 
-    home_text = f"◆ {home.label or 'Home'}"
+    home_text = f" ◆ {home.label or 'Home'} "
     seps = len(sessions)   # one separator before each session tab
 
     pieces = []   # (idx, slot, prefix, suffix, close_text)
     for idx, slot in sessions:
         marker = "●" if idx == active_idx else "○"
         glyph = slot.status_glyph()
-        pieces.append((idx, slot, f"{marker}{idx} ", f" {glyph}", " ✕"))
+        pieces.append((idx, slot, f" {marker} {idx}·", f" {glyph} ", " ✕ "))
 
     budget = 0
     if width > 0 and pieces:
@@ -111,7 +125,7 @@ def tab_fragments(slots, *, on_switch, on_close, width: int = 0, forward=None):
     frags.append((home_style, home_text, _switch_handler(on_switch, 0, forward)))
 
     for idx, slot, prefix, suffix, close_text in pieces:
-        frags.append((TAB_STYLE_IDLE, _SEP))
+        frags.append((TAB_STYLE_SEP, _SEP))
         is_active = idx == active_idx
         glyph = suffix.strip()
         label = slot.label or ""
@@ -120,6 +134,7 @@ def tab_fragments(slots, *, on_switch, on_close, width: int = 0, forward=None):
         style = TAB_STYLE_ACTIVE if is_active else (
             TAB_STYLE_ALERT if glyph == "⚠" else TAB_STYLE_IDLE)
         frags.append((style, f"{prefix}{label}{suffix}", _switch_handler(on_switch, idx, forward)))
-        frags.append((TAB_STYLE_CLOSE, close_text, _close_handler(on_close, idx, forward)))
+        close_style = TAB_STYLE_CLOSE_ACTIVE if is_active else TAB_STYLE_CLOSE
+        frags.append((close_style, close_text, _close_handler(on_close, idx, forward)))
 
     return frags
