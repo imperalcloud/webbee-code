@@ -102,7 +102,7 @@ class AgentSession:
     so context carries across turns). Persistent signal-based sessions are P3."""
 
     def __init__(self, cfg, token_provider, workspace_root: str, mode: str = "default", intel=None,
-                 shadow=None) -> None:
+                 shadow=None, slot_id: str = "") -> None:
         self.cfg = cfg
         self.token_provider = token_provider
         self.workspace_root = workspace_root
@@ -112,6 +112,11 @@ class AgentSession:
         self._task_id: str = ""
         self._intel = intel  # IntelService, or None (base install / boot failure)
         self._shadow = shadow  # ShadowGit, or None (git unavailable / boot failure)
+        # W4b T5: "" (tab-1 / the fallback loop's only slot) keeps every turn's
+        # POST body byte-identical to before this feature existed -- a later
+        # tab's own short slot_id rides the body as `slot`, and the gateway
+        # mints an `-s{slot}`-suffixed session id from it.
+        self.slot_id = slot_id
 
     async def _headers(self) -> dict:
         token = await self.token_provider()
@@ -160,6 +165,12 @@ class AgentSession:
         # body exactly like a pickup's own id. No longer additive-only for
         # this key (surface/marathon/goal above still are).
         body["steer_iid"] = steer_iid
+        if self.slot_id:
+            # W4b T5: slot-suffixed session ids -- the gateway mints
+            # {prefix}-{imperal_id}-r{repo_key}-s{slot} when a slot rides the
+            # body. Additive-only: "" (tab-1 / fallback's only slot) keeps
+            # today's body byte-identical, no "slot" key at all.
+            body["slot"] = self.slot_id
         if marathon:
             body["marathon"] = True
             body["goal"] = goal

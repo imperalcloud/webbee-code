@@ -22,7 +22,7 @@ _POLL_INTERVAL = 4.0
 
 
 async def derive_session_id(cfg, token_provider, workspace: str, *,
-                            marathon: bool = True) -> str:
+                            marathon: bool = True, slot_id: str = "") -> str:
     """The REAL session id THIS terminal's turns use, derivable BEFORE any
     turn has run: the gateway keys coding sessions stable per user+repo as
     `{marathon|coding}-{imperal_id}-r{repo_key}` (agent_sessions/router.py)
@@ -32,7 +32,13 @@ async def derive_session_id(cfg, token_provider, workspace: str, *,
     prefix check but MISS the per-session remote-control state key
     (resolve_state reads k_state(session_id) -- set by /notify under the real
     id), so polling with it would read "disabled" and pickup would never
-    fire."""
+    fire.
+
+    `slot_id` (W4b T5, additive) appends `-s{slot_id}` -- the SAME suffix the
+    gateway's `StartRequest.slot` mints into the id server-side, so a LATER
+    tab's poller derives its OWN session id (never the boot placeholder, and
+    never tab-1's legacy id) even before that tab's first turn has run.
+    Empty (tab-1 / the fallback loop's only slot) keeps today's id exactly."""
     from imperal_mcp.client import ImperalClient
     imperal_id = await ImperalClient(cfg, token_provider).whoami()
 
@@ -41,7 +47,8 @@ async def derive_session_id(cfg, token_provider, workspace: str, *,
         return compute_repo_key(find_repo_root(workspace))
 
     prefix = "marathon" if marathon else "coding"
-    return f"{prefix}-{imperal_id}-r{await asyncio.to_thread(_repo_key)}"
+    sid = f"{prefix}-{imperal_id}-r{await asyncio.to_thread(_repo_key)}"
+    return f"{sid}-s{slot_id}" if slot_id else sid
 
 
 def _consume_mode(payload, on_mode) -> bool:
@@ -86,6 +93,8 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                           client=None,
                           idle_after_s: float = 300.0,
                           idle_interval: float = 30.0,
+                          slot_id: str = "",
+                          initial_delay: float = 0.0,
                           _monotonic=None) -> None:
     """Run forever (until cancelled): every ~`interval`s of idle time, drain
     the pending-steer queue and hand the FIRST item to
@@ -129,6 +138,21 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                             at the fast cadence, no extra poke required.
                             None/"" omits the query param entirely (old
                             wiring, or no session polled yet).
+      * slot_id            -- W4b T5, optional; threaded verbatim into
+                            `derive_session_id` so a LATER tab's poller
+                            derives ITS OWN `-s{slot_id}` session id (never
+                            tab-1's legacy id) even before that tab's first
+                            turn has run and `live_session_id()` still
+                            returns "". "" (tab-1 / fallback's only slot)
+                            keeps today's derivation exactly.
+      * initial_delay      -- W4b T5, optional; slept ONCE before the very
+                            first tick, never again -- the repl staggers
+                            each new per-slot poller's start (a small
+                            incrementing offset) so several tabs opened
+                            back-to-back don't all hit the gateway in the
+                            same instant. 0.0 (default) skips the sleep
+                            entirely -- byte-identical to before this param
+                            existed.
 
     Adaptive cadence (Task 12): after `idle_after_s` (default 5 minutes)
     without activity, the tick relaxes from `interval` (4s) to
@@ -145,6 +169,8 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
     failures = 0    # consecutive fetch/auth failures -> backoff (a logged-out
                     # terminal must not hammer the token-refresh path every 4s)
     last_active = now()
+    if initial_delay:
+        await asyncio.sleep(initial_delay)
     while True:
         base = interval if (now() - last_active) < idle_after_s else idle_interval
         await asyncio.sleep(min(base * (2 ** min(failures, 4)), 60.0))
@@ -157,7 +183,8 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                 if not sid:
                     if not derived:
                         derived = await derive_session_id(
-                            cfg, token_provider, workspace, marathon=marathon)
+                            cfg, token_provider, workspace, marathon=marathon,
+                            slot_id=slot_id)
                     sid = derived
                 # Old-style test doubles for fetch_pending_steer don't accept
                 # a client/mode kwarg -- only pass either when the repl

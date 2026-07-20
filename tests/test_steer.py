@@ -72,6 +72,22 @@ def test_derive_session_id_coding_prefix_for_once_mode(monkeypatch):
     assert sid == "coding-user-1-rab12cd34ef56"
 
 
+def test_derive_session_id_appends_slot_suffix_when_given(monkeypatch):
+    # W4b T5: a later tab's poller derives ITS OWN id -- the SAME -s{slot}
+    # suffix the gateway mints server-side from StartRequest.slot.
+    _patch_identity(monkeypatch)
+    sid = asyncio.run(SP.derive_session_id(_Cfg(), _tp, "/repo", slot_id="ab12cd"))
+    assert sid == "marathon-user-1-rab12cd34ef56-sab12cd"
+
+
+def test_derive_session_id_omits_slot_suffix_when_empty(monkeypatch):
+    # Legacy/tab-1 contract: slot_id="" (the default) keeps today's id
+    # byte-identical -- no trailing "-s" of any kind.
+    _patch_identity(monkeypatch)
+    sid = asyncio.run(SP.derive_session_id(_Cfg(), _tp, "/repo"))
+    assert sid == "marathon-user-1-rab12cd34ef56"
+
+
 # ── poll loop ─────────────────────────────────────────────────────────────────
 
 def test_poll_submits_first_item_with_surface(monkeypatch):
@@ -552,3 +568,75 @@ def test_mode_getter_read_fresh_every_tick_no_extra_poke_needed(monkeypatch):
            until=lambda: len(seen_modes) >= 3)
     assert seen_modes[:2] == ["default", "default"]
     assert seen_modes[2] == "autopilot"   # the very next tick already reports it
+
+
+# ── per-slot stagger + slot_id threading (W4b T5) ────────────────────────────
+
+def test_initial_delay_sleeps_once_before_the_first_tick(monkeypatch):
+    # The repl staggers each new per-slot poller's start so several tabs
+    # opened back-to-back don't all hit the gateway in the same instant --
+    # `initial_delay` is slept EXACTLY once, before the loop's own cadence
+    # sleep ever runs.
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(SP.asyncio, "sleep", fake_sleep)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    with contextlib.suppress(asyncio.CancelledError):
+        asyncio.run(SP.poll_idle_steer(
+            _Cfg(), _tp, workspace=".", is_busy=lambda: False, submit=submit,
+            live_session_id=lambda: "marathon-u-r1", initial_delay=2.0))
+
+    assert sleeps[0] == 2.0                # the stagger, first
+    assert sleeps[1] == SP._POLL_INTERVAL  # then the ordinary fast-cadence tick
+
+
+def test_initial_delay_zero_never_sleeps_extra(monkeypatch):
+    # Default (0.0, every existing caller) must stay byte-identical -- no
+    # extra asyncio.sleep(0.0) call at all.
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 1:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(SP.asyncio, "sleep", fake_sleep)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    with contextlib.suppress(asyncio.CancelledError):
+        asyncio.run(SP.poll_idle_steer(
+            _Cfg(), _tp, workspace=".", is_busy=lambda: False, submit=submit,
+            live_session_id=lambda: "marathon-u-r1"))
+
+    assert sleeps == [SP._POLL_INTERVAL]   # ONE sleep total, the ordinary tick
+
+
+def test_slot_id_threaded_into_derivation_when_no_live_session_yet(monkeypatch):
+    polled = []
+
+    async def fake_fetch(cfg, tp, session_id):
+        polled.append(session_id)
+        return {"items": []}
+
+    import webbee.thread as TH
+    monkeypatch.setattr(TH, "fetch_pending_steer", fake_fetch)
+    _patch_identity(monkeypatch)
+
+    async def submit(text, surface, steer_iid=""):
+        pass
+
+    _drive(SP.poll_idle_steer(_Cfg(), _tp, workspace="/repo", is_busy=lambda: False,
+                              submit=submit, live_session_id=lambda: "",
+                              slot_id="ab12cd", interval=0.01),
+           until=lambda: polled)
+    assert polled[0] == "marathon-user-1-rab12cd34ef56-sab12cd"

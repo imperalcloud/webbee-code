@@ -909,7 +909,7 @@ def test_stop_swallows_network_errors(monkeypatch):
 # path a typed line takes, plus ONE additive body key: `surface` = the queued
 # item's origin. The kernel adopts it start-path to stamp provenance/tags.
 
-def _run_turn_capture_body(monkeypatch, **run_kw):
+def _run_turn_capture_body(monkeypatch, sess_kw=None, **run_kw):
     import httpx
     import imperal_mcp.client as ic
     import webbee.session as S
@@ -958,7 +958,8 @@ def _run_turn_capture_body(monkeypatch, **run_kw):
     async def token_provider():
         return "tok"
 
-    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".",
+                          **(sess_kw or {}))
     out = asyncio.run(sess.run("do it", _Sink(), **run_kw))
     assert out == "done"
     return bodies[0]
@@ -1002,6 +1003,38 @@ def test_run_mints_steer_iid_when_pickup_item_had_none(monkeypatch):
     body = _run_turn_capture_body(monkeypatch, surface="telegram", steer_iid="")
     assert body["steer_iid"]
     assert body["surface"] == "telegram"
+
+
+# ── W4b T5: slot-suffixed session ids -- AgentSession.slot_id threading ──────
+
+def test_run_omits_slot_key_when_slot_id_empty(monkeypatch):
+    # Legacy contract: tab-1's AgentSession never carries a slot_id -- the
+    # POST body stays byte-identical, no "slot" key at all.
+    body = _run_turn_capture_body(monkeypatch)
+    assert "slot" not in body
+
+
+def test_run_body_keys_identical_to_legacy_when_slot_id_empty(monkeypatch):
+    # Byte-identical pin (plan T5 item 2): with slot_id="" the body has
+    # EXACTLY the keys a 0.3.21 client's plain typed turn produced.
+    body = _run_turn_capture_body(monkeypatch)
+    assert set(body.keys()) == {"task", "user_id", "coding_context", "steer_iid"}
+
+
+def test_run_threads_slot_into_session_post_body(monkeypatch):
+    # A later tab's AgentSession carries its own short slot_id -- the gateway
+    # mints {prefix}-{imperal_id}-r{repo_key}-s{slot} from it.
+    body = _run_turn_capture_body(monkeypatch, sess_kw={"slot_id": "a1b2c3"})
+    assert body["slot"] == "a1b2c3"
+    assert body["task"] == "do it"
+
+
+def test_run_threads_slot_alongside_surface_and_steer_iid(monkeypatch):
+    body = _run_turn_capture_body(monkeypatch, sess_kw={"slot_id": "a1b2c3"},
+                                  surface="telegram", steer_iid="iid-9")
+    assert body["slot"] == "a1b2c3"
+    assert body["surface"] == "telegram"
+    assert body["steer_iid"] == "iid-9"
 
 
 def test_run_retries_turn_start_post_with_same_steer_iid(monkeypatch):
