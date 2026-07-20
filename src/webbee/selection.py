@@ -31,9 +31,14 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
         def mouse_handler(self, ev):
             et = ev.event_type
             if et == MouseEventType.SCROLL_UP:
+                # W2 final-review Fix 3b: the user's wheel wins over a runaway
+                # edge auto-scroll — disarm edge_drag, but the armed selection
+                # itself (`_sel`/`_down_abs`) stays exactly as-is.
+                pane._edge_drag = 0
                 pane.scroll(-3)
                 return None
             if et == MouseEventType.SCROLL_DOWN:
+                pane._edge_drag = 0
                 pane.scroll(3)
                 return None
             if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.LEFT:
@@ -46,14 +51,16 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                     # never closed; `_down`/`_down_abs`/`_sel` are overwritten
                     # below regardless, so they need no separate reset.
                     pane._edge_drag = 0
-                self._down = ev.position           # viewport point — click-vs-drag test only
+                self._down = ev.position           # viewport point (debug/reflow-abort only now)
                 self._down_abs = (ev.position.y + pane._offset, ev.position.x)
                 pane._sel = (self._down_abs, self._down_abs)  # zero-width start (no highlight yet)
+                pane._edge_ticks = 0                # fresh drag — the runaway-scroll clock resets
                 pane._invalidate()
                 return None
             if et == MouseEventType.MOUSE_MOVE:
                 if self._down_abs is None:
                     return NotImplemented
+                pane._edge_ticks = 0                # a fresh MOUSE_MOVE means the pointer isn't parked
                 y = ev.position.y
                 if y >= pane._view_h - 1:
                     pane.scroll(3)
@@ -67,11 +74,18 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                 pane._invalidate()                 # grow the highlight as you drag
                 return None
             if et == MouseEventType.MOUSE_UP:
-                down, self._down = self._down, None
+                self._down = None
                 down_abs, self._down_abs = self._down_abs, None
                 pane._edge_drag = 0
-                if down is not None and (down.x, down.y) != (ev.position.x, ev.position.y):
-                    pane._copy_selection(down_abs, (ev.position.y + pane._offset, ev.position.x))
+                # W2 final-review Fix 4: click-vs-drag compares ABSOLUTE
+                # endpoints, not viewport points — an edge auto-scroll during
+                # the drag (Fix 3b's own MOUSE_MOVE branch) can land the
+                # release on the SAME viewport cell the press used while the
+                # content underneath has moved; the old viewport-only compare
+                # missed exactly that case and silently dropped the copy.
+                up_abs = (ev.position.y + pane._offset, ev.position.x)
+                if down_abs is not None and down_abs != up_abs:
+                    pane._copy_selection(down_abs, up_abs)
                 pane._sel = None
                 pane._invalidate()                 # clear the highlight (colours restored)
                 return None
@@ -90,25 +104,37 @@ def forward_mouse(pane, ev) -> bool:
     mouse handling.
 
     No drag armed (`pane.control._down_abs is None`) → False immediately,
-    untouched — the caller falls through to its own handling. While armed,
+    untouched — the caller falls through to its own handling. While armed, a
+    MOUSE_DOWN (W2 final-review Fix 3a) means the matching MOUSE_UP was lost
+    the same way the pane's OWN MOUSE_DOWN hygiene handles it — every stale
+    drag field is cleared and this returns False so the neighbor's click
+    proceeds untouched (no phantom copy, no swallowed pull/toggle). Otherwise
     only MOUSE_MOVE/MOUSE_UP are treated specially (anything else — a stray
     SCROLL, say — is left to the neighbor too): the event is treated as if
     it had hit the pane's BOTTOM row (y clamped to `_view_h - 1`; x passed
     through unchanged), mirroring the edge-drag extension `edge_tick`
     already performs while parked at the viewport edge. MOUSE_MOVE extends
     `_sel` and arms `_edge_drag = 1` (unconditionally bottom — a forwarded
-    move only happens below the pane, never above it). MOUSE_UP completes
-    the copy exactly like the control's own MOUSE_UP, EXCEPT the click-vs-
-    drag same-position check is skipped on purpose: a forwarded release only
-    reaches here because the pointer already left the pane while the button
-    was down, so it is by definition a drag, never a click. Either way,
-    returns True (consumed)."""
+    move only happens below the pane, never above it), and resets
+    `_edge_ticks` — a forwarded move is still fresh motion, just below the
+    pane. MOUSE_UP completes the copy exactly like the control's own
+    MOUSE_UP, EXCEPT the click-vs-drag same-position check is skipped on
+    purpose: a forwarded release only reaches here because the pointer
+    already left the pane while the button was down, so it is by definition
+    a drag, never a click. Either way, returns True (consumed)."""
     from prompt_toolkit.mouse_events import MouseEventType
 
     control = pane.control
     if control._down_abs is None:
         return False
     et = ev.event_type
+    if et == MouseEventType.MOUSE_DOWN:
+        control._down = None
+        control._down_abs = None
+        pane._sel = None
+        pane._edge_drag = 0
+        pane._invalidate()
+        return False
     if et not in (MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP):
         return False
     row = pane._offset + pane._view_h - 1
@@ -116,6 +142,7 @@ def forward_mouse(pane, ev) -> bool:
     if et == MouseEventType.MOUSE_MOVE:
         pane._sel = (control._down_abs, (row, x))
         pane._edge_drag = 1
+        pane._edge_ticks = 0
         pane._invalidate()
         return True
     # MOUSE_UP

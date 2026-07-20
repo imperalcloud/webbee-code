@@ -25,9 +25,14 @@ def input_height_cap(rows: int) -> int:
     return max(1, min(10, rows * 3 // 10))
 
 
-def panel_cap(rows: int) -> int:
-    """Queue/todo item-row cap as a height fraction (was: hardcoded 5/6)."""
-    return max(3, rows // 6)
+def panel_cap(rows: int, floor: int = 5) -> int:
+    """Queue/todo item-row cap as a height fraction (was: hardcoded 5/6).
+    `floor` is the caller's OWN today's-look constant (queue=5, todo=6) —
+    the old fixed floor=3 shrank both panels below their pre-W2 row counts
+    on an ordinary 24-row terminal, contradicting the "today's look
+    preserved" claim; the per-caller floor honors it while still growing on
+    tall screens."""
+    return max(floor, rows // 6)
 
 
 def trunc(width: int, fraction: float, floor: int) -> int:

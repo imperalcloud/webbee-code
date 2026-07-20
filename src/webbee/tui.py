@@ -150,6 +150,26 @@ def _width_watch(pane, app) -> None:
             pass
 
 
+def _tick_once(pane, app, is_busy) -> None:
+    """One iteration of run_session's `_ticker` loop, extracted module-level
+    so the wiring itself is directly unit-testable (an `async def` infinite
+    loop otherwise only proves itself by running the whole dock). Three
+    effects, in order: (1) `_width_watch` — resize-detect + reflow bridge,
+    UNCONDITIONAL busy or idle; (2) `pane.edge_tick()` — repeat-scroll while
+    parked at a drag edge, error-swallowed so a broken edge-tick can never
+    kill the dock's only animation loop; (3) `app.invalidate()` exactly when
+    a turn is running OR the copy-flash toast is still fresh, so the spinner/
+    elapsed-clock/flash-expiry all animate without redrawing on every idle
+    tick for nothing."""
+    _width_watch(pane, app)
+    try:
+        pane.edge_tick()
+    except Exception:
+        pass
+    if is_busy() or pane.flash():
+        app.invalidate()
+
+
 def _forwarding(handler, pane):
     """W2 Task 8: prompt_toolkit routes mouse events by pointer POSITION,
     not by who owns an in-progress drag, so a selection armed inside the
@@ -632,13 +652,16 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     qp_ui = {"collapsed": False}
     tp_ui = {"collapsed": False}
 
-    def _panel_size():
-        """(cols, item-row cap) shared by both panels' fragment builders AND
-        their ConditionalContainer height lambdas — ONE size read so the
-        rendered rows and the reserved height can never disagree (W2
-        front-2: proportions, not pixels — was the fixed QP/TP_MAX_ITEMS)."""
+    def _panel_size(floor: int):
+        """(cols, item-row cap) shared by a panel's fragment builder AND its
+        ConditionalContainer height lambda — ONE size read so the rendered
+        rows and the reserved height can never disagree (W2 front-2:
+        proportions, not pixels — was the fixed QP/TP_MAX_ITEMS). `floor` is
+        each panel's own today's-look constant (queue=5, todo=6) passed
+        through to sizing.panel_cap so a normal 24-row terminal keeps its
+        pre-W2 row count and only a tall screen grows past it."""
         cols, rows = sizing.get_size(get_app_or_none())
-        return cols, sizing.panel_cap(rows)
+        return cols, sizing.panel_cap(rows, floor)
 
     def _toggle_queue():
         qp_ui["collapsed"] = not qp_ui["collapsed"]
@@ -655,7 +678,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         # forward=pane.forward_mouse (W2 Task 8): first refusal on every
         # row/header click so a drag armed on the pane above can still be
         # extended/completed once it releases on this panel.
-        cols, cap = _panel_size()
+        cols, cap = _panel_size(5)
         return queue_fragments(pending, pull=_pull_at, width=cols,
                                remote=remote_pending, collapsed=qp_ui["collapsed"],
                                toggle=_toggle_queue, max_items=cap,
@@ -668,7 +691,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     queue_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_queue_fragments, focusable=False),
                        height=lambda: queue_height(pending, remote_pending, qp_ui["collapsed"],
-                                                   max_items=_panel_size()[1]),
+                                                   max_items=_panel_size(5)[1]),
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(pending) or bool(remote_pending)))
 
@@ -676,7 +699,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         # Live like _queue_fragments: re-invoked every redraw, reads the
         # sink-owned current_todos list in place (todo frames mutate it).
         # forward=pane.forward_mouse (W2 Task 8): same first-refusal seam.
-        cols, cap = _panel_size()
+        cols, cap = _panel_size(6)
         return todo_fragments(todos, width=cols, collapsed=tp_ui["collapsed"],
                               toggle=_toggle_todos, max_items=cap,
                               forward=pane.forward_mouse)
@@ -688,7 +711,7 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     todo_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_todo_fragments, focusable=False),
                        height=lambda: todo_height(todos, tp_ui["collapsed"],
-                                                  max_items=_panel_size()[1]),
+                                                  max_items=_panel_size(6)[1]),
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(todos)))
 
@@ -724,20 +747,12 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     async def _ticker():
         # animate the spinner + tick the elapsed clock while a turn runs.
-        # _width_watch runs UNCONDITIONALLY every tick, busy or idle — a
+        # _tick_once runs UNCONDITIONALLY every tick, busy or idle — a
         # resize while idle must re-wrap the transcript too, and the
-        # no-change cost is just two int reads (it self-guards any reflow
-        # error, so it can never kill this loop — the dock's only
-        # animation source).
+        # no-change cost is just two int reads.
         while True:
             await asyncio.sleep(0.25)
-            _width_watch(pane, app)
-            try:
-                pane.edge_tick()             # repeat-scroll while parked at a drag edge
-            except Exception:
-                pass                          # never kill the dock's only animation source
-            if is_busy() or pane.flash():
-                app.invalidate()
+            _tick_once(pane, app, is_busy)
 
     tick = asyncio.ensure_future(_ticker())
     try:

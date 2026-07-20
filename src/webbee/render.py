@@ -504,6 +504,12 @@ class RichSink:
         # ✓/✗ carries colour — the rest recedes (dim). Truncation lengths are
         # a PROPORTION of the live console width (W2 front-2), floored at the
         # old hardcoded counts so a narrow terminal never sees an empty line.
+        # DEFERRED (W2 final-review): the clip is baked into the recorded
+        # Text at PRINT time, not re-derived live — after a WIDEN, pre-resize
+        # history keeps its OLD (narrower) clip; cosmetic only, and always
+        # shrink-safe (a shrink still never overflows the new width).
+        # A render-time clipping renderable (re-clips from the live width on
+        # every redraw instead of baking it in) remains a future polish.
         _tool, arg = self._pending if self._pending[0] else (tool, "")
         icon = _ICON.get(_tool, "⚡")
         mark = "✓" if ok else "✗"

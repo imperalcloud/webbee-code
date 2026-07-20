@@ -23,8 +23,8 @@ def test_input_height_cap_is_proportional():
 
 
 def test_panel_cap_and_trunc():
-    assert panel_cap(24) == 4
-    assert panel_cap(60) == 10
-    assert panel_cap(10) == 3             # floor
+    assert panel_cap(24, 5) == 5          # queue floor: today's look at 24 rows
+    assert panel_cap(24, 6) == 6          # todo floor: today's look at 24 rows
+    assert panel_cap(60, 5) == 10         # tall screen: grows past the floor
     assert trunc(120, 0.33, 40) == 40     # floor wins on narrow
     assert trunc(200, 0.33, 40) == 66

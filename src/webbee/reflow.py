@@ -21,21 +21,28 @@ def record_at_line(record_lines: list[int], line: int) -> int:
     return max(0, len(record_lines) - 1)
 
 
-def anchor_offset(record_lines: list[int], top_record: int, max_off: int, follow: bool) -> int:
+def anchor_offset(record_lines: list[int], top_record: int, max_off: int, follow: bool,
+                   base: int = 0) -> int:
     """New `_offset` after a reflow. Tail-follow snaps straight to `max_off`
     (line indices are meaningless post-rewrap, so there's nothing to anchor
-    to). Otherwise the anchor is the NEW start line of `top_record` — the sum
-    of every earlier record's span — clamped so it never overruns the
-    freshly re-wrapped content."""
+    to). Otherwise the anchor is the NEW start line of `top_record` — `base`
+    (the buffer lines preceding the ring's first record, unaffected by a
+    reflow replay) plus the sum of every earlier RING record's span —
+    clamped so it never overruns the freshly re-wrapped content. Only valid
+    when the top-visible line was inside the ring (`_offset >= base`); the
+    pre-ring case is the caller's own no-op branch (those lines never
+    re-wrap, so their line index never changes)."""
     if follow:
         return max_off
-    return min(sum(record_lines[:top_record]), max_off)
+    return min(base + sum(record_lines[:top_record]), max_off)
 
 
-def records_to_drop(record_lines: list[int], dropped: int) -> int:
-    """How many records from the front have ALL their lines inside the first
-    `dropped` lines of a trim — the boundary record (partial overlap) keeps
-    its full span rather than being split."""
+def records_to_drop(record_lines: list[int], dropped: int) -> tuple[int, int]:
+    """How many WHOLE records from the front fit entirely inside the first
+    `dropped` lines of a trim, and how many lines they cover — the boundary
+    record (partial overlap) keeps its full span rather than being split, so
+    the caller's actual cut moves UP to the nearest record boundary instead
+    of slicing into one. Returns (n_records, lines_covered)."""
     acc = 0
     n_drop = 0
     for n in record_lines:
@@ -43,4 +50,4 @@ def records_to_drop(record_lines: list[int], dropped: int) -> int:
             break
         acc += n
         n_drop += 1
-    return n_drop
+    return n_drop, acc
