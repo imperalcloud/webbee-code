@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.18
+
+The adaptive wave: the terminal finally behaves like a real app.
+
+- Stretch or shrink the window and the WHOLE transcript re-wraps live to the
+  new size — history included, splash re-centered, nothing clipped, no dead
+  margins. Panels, the input box and text truncations now scale as
+  proportions of your screen, not fixed character counts.
+- Select text with the mouse and drag past the edge — the transcript
+  auto-scrolls under your selection, keeps selecting while you hold at the
+  edge, and finishes the copy even if you release outside the pane. Scrolling
+  mid-selection no longer corrupts what you copy, and a lost release can
+  never hijack your next click or your clipboard.
+
 ## 0.3.17
 
 Bulletproof core (W1): a marathon can no longer be killed by transport, the
