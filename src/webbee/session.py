@@ -187,6 +187,40 @@ class AgentSession:
             return await self._serve_stream(sink, client, session_id, start_id, task_id,
                                             executor, marathon=marathon)
 
+    async def attach(self, sink, *, task_id: str, start_id: str, marathon: bool = True) -> str:
+        """Attach-on-poll (idle terminal picks up a kernel-dispatched task):
+        NO start POST. A marathon turn woken by a panel/Telegram message
+        while this terminal sat idle can dispatch a local tool_request/
+        confirm_request that nothing attaches -- the gateway's
+        `GET .../pending-steer` response flags this via its additive
+        `attach` field (set only when the drain found no items AND the
+        session's stream tail holds an unanswered request) and hands the
+        client `task_id`/`last_id` to resume from. This session id is
+        DERIVED the same way `webbee.steer.derive_session_id` derives it
+        for polling in the first place (this AgentSession already knows its
+        own workspace + slot_id, so the derivation is reused verbatim, not
+        reinvented) -- simply opening the SSE stream against it fires
+        `client_connected` server-side, which makes the kernel re-dispatch
+        the pending request onto the stream. From there this runs through
+        the EXACT SAME frame-loop `run()` uses (`_serve_stream`): tool
+        execution, consent racing, dedup, and the final/marathon_paused
+        exits all behave identically to a normal turn -- including
+        begin_turn/end_turn semantics, busy gates, and Esc/stop (both
+        driven by the caller around this call, same as any other turn)."""
+        import httpx
+
+        from webbee.steer import derive_session_id
+        from webbee.tools import LocalToolExecutor
+
+        session_id = await derive_session_id(
+            self.cfg, self.token_provider, self.workspace_root,
+            marathon=marathon, slot_id=self.slot_id)
+        executor = LocalToolExecutor(self.workspace_root, indexer=self._intel,
+                                     shadow=self._shadow)
+        async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:
+            return await self._serve_stream(sink, client, session_id, start_id, task_id,
+                                            executor, marathon=marathon)
+
     async def _serve_stream(self, sink, client, session_id: str, start_id: str,
                             task_id: str, executor, *, marathon: bool = False) -> str:
         """The frame-loop phase of ONE coding turn -- factored out of `run()`
