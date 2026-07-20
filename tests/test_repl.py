@@ -1,8 +1,11 @@
 import asyncio
+import os
 import re
 
 from webbee.account import Account
-from webbee.repl import run_marathon, run_repl
+from webbee.repl import (_finish_slot, _live_session_id, _make_session_slot,
+                         _slot_ctx, run_marathon, run_repl)
+from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
 
@@ -1012,3 +1015,189 @@ def test_drained_queued_line_threads_its_steer_iid_into_the_turn():
     assert runs["run the fallback"]["steer_iid"] == "iid-77"
     assert runs["plain typed"]["steer_iid"] == ""
     assert "run the fallback" in getattr(sink, "echoed", [])   # normal ❯ echo path
+
+
+# ── W4a Task 2: repl boot split -- slot factory + process/workspace/slot ─────
+# `_make_session_slot`/`_finish_slot` build the atomic {agent, sink, pane}
+# triple (wiring map §6); `_slot_ctx`/`_live_session_id` are the pure,
+# module-level extractions the run_repl closures (_ctx, the steer poller's
+# live_session_id) now read from -- driven directly here without needing to
+# run the whole REPL loop.
+
+async def _noop_token_provider():
+    return "tok"
+
+
+def _mk_cfg():
+    from webbee.config import Config
+    return Config(api_url="http://x", panel_url="http://p")
+
+
+def test_make_session_slot_builds_coupled_atomic_triple():
+    # The sink must point at THIS slot's own pane/console (wiring map §6 --
+    # a sink must never point at another slot's pane), and its local queue
+    # must be THIS slot's own pending deque, not a shared/global one.
+    agent = FakeAgent()
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, "/tmp", "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: agent,
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    slot = asyncio.run(_drive())
+    assert slot.kind == "session"
+    assert slot.sink.console is slot.pane.console
+    assert slot.sink.local_pending is slot.pending
+    assert slot.agent is agent
+
+
+def test_make_session_slot_shares_resources_bundle_on_same_workspace():
+    # Two slots opened on the SAME repo root must share ONE intel instance
+    # (map §6: same workspace -> same intel/shadow/git_branch bundle) --
+    # the intel_factory must fire exactly once, not once per slot.
+    resources = WorkspaceResources()
+    built = []
+
+    def intel_factory(cfg, ws):
+        svc = _NoopIntel()
+        built.append(svc)
+        return svc
+
+    cfg = _mk_cfg()
+    workspace = os.getcwd()
+
+    async def _drive():
+        s1 = await _make_session_slot(
+            cfg, _noop_token_provider, workspace, "default",
+            resources=resources, shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=intel_factory, shadow_factory=lambda cfg, ws: None,
+            first=False)
+        s2 = await _make_session_slot(
+            cfg, _noop_token_provider, workspace, "default",
+            resources=resources, shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=intel_factory, shadow_factory=lambda cfg, ws: None,
+            first=False)
+        return s1, s2
+
+    s1, s2 = asyncio.run(_drive())
+    assert len(built) == 1                              # ONE boot, not two
+    bundle = resources.get(workspace)
+    assert bundle["intel"] is built[0]
+    # both slots' default agent_factory (if used) would have captured the
+    # SAME bundle -- here the custom agent_factory ignores it, but the
+    # sharing itself (the cache) is the thing under test.
+    assert s1.git_branch == s2.git_branch
+
+
+def test_make_session_slot_first_false_skips_replay(monkeypatch):
+    from webbee import boot
+    calls = []
+
+    async def fake_replay(cfg, tp, sink):
+        calls.append(sink)
+
+    monkeypatch.setattr(boot, "replay_thread", fake_replay)
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    asyncio.run(_drive())
+    assert calls == []            # first=False -> replay_thread never awaited
+
+
+def test_make_session_slot_first_true_runs_replay(monkeypatch):
+    from webbee import boot
+    calls = []
+
+    async def fake_replay(cfg, tp, sink):
+        calls.append(sink)
+
+    monkeypatch.setattr(boot, "replay_thread", fake_replay)
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=True)
+
+    slot = asyncio.run(_drive())
+    assert calls == [slot.sink]   # first=True -> replay runs into THIS slot's sink
+
+
+def test_slot_ctx_reads_active_slot_and_flips_on_switch():
+    mgr = SlotManager()
+    home = SessionSlot(kind="home", workspace="/ws-home", label="Home",
+                       pane=object(), sink=None, agent=None)
+    mgr.add(home)
+
+    sink = FakeSink()
+    sink.session_tokens, sink.session_credits = 42, 7
+    session = SessionSlot(kind="session", workspace="/ws-a", label="a",
+                          pane=object(), sink=sink, agent=FakeAgent(),
+                          mode="plan", git_branch="feature-x")
+    session.pending.append("queued line")
+    mgr.add(session)
+    mgr.active_idx = 1
+
+    ctx = _slot_ctx(mgr.active(), logged_in=True)
+    assert (ctx.mode, ctx.workspace, ctx.git_branch) == ("plan", "/ws-a", "feature-x")
+    assert ctx.queued == ("queued line",)
+    assert (ctx.session_tokens, ctx.session_credits) == (42, 7)
+
+    mgr.active_idx = 0   # switch to Home -- agentless/sinkless, must not crash
+    ctx_home = _slot_ctx(mgr.active(), logged_in=True)
+    assert ctx_home.workspace == "/ws-home"
+    assert ctx_home.git_branch == "-"           # SessionSlot's own default
+    assert ctx_home.session_tokens == 0         # sink is None -> getattr default
+
+
+def test_live_session_id_survives_agent_none_on_home():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace="/ws", label="Home",
+                        pane=object(), sink=None, agent=None))
+    mgr.add(SessionSlot(kind="session", workspace="/ws", label="a", pane=object(),
+                        sink=FakeSink(), agent=StepAgent(session_id="sess-123")))
+
+    mgr.active_idx = 0
+    assert _live_session_id(mgr) == ""           # Home active -> no crash, empty id
+
+    mgr.active_idx = 1
+    assert _live_session_id(mgr) == "sess-123"
+
+
+def test_watcher_task_cancelled_on_repl_exit(monkeypatch):
+    # W4a: the per-workspace resources bundle's watcher_task lives in
+    # WorkspaceResources now, not a repl-level nonlocal -- _cancel_background
+    # must still reach it and cancel it on exit (map §5).
+    fate = {}
+
+    async def hanging_watch(root, on_change):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            fate["cancelled"] = True
+            raise
+
+    from webbee.intel import watch
+    monkeypatch.setattr(watch, "watch_workspace", hanging_watch)
+
+    class _RootedIntel:
+        def __init__(self):
+            self.root = os.getcwd()
+        def build(self): ...
+        def apply_changes(self, paths): ...
+
+    sink, agent = _run(read_line=_lines("/exit"), intel_factory=lambda cfg, ws: _RootedIntel())
+    assert fate.get("cancelled") is True

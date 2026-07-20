@@ -106,3 +106,23 @@ async def start_shadow(cfg, workspace: str, shadow_factory):
         return await asyncio.to_thread(shadow_factory or _default_shadow_factory, cfg, workspace)
     except Exception:
         return None
+
+
+async def boot_workspace(cfg, workspace: str, intel_factory, shadow_factory) -> dict:
+    """Per-WORKSPACE boot phase (W4a boot split, map §6): everything same-
+    repo session slots SHARE -- intel + its watcher task, the reversibility
+    shadow, and the cached git branch (subprocess.run, off the event loop --
+    only /status reads it, recomputing per input line froze the dock).
+    Called once per distinct repo root; webbee.slots.WorkspaceResources
+    caches the returned bundle so a second slot opened on the SAME root
+    reuses it instead of re-booting (re-indexing, a second watcher, a
+    second git subprocess)."""
+    if cfg.intel_enabled:
+        # Guarded off-loop build + watcher; any failure degrades to
+        # intel=None, never crashes the boot (start_intel above).
+        intel, watcher_task = await start_intel(cfg, workspace, intel_factory)
+    else:
+        intel, watcher_task = None, None
+    shadow = await start_shadow(cfg, workspace, shadow_factory)
+    git_branch = await asyncio.to_thread(_git_branch, workspace)
+    return {"intel": intel, "watcher_task": watcher_task, "shadow": shadow, "git_branch": git_branch}
