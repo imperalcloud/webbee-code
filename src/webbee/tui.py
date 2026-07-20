@@ -551,6 +551,61 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     def _start_turn(text):
         _start_turn_in(_a(), text)
 
+    def _finish_natural_turn(slot, done: bool) -> None:
+        """Shared finally-tail of ONE turn (typed via `_run_turn` below, OR
+        an attach pickup via `_start_attach_in`'s wrapper) -- clears
+        `slot.turn["task"]`, then the DRAIN RULE: natural completion ONLY.
+        A user STOP (Esc/Ctrl-C sets turn["stopped"] before cancelling; the
+        caller absorbs the cancel so `done` stays False) means "I'm taking
+        control" — the queue is PRESERVED, stays visible (toolbar accent +
+        /queue), and never auto-runs; /queue clear drops it, and the next
+        NATURAL completion resumes draining. A propagating exception (dock
+        teardown) also leaves the queue be. An ERROR-terminated turn
+        (slot.sink.status()["turn_failed"], set by repl's except branch via
+        RichSink.mark_turn_failed — W1 front-3b) holds the queue too: a
+        broken backend must never burn one queued line per failing turn.
+        Factored out of `_run_turn` so an attach pickup gets the EXACT SAME
+        queue-drain/stop/failed semantics a typed turn has, instead of a
+        parallel half-copy that silently drifts."""
+        slot.turn["task"] = None
+        stopped = slot.turn.pop("stopped", False)
+        failed = False
+        try:
+            failed = bool(slot.sink.status().get("turn_failed"))
+        except Exception:
+            pass
+        if done and not stopped and not failed:
+            # Submit the oldest queued line through the SAME path a typed
+            # line takes, back into the SAME (pinned) slot; queued_run
+            # announces it — never a silent start.
+            _drain_pending(slot.pending, lambda t: _start_turn_in(slot, t), mark=queued_run)
+        get_app().invalidate()
+
+    def _start_attach_in(slot, coro):
+        """Attach-on-poll's own start-turn seam (`ui_hooks["start_attach_in"]`,
+        registered below) -- mirrors `_start_turn_in`'s task-tracking so Esc/
+        Ctrl-C can cancel an in-flight attach turn exactly like a typed one
+        (both key handlers cancel `slot.turn.get("task")` directly), and
+        `_finish_natural_turn` above so its queue-drain/stop/failed tail is
+        identical too. There is no `on_line`/text path for an attach (the
+        caller -- repl's `poll_idle_steer` `attach_turn` seam -- already
+        built the whole turn's coroutine, `sink.begin_turn()` through
+        `end_turn()`), so this takes a ready-made coroutine rather than
+        routing through `_run_turn`; it returns the spawned task so the
+        caller can await it itself (the poller must block for the turn's
+        whole duration -- unlike a typed Enter, which is fire-and-forget
+        from a key handler)."""
+        async def _wrapped():
+            done = False
+            try:
+                await coro
+                done = True
+            finally:
+                _finish_natural_turn(slot, done)
+        slot.turn.pop("stopped", None)
+        slot.turn["task"] = get_app().create_background_task(_wrapped())
+        return slot.turn["task"]
+
     async def _run_turn(slot, text):
         # `slot` is bound ONCE by the caller (Enter's idle path, or a drain
         # re-submitting into the SAME slot it drained from) -- a turn belongs
@@ -563,30 +618,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             await on_line(text, slot)
             done = True
         finally:
-            slot.turn["task"] = None
-            # DRAIN RULE: natural completion ONLY. A user STOP (Esc/Ctrl-C sets
-            # turn["stopped"] before cancelling; repl._run_turn absorbs the
-            # cancel so on_line still returns) means "I'm taking control" — the
-            # queue is PRESERVED, stays visible (toolbar accent + /queue), and
-            # never auto-runs; /queue clear drops it, and the next NATURAL
-            # completion resumes draining. A propagating exception (dock
-            # teardown) also leaves the queue be. An ERROR-terminated turn
-            # (slot.sink.status()["turn_failed"], set by repl's except branch
-            # via RichSink.mark_turn_failed — W1 front-3b) holds the queue
-            # too: a broken backend must never burn one queued line per
-            # failing turn.
-            stopped = slot.turn.pop("stopped", False)
-            failed = False
-            try:
-                failed = bool(slot.sink.status().get("turn_failed"))
-            except Exception:
-                pass
-            if done and not stopped and not failed:
-                # Submit the oldest queued line through the SAME path a typed
-                # line takes, back into the SAME (pinned) slot; queued_run
-                # announces it — never a silent start.
-                _drain_pending(slot.pending, lambda t: _start_turn_in(slot, t), mark=queued_run)
-            get_app().invalidate()
+            _finish_natural_turn(slot, done)
 
     kb = KeyBindings()
 
@@ -971,6 +1003,11 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # populated), instead of a bare `await` that ran the turn invisibly
         # (no busy glyph, no Esc/Ctrl-C cancel -- nothing ever recorded it).
         ui_hooks["start_turn_in"] = _start_turn_in
+        # Attach-on-poll: the poller's own start-turn seam -- see
+        # `_start_attach_in`'s docstring above. Same "no dock -> no entry"
+        # fallback contract as start_turn_in: repl's attach_turn wiring
+        # awaits the coroutine directly when no dock is present.
+        ui_hooks["start_attach_in"] = _start_attach_in
 
     def _tab_fragments_live():
         # Live like _toolbar/_queue_fragments: re-invoked every redraw, so a

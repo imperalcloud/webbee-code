@@ -903,6 +903,20 @@ class SurfaceAgent(FakeAgent):
         return f"answer:{task}"
 
 
+class AttachAgent(SurfaceAgent):
+    """SurfaceAgent + attach() -- attach-on-poll's own turn primitive (NO
+    start POST, see webbee.session.AgentSession.attach)."""
+
+    def __init__(self):
+        super().__init__()
+        self.attach_calls = []
+
+    async def attach(self, sink, *, task_id, start_id):
+        self.attach_calls.append((task_id, start_id))
+        await asyncio.sleep(0)
+        return f"attached:{task_id}"
+
+
 def test_steer_pickup_renders_remote_line_and_runs_tagged_turn(monkeypatch):
     import webbee.steer as SP
     captured = {}
@@ -1018,6 +1032,28 @@ def test_steer_poller_cancelled_on_exit(monkeypatch):
     # no leaked task: the repl cancelled the poller on exit and the loop closed
     # cleanly (asyncio.run inside _run would warn/hang otherwise)
     assert fate.get("cancelled") is True
+
+
+def test_spawn_slot_poller_wires_attach_turn_to_slot_agent_attach(monkeypatch):
+    # Attach-on-poll: the poller's attach_turn seam must drive THIS slot's
+    # own agent.attach() through the normal begin_turn/end_turn turn shape --
+    # same discipline _steer_submit_on gets for a normal remote item.
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, workspace, attach_turn=None, **kw):
+        captured["attach_turn"] = attach_turn
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+
+    agent = AttachAgent()
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=agent)
+
+    assert captured.get("attach_turn") is not None
+    asyncio.run(captured["attach_turn"]({"task_id": "t1", "last_id": "5-0", "kind": "tool"}))
+    assert agent.attach_calls == [("t1", "5-0")]
+    assert "attached:t1" in sink.turns              # ended through the normal end_turn path
+    assert any("attaching" in n for n in sink.notes)  # the honest attach note fired
 
 
 # ── W4b T5 item 3: ONE poller per SESSION slot, not one process-wide poller ──
