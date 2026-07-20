@@ -357,6 +357,52 @@ def test_home_input_new_slot_sink_records_echo(monkeypatch):
     assert slots.slots[1].sink.echoed == ["hello"]
 
 
+def test_home_input_dock_path_echoes_exactly_once():
+    """Regression pin (0.3.24, Valentin live on 0.3.22/0.3.23): typing on Home
+    opened a new session tab whose transcript showed the first message TWICE.
+    Root cause was `_home_input` echoing the typed line itself AND handing off
+    to `ui_hooks["start_turn_in"]` (tui's `_start_turn_in` -> `_run_turn` ->
+    `on_line` -> repl's `_handle`), which echoes AGAIN for every non-command
+    typed line (`_handle`'s own `slot.sink.user_echo(line)` -- the canonical
+    echo every OTHER typed line in the dock already goes through). This fake
+    `start_turn_in` mirrors that real seam (it echoes, exactly like `_handle`
+    does) so the count below actually exercises the double-echo path, not
+    just the echo-free fallback branch `test_home_input_new_slot_sink_records_
+    echo` above already covers."""
+    slots = SlotManager()
+    slots.add(_home_slot(workspace="/cwd"))
+
+    async def fake_make_session_slot(cfg, tp, ws, mode, *, resources, shared_client,
+                                      agent_factory, intel_factory, shadow_factory, first):
+        s = _session_slot(workspace=ws)
+        s.sink = _EchoSink()
+        return s
+
+    import webbee.repl as repl_mod
+    orig = repl_mod._make_session_slot
+    repl_mod._make_session_slot = fake_make_session_slot
+
+    def fake_start_turn_in(slot, text):
+        # Stands in for tui._start_turn_in's REAL chain (on_line -> _handle),
+        # which echoes the line itself for every non-command typed line.
+        slot.sink.user_echo(text)
+
+    async def never_called(slot, text):
+        raise AssertionError("fallback run_turn must not fire when start_turn_in is wired")
+
+    try:
+        asyncio.run(_home_input(
+            "hello", slots=slots, cfg=None, token_provider=None, mode="default",
+            resources=WorkspaceResources(), shared_client=None, agent_factory=None,
+            intel_factory=None, shadow_factory=None, workspace="/cwd",
+            ui_hooks={"start_turn_in": fake_start_turn_in}, run_turn=never_called))
+    finally:
+        repl_mod._make_session_slot = orig
+
+    new_slot = slots.slots[1]
+    assert new_slot.sink.echoed == ["hello"]   # exactly ONE echo -- not two
+
+
 # ---- _schedule_home_refill --------------------------------------------------
 
 def test_schedule_home_refill_ignores_non_home_idx():
