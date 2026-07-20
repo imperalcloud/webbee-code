@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.22
+
+Open the same project in two tabs and they truly run in parallel — each tab
+gets its own isolated working copy automatically; remote messages land in the
+right tab.
+
+- Two tabs on the same repo no longer share one working copy: the second tab
+  gets its own isolated checkout automatically, so edits from one tab never
+  collide with the other. A note in that tab tells you it happened (or, on
+  the rare case it couldn't, that the checkout is shared so you know to be
+  careful).
+- Telegram/panel messages and remote mode switches now reach the RIGHT tab —
+  every open tab is independently steerable, not just whichever one a single
+  shared listener happened to be watching.
+- `/tabs` now shows each tab's short id for reference.
+
 ## 0.3.21
 
 - A mode change sent from the panel or Telegram now reliably reaches your

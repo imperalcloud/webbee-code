@@ -4,8 +4,8 @@ import re
 
 from webbee.account import Account
 from webbee.repl import (_cancel_all_background, _cancel_slot, _exit_dump,
-                         _finish_slot, _live_session_id, _make_session_slot,
-                         _slot_ctx, _steer_target, run_marathon, run_repl,
+                         _finish_slot, _isolate_workspace, _make_session_slot,
+                         _slot_ctx, run_marathon, run_repl,
                          set_slot_mode)
 from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
 
@@ -408,6 +408,10 @@ def test_three_mode_mutation_sites_all_route_through_set_slot_mode():
     # standalone entry point to drive behaviorally without prompt_toolkit,
     # so this asserts the wiring statically; the /mode-action and remote-flip
     # sites additionally get full behavior tests elsewhere in this file.
+    # W4b T5: _on_mode/_confirm_autopilot moved to module level (one poller
+    # per session slot now, each bound to its own explicit slot -- no more
+    # shared first_session_slot nonlocal to close over), so their source is
+    # inspected directly rather than sliced out of run_repl's own body.
     import inspect
 
     import webbee.repl as R
@@ -420,10 +424,10 @@ def test_three_mode_mutation_sites_all_route_through_set_slot_mode():
     mode_action = src.split('res.action == "mode" and res.new_mode:')[1][:300]
     assert "set_slot_mode(slot, res.new_mode)" in mode_action
 
-    on_mode_body = src.split("def _on_mode")[1].split("async def _confirm_autopilot")[0]
+    on_mode_body = inspect.getsource(R._on_mode)
     assert "set_slot_mode(slot, mode)" in on_mode_body
 
-    confirm_body = src.split("async def _confirm_autopilot")[1].split("def _cancel_background")[0]
+    confirm_body = inspect.getsource(R._confirm_autopilot)
     assert 'set_slot_mode(slot, "autopilot")' in confirm_body
 
 
@@ -1016,6 +1020,107 @@ def test_steer_poller_cancelled_on_exit(monkeypatch):
     assert fate.get("cancelled") is True
 
 
+# ── W4b T5 item 3: ONE poller per SESSION slot, not one process-wide poller ──
+
+def test_two_session_slots_each_get_their_own_idle_steer_poller(monkeypatch):
+    import webbee.steer as SP
+    calls = []
+
+    async def spy_poller(cfg, token_provider, *, workspace, is_busy, submit,
+                         marathon=True, live_session_id=lambda: "", mode_getter=None,
+                         **kw):
+        calls.append({"workspace": workspace, "mode_getter": mode_getter})
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+
+    # "hello" (a real turn, SurfaceAgent's own `await asyncio.sleep(0)`) gives
+    # the just-scheduled SECOND poller task at least one event-loop tick to
+    # actually start running before "/exit" tears it down -- `ensure_future`
+    # only SCHEDULES it, and /exit right on its heels (no intervening await)
+    # would cancel it before its body ever reached `calls.append(...)`.
+    sink, agent = _run(read_line=_lines("/new /tmp", "hello", "/exit"), agent=SurfaceAgent())
+
+    # tab-1 (this process's cwd) + the "/new /tmp" tab -- TWO pollers, never
+    # one shared process-wide poller chasing whichever tab is active.
+    assert len(calls) == 2
+    ws0, ws1 = calls[0]["workspace"], calls[1]["workspace"]
+    assert ws0 != ws1
+    assert os.path.abspath("/tmp") in (ws1, ws0)
+    # each mode_getter reads ITS OWN slot's mode -- neither is bound to a
+    # shared first_session_slot.
+    assert calls[0]["mode_getter"]() == "default"
+    assert calls[1]["mode_getter"]() == "default"
+
+
+def test_two_session_slots_each_pollers_submit_lands_only_in_its_own_slot(monkeypatch):
+    import webbee.steer as SP
+    calls = []
+
+    async def spy_poller(cfg, token_provider, *, workspace, submit, **kw):
+        calls.append(submit)
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+
+    agents = []
+
+    def agent_factory(cfg, tp, ws, mode):
+        a = SurfaceAgent()
+        agents.append(a)
+        return a
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+    asyncio.run(run_repl(
+        cfg, "default", sink=FakeSink(), read_line=_lines("/new /tmp", "hello", "/exit"),
+        agent_factory=agent_factory, auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+        sessions_client=FakeSessions(), intel_factory=lambda cfg, ws: _NoopIntel(),
+        shadow_factory=lambda cfg, ws: None))
+
+    assert len(calls) == 2 and len(agents) == 2
+    # "/new /tmp" switches active -> slot 1, so "hello" ran there (the settle
+    # line that gives poller-1's task a tick to start -- see the comment on
+    # the read_line sequence above); slot 0's agent is untouched so far.
+    assert agents[0].tasks == []
+    assert agents[1].tasks == ["hello"]
+
+    # Each captured poller's own `submit` is bound to ITS slot -- driving one
+    # never touches the other's agent (was: one process-wide poller resolved
+    # `_steer_target(slots)` fresh every tick, so which slot a remote
+    # instruction landed in depended on whatever was active/first-session AT
+    # THAT MOMENT; every slot now has its own fixed target, by construction).
+    asyncio.run(calls[0]("into slot zero", "telegram", "iid-0"))
+    assert agents[0].tasks == ["into slot zero"]
+    assert agents[1].tasks == ["hello"]                # untouched by poller-0's submit
+
+    asyncio.run(calls[1]("into slot one", "telegram", "iid-1"))
+    assert agents[1].tasks == ["hello", "into slot one"]
+    assert agents[0].tasks == ["into slot zero"]      # unaffected by the second submit
+
+
+def test_two_session_slots_each_poller_is_tracked_in_its_own_bg_tasks_and_cancelled_on_exit(monkeypatch):
+    import webbee.steer as SP
+    fates = []
+
+    async def hanging_poller(cfg, token_provider, **kw):
+        fate = {"cancelled": False}
+        fates.append(fate)
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            fate["cancelled"] = True
+            raise
+
+    monkeypatch.setattr(SP, "poll_idle_steer", hanging_poller)
+    # "hello" settles the just-scheduled second poller in (same reasoning as
+    # the fan-out test above) before "/exit" tears it down.
+    sink, agent = _run(read_line=_lines("/new /tmp", "hello", "/exit"), agent=SurfaceAgent())
+
+    # No leaked tasks -- the exit-time teardown walks EVERY slot's own
+    # bg_tasks (unchanged plumbing; W4b T5 just puts more into it).
+    assert len(fates) == 2
+    assert all(f["cancelled"] for f in fates)
+
+
 def test_shared_client_closed_on_repl_exit(monkeypatch):
     # FIX7f coverage: the repl-lifetime keep-alive AsyncClient (Task 12) must
     # be closed when the fallback loop exits -- a leaked client keeps its
@@ -1273,10 +1378,9 @@ def test_drained_queued_line_threads_its_steer_iid_into_the_turn():
 
 # ── W4a Task 2: repl boot split -- slot factory + process/workspace/slot ─────
 # `_make_session_slot`/`_finish_slot` build the atomic {agent, sink, pane}
-# triple (wiring map §6); `_slot_ctx`/`_live_session_id` are the pure,
-# module-level extractions the run_repl closures (_ctx, the steer poller's
-# live_session_id) now read from -- driven directly here without needing to
-# run the whole REPL loop.
+# triple (wiring map §6); `_slot_ctx` is the pure, module-level extraction
+# the run_repl closures (_ctx) read from -- driven directly here without
+# needing to run the whole REPL loop.
 
 async def _noop_token_provider():
     return "tok"
@@ -1308,10 +1412,18 @@ def test_make_session_slot_builds_coupled_atomic_triple():
     assert slot.agent is agent
 
 
-def test_make_session_slot_shares_resources_bundle_on_same_workspace():
-    # Two slots opened on the SAME repo root must share ONE intel instance
-    # (map §6: same workspace -> same intel/shadow/git_branch bundle) --
-    # the intel_factory must fire exactly once, not once per slot.
+def test_make_session_slot_shares_resources_bundle_on_same_workspace(monkeypatch):
+    # Two slots opened on the SAME repo root, where auto-worktree isolation
+    # is UNAVAILABLE (W4b T5 item 4's degrade path -- stubbed here so this
+    # unit test never shells out `git worktree add` against the actual repo
+    # checkout pytest runs from) must share ONE intel instance (map §6: same
+    # workspace -> same intel/shadow/git_branch bundle) -- the intel_factory
+    # must fire exactly once, not once per slot. The isolated-into-its-own-
+    # worktree case (creation SUCCEEDS -> its own fresh bundle) is covered
+    # separately below.
+    import webbee.worktrees as WT
+    monkeypatch.setattr(WT, "create_worktree", lambda root, slot_id: None)
+
     resources = WorkspaceResources()
     built = []
 
@@ -1346,6 +1458,198 @@ def test_make_session_slot_shares_resources_bundle_on_same_workspace():
     # SAME bundle -- here the custom agent_factory ignores it, but the
     # sharing itself (the cache) is the thing under test.
     assert s1.git_branch == s2.git_branch
+
+
+# ── W4b T5 item 1: slot_id minting -- tab-1 legacy id vs later short hex ────
+
+def test_make_session_slot_first_true_keeps_slot_id_empty():
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=True)
+
+    slot = asyncio.run(_drive())
+    assert slot.slot_id == ""
+    assert slot.agent.slot_id == ""
+
+
+def test_make_session_slot_first_false_mints_a_short_hex_slot_id():
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, "/tmp", "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    slot = asyncio.run(_drive())
+    assert slot.slot_id and len(slot.slot_id) == 6
+    assert all(c in "0123456789abcdef" for c in slot.slot_id)
+    assert slot.agent.slot_id == slot.slot_id   # threaded onto the agent too
+
+
+def test_make_session_slot_mints_a_different_id_each_time():
+    async def _drive():
+        s1 = await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, "/tmp", "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+        s2 = await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, "/tmp", "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+        return s1, s2
+
+    s1, s2 = asyncio.run(_drive())
+    assert s1.slot_id != s2.slot_id
+
+
+def test_make_session_slot_explicit_slot_id_overrides_auto_mint():
+    # DI seam for deterministic tests (worktree naming, poller derivation).
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, "/tmp", "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False, slot_id="fixed1")
+
+    slot = asyncio.run(_drive())
+    assert slot.slot_id == "fixed1"
+
+
+# ── W4b T5 item 4: auto-worktree for a same-repo second tab ─────────────────
+
+def test_isolate_workspace_skips_when_first():
+    resources = WorkspaceResources()
+    resources.put("/repo", {"intel": None})   # pretend a bundle already exists
+    ws, note = asyncio.run(_isolate_workspace("/repo", resources, first=True, slot_id="abc123"))
+    assert (ws, note) == ("/repo", "")
+
+
+def test_isolate_workspace_skips_when_no_existing_bundle_for_this_root():
+    # A DIFFERENT repo -- resources has nothing cached for it yet, so this
+    # is treated as a genuinely first-of-its-kind workspace, not isolated.
+    resources = WorkspaceResources()
+    ws, note = asyncio.run(_isolate_workspace("/repo", resources, first=False, slot_id="abc123"))
+    assert (ws, note) == ("/repo", "")
+
+
+def test_isolate_workspace_creates_a_worktree_when_a_bundle_already_exists(tmp_path, monkeypatch):
+    import webbee.worktrees as WT
+    resources = WorkspaceResources()
+    resources.put(str(tmp_path), {"intel": None})   # simulates an existing session slot's bundle
+    monkeypatch.setattr(WT, "create_worktree", lambda root, slot_id: f"/wt/{slot_id}")
+
+    ws, note = asyncio.run(_isolate_workspace(str(tmp_path), resources, first=False, slot_id="abc123"))
+    assert ws == "/wt/abc123"
+    assert "isolated worktree" in note
+
+
+def test_isolate_workspace_degrades_to_shared_checkout_on_worktree_failure(tmp_path, monkeypatch):
+    import webbee.worktrees as WT
+    resources = WorkspaceResources()
+    resources.put(str(tmp_path), {"intel": None})
+    monkeypatch.setattr(WT, "create_worktree", lambda root, slot_id: None)
+
+    ws, note = asyncio.run(_isolate_workspace(str(tmp_path), resources, first=False, slot_id="abc123"))
+    assert ws == str(tmp_path)
+    assert "shared checkout" in note
+
+
+def _init_real_git_repo(tmp_path, name="proj"):
+    import subprocess
+    root = tmp_path / name
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@example.com"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "test"], check=True)
+    (root / "f.txt").write_text("x")
+    subprocess.run(["git", "-C", str(root), "add", "f.txt"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"], check=True)
+    return root
+
+
+def test_second_session_slot_on_same_repo_gets_isolated_into_a_real_worktree(tmp_path):
+    # End-to-end (real git subprocess) through _make_session_slot: a genuine
+    # SECOND tab on a repo tab-1 already opened gets its own worktree, with
+    # an honest note in its own pane, and its tab title stays the ORIGINAL
+    # repo's name (never the worktree cache path's basename).
+    root = _init_real_git_repo(tmp_path)
+    import webbee.worktrees as WT
+    monkeypatch_root = str(tmp_path / "cache" / "worktrees")
+    orig_root = WT.WORKTREE_ROOT
+    WT.WORKTREE_ROOT = monkeypatch_root
+    try:
+        resources = WorkspaceResources()
+
+        async def _drive():
+            s1 = await _make_session_slot(
+                _mk_cfg(), _noop_token_provider, str(root), "default",
+                resources=resources, shared_client=None,
+                agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                intel_factory=lambda cfg, ws: _NoopIntel(),
+                shadow_factory=lambda cfg, ws: None, first=True)
+            s2 = await _make_session_slot(
+                _mk_cfg(), _noop_token_provider, str(root), "default",
+                resources=resources, shared_client=None,
+                agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                intel_factory=lambda cfg, ws: _NoopIntel(),
+                shadow_factory=lambda cfg, ws: None, first=False)
+            return s1, s2
+
+        s1, s2 = asyncio.run(_drive())
+    finally:
+        WT.WORKTREE_ROOT = orig_root
+
+    assert s2.workspace != s1.workspace
+    assert s2.workspace != str(root)
+    assert os.path.isdir(s2.workspace)
+    assert s2.label == s1.label == "proj"          # tab title unaffected by the swap
+    assert "isolated worktree" in s2.pane.dump()
+
+
+def test_second_session_slot_on_a_different_repo_is_not_isolated(tmp_path):
+    # tab-1 opens repo A; a SECOND tab on a totally different repo B must
+    # never be routed through worktree isolation at all -- different root,
+    # nothing "already open" there.
+    root_a = _init_real_git_repo(tmp_path, name="a")
+    root_b = _init_real_git_repo(tmp_path, name="b")
+    import webbee.worktrees as WT
+    orig_root = WT.WORKTREE_ROOT
+    WT.WORKTREE_ROOT = str(tmp_path / "cache" / "worktrees")
+    try:
+        resources = WorkspaceResources()
+
+        async def _drive():
+            s1 = await _make_session_slot(
+                _mk_cfg(), _noop_token_provider, str(root_a), "default",
+                resources=resources, shared_client=None,
+                agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                intel_factory=lambda cfg, ws: _NoopIntel(),
+                shadow_factory=lambda cfg, ws: None, first=True)
+            s2 = await _make_session_slot(
+                _mk_cfg(), _noop_token_provider, str(root_b), "default",
+                resources=resources, shared_client=None,
+                agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                intel_factory=lambda cfg, ws: _NoopIntel(),
+                shadow_factory=lambda cfg, ws: None, first=False)
+            return s1, s2
+
+        s1, s2 = asyncio.run(_drive())
+    finally:
+        WT.WORKTREE_ROOT = orig_root
+
+    assert s2.workspace == str(root_b)             # untouched -- own, never-before-seen root
+    assert "isolated worktree" not in s2.pane.dump()
+    assert "shared checkout" not in s2.pane.dump()
 
 
 def test_make_session_slot_first_false_skips_replay(monkeypatch):
@@ -1512,20 +1816,6 @@ def test_slot_ctx_flips_between_two_session_slots_with_distinct_state():
     assert (ctx_b.session_tokens, ctx_b.session_credits) == (5, 1)
 
 
-def test_live_session_id_survives_agent_none_on_home():
-    mgr = SlotManager()
-    mgr.add(SessionSlot(kind="home", workspace="/ws", label="Home",
-                        pane=object(), sink=None, agent=None))
-    mgr.add(SessionSlot(kind="session", workspace="/ws", label="a", pane=object(),
-                        sink=FakeSink(), agent=StepAgent(session_id="sess-123")))
-
-    mgr.active_idx = 0
-    assert _live_session_id(mgr) == ""           # Home active -> no crash, empty id
-
-    mgr.active_idx = 1
-    assert _live_session_id(mgr) == "sess-123"
-
-
 def test_watcher_task_cancelled_on_repl_exit(monkeypatch):
     # W4a: the per-workspace resources bundle's watcher_task lives in
     # WorkspaceResources now, not a repl-level nonlocal -- _cancel_background
@@ -1661,48 +1951,13 @@ def test_tabs_list_note_contains_one_line_per_tab_with_glyphs():
     assert lines[2].startswith("○1")
 
 
-# ── W4a Task 7: multi-tab edges -- steer targeting, exit dump, cancellation ──
-# _steer_target/_exit_dump/_cancel_all_background are module-level and pure
-# (same DI-testing philosophy as _gate_busy/_live_session_id/_cancel_slot) so
-# each is driven directly here without needing a live dock or the fallback
-# loop's single-slot world (which can never grow a Home slot to exercise the
-# Home-routing/none-target branches at all).
-
-def test_steer_target_active_session_returns_itself():
-    mgr = SlotManager()
-    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
-                        pane=object(), sink=None, agent=None))
-    session = SessionSlot(kind="session", workspace=".", label="a",
-                          pane=object(), sink=FakeSink(), agent=None)
-    mgr.add(session)
-    mgr.active_idx = 1
-    assert _steer_target(mgr) is session
-
-
-def test_steer_target_home_active_routes_to_the_first_session_slot():
-    mgr = SlotManager()
-    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
-                        pane=object(), sink=None, agent=None))
-    first = SessionSlot(kind="session", workspace=".", label="a",
-                        pane=object(), sink=FakeSink(), agent=None)
-    second = SessionSlot(kind="session", workspace=".", label="b",
-                         pane=object(), sink=FakeSink(), agent=None)
-    mgr.add(first)
-    mgr.add(second)
-    mgr.active_idx = 0                          # Home is the ACTIVE tab
-    assert _steer_target(mgr) is first          # lowest-index session, never second
-
-
-def test_steer_target_none_when_no_session_slot_exists():
-    # Every tab closed down to bare Home -- both _poller_busy and
-    # _steer_submit must treat this as "nothing to submit into", not crash
-    # reaching for a None sink.
-    mgr = SlotManager()
-    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
-                        pane=object(), sink=None, agent=None))
-    mgr.active_idx = 0
-    assert _steer_target(mgr) is None
-
+# ── W4a Task 7: multi-tab edges -- exit dump, cancellation ───────────────────
+# _exit_dump/_cancel_all_background are module-level and pure (same
+# DI-testing philosophy as _gate_busy/_cancel_slot) so each is driven
+# directly here without needing a live dock or the fallback loop's
+# single-slot world. (Steer-poller TARGETING no longer needs a dedicated
+# routing helper at all -- W4b T5 gives every session slot its OWN poller,
+# bound to that slot directly; see test_steer_pickup_* below.)
 
 class _FakePane:
     """Minimal `.dump()` double for `_exit_dump` -- doesn't need a real
@@ -2115,9 +2370,13 @@ def test_home_active_tabs_lists_tabs(monkeypatch):
                 await asyncio.sleep(0.05)
 
                 pipe.send_text("/tabs\r")
-                await asyncio.sleep(0.15)
                 pane_home = created_panes[0]
-                assert "Open tabs:" in pane_home.dump()
+                # Poll rather than a fixed sleep (W4b T5 added heavier
+                # subprocess-backed tests to this same file -- occasional
+                # thread-pool contention could otherwise starve a fixed
+                # budget); _until is the SAME robustness pattern every other
+                # real-dock scenario in this file already uses.
+                await _until(lambda: "Open tabs:" in pane_home.dump())
                 assert "●0" in pane_home.dump()     # Home itself listed as active
 
                 pipe.send_text("/exit\r")
@@ -2274,17 +2533,20 @@ def test_remote_mode_flip_targets_polled_slot_not_active(monkeypatch):
     """v0.3.21 regression (Valentin live 2026-07-20): the remote req_mode flip
     lands on the POLLED session slot even when the sink-less Home tab is
     active — the old slots.active() targeting crashed on Home (None sink) and
-    the one-shot GETDEL request was lost; the panel kept showing default."""
+    the one-shot GETDEL request was lost; the panel kept showing default.
+
+    W4b T5: _on_mode/_confirm_autopilot moved to module level and now take
+    the polled slot as an EXPLICIT parameter (one poller per session slot,
+    each bound to its OWN slot directly) -- there's no more slots.active()/
+    shared first_session_slot resolution to get wrong in the first place."""
     import inspect
     import webbee.repl as repl_mod
 
-    src = inspect.getsource(repl_mod)
-    i = src.index("def _on_mode")
-    j = src.index("def _confirm_autopilot")
-    on_mode_src = src[i:j]
+    on_mode_src = inspect.getsource(repl_mod._on_mode)
     assert "slots.active()" not in on_mode_src, "flip must not target the active tab"
-    assert "first_session_slot" in on_mode_src
+    assert "def _on_mode(slot" in on_mode_src, "the polled slot is an explicit param"
     assert "_say(slot" in on_mode_src, "notes must be Home/None-sink safe"
-    confirm_src = src[j : src.index("def _cancel_background")]
+
+    confirm_src = inspect.getsource(repl_mod._confirm_autopilot)
     assert "slots.active()" not in confirm_src
-    assert "first_session_slot" in confirm_src
+    assert "def _confirm_autopilot(slot" in confirm_src

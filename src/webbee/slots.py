@@ -19,6 +19,11 @@ class SessionSlot:
     pane: object                 # OutputPane (None never — Home has one too)
     sink: object | None          # RichSink; None for Home
     agent: object | None         # AgentSession; None for Home
+    slot_id: str = ""            # W4b T5: "" = legacy id (tab 1 / fallback's only
+                                  # slot -- preserves reattach-to-parked semantics);
+                                  # every LATER session slot mints a short hex id
+                                  # (_make_session_slot), threaded into the agent's
+                                  # POST body + the steer poller's derived id.
     pending: deque = field(default_factory=deque)
     turn: dict = field(default_factory=lambda: {"task": None})
     pulled: dict = field(default_factory=lambda: {"text": "", "iid": ""})

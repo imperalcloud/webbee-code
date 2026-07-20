@@ -105,9 +105,10 @@ async def _inject_into_slot(cfg, token_provider, slot: SessionSlot, text: str,
 
 
 def _gate_busy(sink, turn_ref: dict) -> bool:
-    """Pure predicate behind `_poller_busy` (module-level so tests drive it
-    directly, unlike the run_repl closure) -- LOCKOUT-PROOF like
-    tui._busy_live: busy counts only while the turn TASK recorded in
+    """Pure predicate behind every per-slot idle-steer poller's `is_busy`
+    seam (`_spawn_slot_poller`, module-level so tests drive it directly,
+    unlike the run_repl closure) -- LOCKOUT-PROOF like tui._busy_live: busy
+    counts only while the turn TASK recorded in
     `turn_ref` is genuinely alive. A BaseException-class escape (or a raise
     inside end_turn) that leaves the sink's _busy flag stuck must no longer
     starve the idle-steer poller. `turn_ref` is populated ONLY on the dock
@@ -190,7 +191,7 @@ def set_slot_mode(slot: SessionSlot, mode: str) -> None:
     Replaces the three inline mutation sites: Shift-Tab `_cycle`, the /mode
     command action, and the remote `_on_mode` flip (including
     `_confirm_autopilot`'s approval branch). Module-level so tests drive it
-    directly, same testing philosophy as `_slot_ctx`/`_live_session_id`."""
+    directly, same testing philosophy as `_slot_ctx`/`_gate_busy`."""
     slot.mode = mode
     if slot.agent is not None:
         slot.agent.mode = mode
@@ -198,31 +199,58 @@ def set_slot_mode(slot: SessionSlot, mode: str) -> None:
     save_mode(slot.workspace, mode)
 
 
-def _live_session_id(slots: SlotManager) -> str:
-    """The idle-steer poller's live-session seam (map §1): the ACTIVE slot's
-    agent session id, or "" with no crash when the active slot has no agent
-    at all (Home)."""
-    agent = slots.active().agent
-    return getattr(agent, "session_id", "") if agent is not None else ""
+def _on_mode(slot: SessionSlot, mode: str, surface: str) -> None:
+    """Remote coding-mode request (TG/panel → gateway one-shot req_mode →
+    the pending-steer poll). AUTOPILOT SAFE ASYMMETRY (Valentin-chosen): a
+    downgrade or lateral move (→ default/plan) applies INSTANTLY with a
+    visible audited note; the upgrade → autopilot NEVER applies silently —
+    a terminal-local y/n confirm must approve it (the person physically at
+    the terminal is the risk bearer; a remote surface must not disarm the
+    consent prompt it is about to exploit). Unknown modes and no-ops are
+    dropped. Sync + non-blocking by contract (the poller calls it): the
+    confirm runs as its own background task.
+
+    W4b T5: `slot` is now the EXPLICIT slot the calling poller is bound to
+    (every session slot has its own poller — see `_spawn_slot_poller`), not
+    a shared `first_session_slot` nonlocal — module-level so a test drives
+    it directly, same testing philosophy as `set_slot_mode`/`_say`. Fixes
+    the SAME class of bug the old single-poller design had with land-on-
+    Home (that slot was routinely the sink-less Home tab) by construction:
+    a per-slot poller can only ever be bound to an actual session slot."""
+    surface = surface or "remote"
+    if slot is None or mode not in _MODES or mode == slot.mode:
+        return
+    if mode != "autopilot":
+        set_slot_mode(slot, mode)
+        _say(slot, f"mode → {mode} [{surface}]")
+        return
+    asyncio.ensure_future(_confirm_autopilot(slot, surface))
 
 
-def _steer_target(slots: SlotManager) -> SessionSlot | None:
-    """Steer-poller targeting (Task 7, map contract item 1): a remote
-    instruction must land in a SESSION slot — Home has no sink/agent to run
-    a turn against, so routing a steer submit there would crash. The ACTIVE
-    slot already IS a session -> itself, exactly today's behavior. Home
-    active -> the FIRST session slot (lowest index) -- "remote steer must
-    never dead-end" (brief). No session slot exists at all (every tab closed
-    down to bare Home) -> None; both `_poller_busy` and `_steer_submit` treat
-    that as "nothing to submit into" rather than reaching for a None sink.
-    Module-level so a test drives it directly, same as `_live_session_id`."""
-    active = slots.active()
-    if active.kind == "session":
-        return active
-    for slot in slots.slots:
-        if slot.kind == "session":
-            return slot
-    return None
+async def _confirm_autopilot(slot: SessionSlot, surface: str) -> None:
+    """The terminal-local one-tap confirm for a remote autopilot upgrade.
+    Fail-safe in every direction: no confirm affordance, a turn/prompt
+    already live, anything but an explicit local yes, or the prompt timeout
+    all KEEP the current mode — and both outcomes leave an audited note in
+    the transcript. While the prompt is armed the OWNING poller holds off
+    (`_gate_busy` on this same slot gates it), so it can never collide with
+    a real kernel consent (those only exist mid-turn, when the poller does
+    not fetch at all). `slot` is the EXPLICIT slot `_on_mode` was bound to
+    (W4b T5) — the confirm lands in that same slot's own pane, never
+    whatever tab happens to be visible."""
+    if slot is None:
+        return
+    ask = getattr(slot.sink, "ask_yes_no", None)
+    if ask is None or _gate_busy(slot.sink, slot.turn):
+        _say(slot, f"autopilot request from {surface} not applied — mode stays {slot.mode}")
+        return
+    ok = await ask(f"{surface} asks to switch to autopilot "
+                   f"(auto-approve everything) — allow? [y/n]")
+    if ok:
+        set_slot_mode(slot, "autopilot")
+        _say(slot, f"mode → autopilot [{surface}] — approved at this terminal")
+    else:
+        _say(slot, f"autopilot request from {surface} declined — mode stays {slot.mode}")
 
 
 def _exit_dump(slots: SlotManager) -> str:
@@ -247,10 +275,13 @@ def _exit_dump(slots: SlotManager) -> str:
 
 
 def _cancel_all_background(steer_task, slots: SlotManager, resources: WorkspaceResources) -> None:
-    """Exit-time teardown, final shape (Task 7, map contract item 4): the ONE
-    process-wide steer poller + EVERY slot's own bg_tasks (today only Home's
-    fill_home, map §1 -- any later per-slot background piece sweeps here too,
-    for free) + every distinct-repo-root WorkspaceResources bundle's
+    """Exit-time teardown, final shape (Task 7, map contract item 4): an
+    optional standalone `steer_task` (kept for generality/back-compat --
+    W4b T5 gave every session slot its OWN idle-steer poller, folded into
+    that same slot's `bg_tasks` below, so run_repl itself always passes
+    `None` here now) + EVERY slot's own bg_tasks (Home's fill_home, every
+    session slot's poller, any later per-slot background piece -- all swept
+    here for free) + every distinct-repo-root WorkspaceResources bundle's
     watcher_task -- via the PUBLIC `resources.bundles()` accessor (never the
     private `_by_root` dict this file used to poke directly). `.done()`-
     guarded throughout (same discipline as `_cancel_slot`): an already-
@@ -351,7 +382,7 @@ async def _note_reattach(cfg, token_provider, workspace, sink) -> None:
 
 async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: WorkspaceResources,
                        agent_factory, intel_factory, shadow_factory, pane, sink, first: bool,
-                       account) -> "tuple[SessionSlot, int]":
+                       account, slot_id: str = "", label: "str | None" = None) -> "tuple[SessionSlot, int]":
     """Shared tail of slot construction -- the dock's `_make_session_slot` AND
     the headless fallback loop both fall into this once they have their own
     pane (or None, fallback has no dock) + sink: resolve/boot the per-
@@ -362,13 +393,25 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
     session slot the process ever creates does any of that; every later tab
     (first=False) skips all three. Returns `(slot, replayed)` (FIX7e) --
     `replayed` is `boot.replay_thread`'s own display-message count (0 when
-    `first=False`, or the replay itself skipped/failed/found nothing)."""
+    `first=False`, or the replay itself skipped/failed/found nothing).
+
+    `slot_id` (W4b T5) rides onto the SessionSlot AND the agent (post-
+    construction attribute -- works whether `agent_factory` is the DEFAULT
+    one or a caller-supplied test double, since neither has to know about
+    slot_id to still carry it correctly). `label` (T5 item 4, auto-worktree)
+    overrides the tab title computed from `workspace` -- a slot isolated
+    into its own worktree directory must still show the ORIGINAL repo's
+    name, not the worktree cache path's basename; omitted (every existing
+    caller) keeps today's `basename(workspace)` derivation exactly."""
     bundle = await _resources_bundle(cfg, workspace, resources, intel_factory, shadow_factory)
     factory = _resolve_agent_factory(agent_factory, bundle)
     agent = factory(cfg, token_provider, workspace, mode)
-    label = os.path.basename(os.path.normpath(workspace)) or workspace
+    agent.slot_id = slot_id
+    if label is None:
+        label = os.path.basename(os.path.normpath(workspace)) or workspace
     slot = SessionSlot(kind="session", workspace=workspace, label=label, pane=pane,
-                       sink=sink, agent=agent, mode=mode, git_branch=bundle["git_branch"])
+                       sink=sink, agent=agent, mode=mode, git_branch=bundle["git_branch"],
+                       slot_id=slot_id)
     # Queue-panel single-source dedup (0.3.16): hand the sink the SAME
     # type-ahead deque tui mutates for THIS slot, so a kernel task_queued
     # echo can promote a landed local twin (matched by steer_iid) into the
@@ -391,9 +434,37 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
     return slot, replayed
 
 
+async def _isolate_workspace(workspace: str, resources: WorkspaceResources, *,
+                             first: bool, slot_id: str) -> "tuple[str, str]":
+    """W4b T5 item 4 — auto-worktree for a same-repo SECOND tab. `first=True`
+    (tab 1 — nothing can be "already open" yet) always skips this outright.
+    Otherwise: `resources.get(workspace)` is non-None iff some OTHER session
+    slot already booted a WorkspaceResources bundle for this exact repo root
+    (booted ONLY by `_finish_slot`, i.e. only by an actual SESSION slot, never
+    Home) -- the recon's "an EXISTING session slot's repo root" check, for
+    free, with no need to walk the live SlotManager at all. A worktree's OWN
+    root is a DIFFERENT realpath (its own `.git` file), so a worktree is
+    never mistaken for "the same repo" a second time.
+
+    Returns `(effective_workspace, note)` -- `effective_workspace` is the new
+    worktree path on success, or `workspace` UNCHANGED on a skip/failure;
+    `note` is the honest one-line status for the slot's own sink, or "" when
+    nothing happened (first tab, or a different repo)."""
+    if first or resources.get(workspace) is None:
+        return workspace, ""
+    from webbee.repo import find_repo_root
+    from webbee.worktrees import create_worktree
+    root = await asyncio.to_thread(find_repo_root, workspace)
+    wt_path = await asyncio.to_thread(create_worktree, root, slot_id or "0")
+    if wt_path:
+        return wt_path, "⎇ isolated worktree — your edits land here; the main checkout is untouched"
+    return workspace, "⚠ shared checkout — parallel edits may conflict"
+
+
 async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources: WorkspaceResources,
                              shared_client, agent_factory, intel_factory, shadow_factory,
-                             first: bool, account=None, _with_replayed: bool = False):
+                             first: bool, account=None, _with_replayed: bool = False,
+                             slot_id: "str | None" = None):
     """Builds ONE dock tab's atomic {agent, sink, pane} triple (map §6 —
     created together, a sink must never point at another slot's pane/
     console). `shared_client` isn't consumed here yet — reserved for Task 3's
@@ -409,20 +480,39 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
     `set_slot_mode`) overrides it here, off-loop (a git subprocess sits
     behind it). Never autopilot: `save_mode` itself downgrades that to
     'default' before it's ever written, so a loaded mode is always safe to
-    resume silently."""
+    resume silently.
+
+    W4b T5: `slot_id=None` (every existing caller) auto-mints a short hex id
+    for every tab EXCEPT the very first (`first=True` keeps "" — the legacy
+    id, preserving reattach-to-parked semantics); pass an explicit value only
+    for deterministic tests. When a SECOND tab targets a repo root some other
+    slot already has open, its workspace is auto-isolated into its own `git
+    worktree` (`_isolate_workspace`) -- the tab's LABEL still reflects the
+    original repo name (computed here, before the swap), never the worktree
+    cache path's basename."""
+    from uuid import uuid4
+
     from webbee import tui
     from webbee.mode_store import load_mode
     from webbee.render import RichSink
     from webbee.sizing import get_size
 
+    if slot_id is None:
+        slot_id = "" if first else uuid4().hex[:6]
     effective_mode = await asyncio.to_thread(load_mode, workspace) or mode
     width, _height = get_size(None)   # pre-app: same fallback tui.run_session's own sizing uses
     pane = tui.OutputPane(width=width)
     sink = RichSink(console=pane.console, on_output=pane.notify)
-    slot, replayed = await _finish_slot(cfg, token_provider, workspace, effective_mode, resources=resources,
-                                        agent_factory=agent_factory, intel_factory=intel_factory,
-                                        shadow_factory=shadow_factory, pane=pane, sink=sink,
-                                        first=first, account=account)
+    label = os.path.basename(os.path.normpath(workspace)) or workspace
+    effective_workspace, wt_note = await _isolate_workspace(
+        workspace, resources, first=first, slot_id=slot_id)
+    slot, replayed = await _finish_slot(cfg, token_provider, effective_workspace, effective_mode,
+                                        resources=resources, agent_factory=agent_factory,
+                                        intel_factory=intel_factory, shadow_factory=shadow_factory,
+                                        pane=pane, sink=sink, first=first, account=account,
+                                        slot_id=slot_id, label=label)
+    if wt_note:
+        sink.note(wt_note)
     return (slot, replayed) if _with_replayed else slot
 
 
@@ -443,7 +533,7 @@ def _home_target_workspace(slots: SlotManager, cwd: str) -> str:
 async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mode: str,
                       resources: WorkspaceResources, shared_client, agent_factory,
                       intel_factory, shadow_factory, workspace: str,
-                      ui_hooks: dict, run_turn) -> None:
+                      ui_hooks: dict, run_turn, spawn_poller=None) -> None:
     """Home's Enter path (Task 6, wired into `tui.run_session` as
     `home_input=`): typing a task on Home opens a session tab in one motion
     — the SAME `_make_session_slot`/switch path the `/new` command uses
@@ -465,7 +555,15 @@ async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mod
     the deliberate action here: announcing it too would just repeat the ❯
     echo that follows immediately after. Module-level + fully parameterized
     (not a closure) so a test can drive it directly, same testing philosophy
-    as `_finish_slot`/`_make_session_slot`."""
+    as `_finish_slot`/`_make_session_slot`.
+
+    `spawn_poller` (W4b T5, optional) — run_repl's own per-slot idle-steer
+    poller starter (`_spawn_slot_poller`), a SEPARATE param rather than
+    threaded into the `_make_session_slot` call above: that call's signature
+    is depended on verbatim by several tests that stand in a bare fake for
+    the whole function, so a new REQUIRED kwarg there would break them for
+    no benefit -- None (those same tests, and every direct caller that
+    doesn't care) is a plain no-op."""
     ws = _home_target_workspace(slots, workspace)
     new_slot = await _make_session_slot(
         cfg, token_provider, ws, mode, resources=resources,
@@ -473,6 +571,8 @@ async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mod
         intel_factory=intel_factory, shadow_factory=shadow_factory, first=False)
     idx = slots.add(new_slot)
     ui_hooks.get("switch", slots.switch)(idx)
+    if spawn_poller is not None:
+        spawn_poller(new_slot)
     new_slot.sink.user_echo(text)
     start_turn_in = ui_hooks.get("start_turn_in")
     if start_turn_in is not None:
@@ -555,16 +655,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     state = {"logged_in": False}
     slots = SlotManager()
     resources = WorkspaceResources()   # per-workspace boot cache (map §6)
-    steer_task = None   # assigned by _spawn_steer -- idle-steer poller (webbee.steer), cancelled on exit
-    # T6.2 (applied-mode report): the ONE session slot the steer poller is
-    # actually bound to -- set right before `_spawn_steer()` runs, on EITHER
-    # path (dock's first session slot / the fallback loop's only slot).
-    # `_spawn_steer`'s `mode_getter` reads `.mode` off THIS slot, never
-    # `slots.active()` -- the poller's `sid` (derived, or the FIRST turn's
-    # live_session_id) is bound to this same slot's workspace, so its
-    # applied-mode report must follow that slot even if a later tab becomes
-    # the one on screen.
-    first_session_slot: SessionSlot | None = None
+    # W4b T5: EVERY session slot gets its OWN idle-steer poller now (was: one
+    # process-wide poller chasing a shared `first_session_slot`) -- each
+    # poller lives in its own slot's `bg_tasks`, cancelled by the ordinary
+    # slot-close/exit teardown with no new plumbing (see `_spawn_slot_poller`
+    # below). `_poller_seq` is the stagger counter (item 3): each new
+    # poller's FIRST tick carries a small incrementing offset so several tabs
+    # opened back-to-back don't all hit the gateway in the same instant.
+    _poller_seq = 0
     # Task 5 (map contract item 5): the dock fills this at construction time
     # with `switch`/`close` -- the SAME `_switch_to`/`_close_flow` a click or
     # a key goes through (history swap, close note) -- so /tab, /new and
@@ -741,6 +839,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     first=False)
                 idx = slots.add(new_slot)
                 ui_hooks.get("switch", slots.switch)(idx)
+                _spawn_slot_poller(new_slot)
                 new_slot.sink.note(f"tab {idx} opened — {new_slot.label}")
                 return "continue"
             if res.action == "tab_switch":
@@ -773,7 +872,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 # gated) -- unconditional _say instead of the old
                 # `if _sink is not None:` guard, which silently swallowed
                 # the listing instead of showing it.
+                # W4b T5 item 5: the tab BAR stays clean (no slot_id there,
+                # ever) -- this verbose /tabs note is the one place a tab's
+                # own short slot_id shows, so it's discoverable without
+                # cluttering the always-visible bar.
                 lines = [f"{'●' if i == slots.active_idx else '○'}{i} {s.label} {s.status_glyph()}"
+                         f"{' ·s' + s.slot_id if getattr(s, 'slot_id', '') else ''}"
                          for i, s in enumerate(slots.slots)]
                 _say(slot, "Open tabs:\n" + "\n".join(lines))
                 return "continue"
@@ -812,9 +916,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     async def _run_turn_on(slot: SessionSlot, line: str, surface: str = "", steer_iid: str = "") -> None:
         """ONE agent turn against an EXPLICIT slot (Task 7 split -- was:
         always `slots.active()` internally, which broke a steer submit that
-        deliberately targets a DIFFERENT slot than whatever's on screen, see
-        `_steer_target`). `_run_turn` below is the thin active()-resolving
-        wrapper every typed-line call site keeps using unchanged."""
+        deliberately targets a DIFFERENT slot than whatever's on screen --
+        W4b T5's `_steer_submit_on` is the poller's own caller now, each
+        bound to its OWN slot). `_run_turn` below is the thin active()-
+        resolving wrapper every typed-line call site keeps using unchanged."""
         _sink = slot.sink
         _sink.begin_turn()
         kw = {"surface": surface} if surface else {}
@@ -853,43 +958,24 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         original design). The caller (`_handle`, `_home_input`) always hands
         the slot the line actually belongs to, pinned at the moment the turn
         started -- never whatever tab happens to be active when this
-        coroutine's body actually runs. `_steer_submit` below bypasses this
-        entirely and calls `_run_turn_on` directly against `_steer_target`'s
-        pick, which is NOT always the active slot (Home active -> the first
-        session slot)."""
+        coroutine's body actually runs. `_steer_submit_on` below bypasses
+        this entirely and calls `_run_turn_on` directly against a specific
+        poller's OWN bound slot (W4b T5 -- every session slot has its own
+        poller now, so there's no more Home-routing ambiguity to resolve)."""
         await _run_turn_on(slot, line, surface=surface, steer_iid=steer_iid)
 
-    async def _steer_submit(text: str, surface: str, steer_iid: str = "") -> None:
+    async def _steer_submit_on(slot: SessionSlot, text: str, surface: str,
+                               steer_iid: str = "") -> None:
         """webbee.steer hands a drained remote instruction here: render it as
         the remote user's own line, then run it as a normal turn (carrying the
-        item's dedup iid so the kernel can drop an at-least-once twin).
-        Targets `_steer_target(slots)` (Task 7, map contract item 1) -- a
-        SESSION slot, never Home: the active slot when it's already a
-        session, otherwise the first session slot, so a remote instruction
-        never dead-ends just because Home happens to be on screen. No session
-        slot exists at all (every tab closed) -> fail-soft, sink-less
-        no-op -- the poller's own contract is silence on nothing-to-do, not a
-        crash or a note nobody would see anyway."""
-        slot = _steer_target(slots)
-        if slot is None:
-            return
+        item's dedup iid so the kernel can drop an at-least-once twin). W4b
+        T5: `slot` is EXPLICIT now -- each per-slot poller (`_spawn_slot_
+        poller`) closes over its OWN slot, so there's no more "which session
+        slot should this remote instruction land in" question to answer
+        (was: `_steer_target(slots)`'s active-or-first-session guess, needed
+        only because one process-wide poller had to pick SOME slot)."""
         slot.sink.foreign_turn(surface, "user", text)
         await _run_turn_on(slot, text, surface=surface, steer_iid=steer_iid)
-
-    def _poller_busy() -> bool:
-        """The idle-steer poller's busy gate: the TARGET slot's (Task 7 --
-        was: blindly the active slot) live turn state (LOCKOUT-PROOF via
-        _gate_busy -- a dead turn task overrides a stuck busy flag) PLUS an
-        armed local prompt (the autopilot confirm arms the same pinned-input
-        future a consent uses) -- submitting a steer turn under an armed
-        prompt could double-prompt the input, so the poller holds off until
-        it resolves. No session slot to target at all -> treat as busy (hold
-        the poller) rather than fetch into a void `_steer_submit` would just
-        drop. Both hooks getattr-guarded (minimal test sinks)."""
-        slot = _steer_target(slots)
-        if slot is None:
-            return True
-        return _gate_busy(slot.sink, slot.turn)
 
     async def _stop_active_turn() -> None:
         """tui.run_session's `stop_turn` leg (Esc/Ctrl-C) -- resolves the
@@ -901,95 +987,46 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         if agent is not None:
             await agent.stop()
 
-    def _on_mode(mode: str, surface: str) -> None:
-        """Remote coding-mode request (TG/panel → gateway one-shot req_mode →
-        the pending-steer poll). AUTOPILOT SAFE ASYMMETRY (Valentin-chosen):
-        a downgrade or lateral move (→ default/plan) applies INSTANTLY with a
-        visible audited note; the upgrade → autopilot NEVER applies silently —
-        a terminal-local y/n confirm must approve it (the person physically
-        at the terminal is the risk bearer; a remote surface must not disarm
-        the consent prompt it is about to exploit). Unknown modes and no-ops
-        are dropped. Sync + non-blocking by contract (the poller calls it):
-        the confirm runs as its own background task. Targets the POLLED
-        session slot (`first_session_slot` — the session whose gateway id the
-        poller drains), NEVER the visible/active tab: with land-on-Home that
-        slot is routinely the sink-less Home tab, and the old active-slot
-        targeting either crashed on Home's None sink or applied the flip to
-        an unrelated tab — the one-shot req_mode (GETDEL) was then lost
-        forever, «panel says plan, terminal stays default» (Valentin, live
-        2026-07-20)."""
-        surface = surface or "remote"
-        slot = first_session_slot
-        if slot is None or mode not in _MODES or mode == slot.mode:
-            return
-        if mode != "autopilot":
-            set_slot_mode(slot, mode)
-            _say(slot, f"mode → {mode} [{surface}]")
-            return
-        asyncio.ensure_future(_confirm_autopilot(surface))
-
-    async def _confirm_autopilot(surface: str) -> None:
-        """The terminal-local one-tap confirm for a remote autopilot upgrade.
-        Fail-safe in every direction: no confirm affordance, a turn/prompt
-        already live, anything but an explicit local yes, or the prompt
-        timeout all KEEP the current mode — and both outcomes leave an
-        audited note in the transcript. While the prompt is armed the steer
-        poller holds off (_poller_busy gates it), so it can never collide
-        with a real kernel consent (those only exist mid-turn, when the
-        poller does not fetch at all). Reads the ACTIVE slot once at call
-        the POLLED session slot, mirroring _on_mode — the confirm must land
-        in the pane of the session it would arm, whatever tab is visible."""
-        slot = first_session_slot
-        if slot is None:
-            return
-        ask = getattr(slot.sink, "ask_yes_no", None)
-        if ask is None or _poller_busy():
-            _say(slot, f"autopilot request from {surface} not applied — mode stays {slot.mode}")
-            return
-        ok = await ask(f"{surface} asks to switch to autopilot "
-                       f"(auto-approve everything) — allow? [y/n]")
-        if ok:
-            set_slot_mode(slot, "autopilot")
-            _say(slot, f"mode → autopilot [{surface}] — approved at this terminal")
-        else:
-            _say(slot, f"autopilot request from {surface} declined — mode stays {slot.mode}")
-
     def _cancel_background() -> None:
         # Task 7: the actual walk moved to the module-level, directly-tested
-        # `_cancel_all_background` (steer + every slot's bg_tasks, .done()-
-        # guarded + every WorkspaceResources bundle's watcher_task via the
-        # PUBLIC `resources.bundles()`, never `_by_root` poked directly).
-        _cancel_all_background(steer_task, slots, resources)
+        # `_cancel_all_background` (every slot's bg_tasks, .done()-guarded --
+        # W4b T5 folded the steer poller(s) into that same per-slot list, so
+        # there's no separate global steer_task to pass anymore -- + every
+        # WorkspaceResources bundle's watcher_task via the PUBLIC
+        # `resources.bundles()`, never `_by_root` poked directly).
+        _cancel_all_background(None, slots, resources)
 
-    def _mode_getter() -> str:
-        """T6.2 (applied-mode report): the mode of the slot the poller is
-        ACTUALLY bound to -- `first_session_slot`, set right before
-        `_spawn_steer()` runs below, never `slots.active()` (a different tab
-        than the one the poller's `sid` resolves to would report the wrong
-        mode). "" before that slot exists (can't happen once the poller is
-        actually spawned, but keeps this a total function for tests calling
-        it standalone)."""
-        return first_session_slot.mode if first_session_slot is not None else ""
-
-    def _spawn_steer() -> None:
-        nonlocal steer_task
+    def _spawn_slot_poller(slot: SessionSlot) -> None:
+        """W4b T5: EVERY session slot gets its OWN idle-steer poller against
+        ITS OWN gateway session id -- the gateway now keys pending_steer per
+        session (T2), so N tabs are genuinely independent remote-steerable
+        sessions instead of one process-wide poller chasing whichever tab
+        happened to be active (W4a's model, which starved every OTHER tab).
+        Targets THIS slot exclusively, never `slots.active()`, never a
+        shared `first_session_slot`: `is_busy`/`mode_getter` read its OWN
+        sink/turn/mode, `live_session_id` its OWN agent, `submit` renders the
+        remote line into its OWN pane and runs the turn through
+        `_run_turn_on(slot, ...)`. Staggered (item 3): each poller's FIRST
+        tick carries a small incrementing offset (0, 1, 2, 0, 1, 2... seconds
+        -- `poll_idle_steer`'s own `initial_delay`) so several tabs opened
+        back-to-back don't all hit the gateway in the same instant. Appended
+        to `slot.bg_tasks` -- the ordinary slot-close/exit teardown
+        (`_cancel_slot`/`_cancel_all_background`) already walks every slot's
+        own bg_tasks, so cancellation needs no new plumbing at all."""
+        nonlocal _poller_seq
+        offset = float(_poller_seq % 3)
+        _poller_seq += 1
         from webbee import steer as _steer
-        # Liveness v2 §B: idle-steer pickup. All poll/drain logic lives in
-        # webbee.steer -- this is wiring only: the ACTIVE slot's live turn
-        # state (+ an armed local prompt) gates polling, the ACTIVE slot's
-        # agent session id (once a turn has run) is the gateway truth,
-        # _steer_submit is the normal turn path, and _on_mode adopts a
-        # remote mode request (autopilot safe-asymmetry). ONE poller for the
-        # whole process (map §6): `workspace` stays bound to the FIRST
-        # session slot's repo root -- today's `workspace` local, since W4a
-        # never opens a second tab on a different repo. pending_steer is per-
-        # USER gateway-side; W4b re-keys it per session instead.
-        steer_task = asyncio.ensure_future(_steer.poll_idle_steer(
-            cfg, token_provider, workspace=workspace, marathon=not once,
-            is_busy=_poller_busy,
-            live_session_id=lambda: _live_session_id(slots),
-            submit=_steer_submit, on_mode=_on_mode, mode_getter=_mode_getter,
-            client=shared_client))
+        task = asyncio.ensure_future(_steer.poll_idle_steer(
+            cfg, token_provider, workspace=slot.workspace, marathon=not once,
+            is_busy=lambda: _gate_busy(slot.sink, slot.turn),
+            live_session_id=lambda: getattr(slot.agent, "session_id", "") or "",
+            submit=lambda text, surface, steer_iid="": _steer_submit_on(
+                slot, text, surface, steer_iid),
+            on_mode=lambda mode, surface: _on_mode(slot, mode, surface),
+            mode_getter=lambda: slot.mode,
+            client=shared_client, slot_id=slot.slot_id, initial_delay=offset))
+        slot.bg_tasks.append(task)
 
     if use_dock:
         ok = False
@@ -1017,13 +1054,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     intel_factory=intel_factory, shadow_factory=shadow_factory,
                     first=True, account=account, _with_replayed=True)
                 slots.add(session_slot)
-                first_session_slot = session_slot   # T6.2: what the poller's mode_getter reads
                 # FIX7e (W4a final review — land-on-Home): the session tab
                 # is only the more useful FIRST screen when the boot replay
                 # actually showed something -- a fresh/empty thread lands on
                 # Home instead (the new-tab dashboard), one Alt+1 away.
                 slots.active_idx = 1 if replayed else 0
-                _spawn_steer()
+                _spawn_slot_poller(session_slot)
                 # Task 6: fill Home in the background from the moment it
                 # exists -- never blocks reaching the session tab above, and
                 # is very likely already done (or well under way) by the
@@ -1052,7 +1088,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                             text, slots=slots, cfg=cfg, token_provider=token_provider, mode=mode,
                             resources=resources, shared_client=shared_client, agent_factory=agent_factory,
                             intel_factory=intel_factory, shadow_factory=shadow_factory,
-                            workspace=workspace, ui_hooks=ui_hooks, run_turn=_run_turn),
+                            workspace=workspace, ui_hooks=ui_hooks, run_turn=_run_turn,
+                            spawn_poller=_spawn_slot_poller),
                         on_switch=lambda idx: _schedule_home_refill(slots, idx, home_fill_kwargs),
                     )
                 finally:
@@ -1101,8 +1138,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             shadow_factory=shadow_factory, pane=None, sink=sink,
             first=True, account=account)
         slots.add(fallback_slot)
-        first_session_slot = fallback_slot   # T6.2: what the poller's mode_getter reads
-        _spawn_steer()
+        _spawn_slot_poller(fallback_slot)
     try:
         while True:
             try:
