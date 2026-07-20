@@ -186,3 +186,37 @@ def test_queue_clear_when_already_empty():
 
 def test_help_mentions_queue():
     assert "/queue" in dispatch("/help", _ctx()).message
+
+
+# ── /new /tab /close /tabs — tab lifecycle commands (W4a Task 5) ────────────
+
+
+def test_new_command_dispatches_with_optional_path():
+    r = dispatch("/new", _ctx())
+    assert r.handled and r.action == "new_tab" and r.arg == ""
+    r2 = dispatch("/new ../other-repo", _ctx())
+    assert r2.action == "new_tab" and r2.arg == "../other-repo"
+
+
+def test_tab_command_dispatches_with_index_arg():
+    r = dispatch("/tab 2", _ctx())
+    assert r.handled and r.action == "tab_switch" and r.arg == "2"
+    r2 = dispatch("/tab", _ctx())
+    assert r2.action == "tab_switch" and r2.arg == ""   # repl reports "no such tab"
+
+
+def test_close_command_dispatches():
+    r = dispatch("/close", _ctx())
+    assert r.handled and r.action == "tab_close"
+
+
+def test_tabs_command_dispatches():
+    r = dispatch("/tabs", _ctx())
+    assert r.handled and r.action == "tabs_list"
+
+
+def test_help_mentions_tab_commands():
+    msg = dispatch("/help", _ctx()).message
+    for c in ("/new", "/tab", "/close", "/tabs"):
+        assert c in msg
+    assert not NO_CYRILLIC.search(msg)

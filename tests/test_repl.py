@@ -1,8 +1,12 @@
 import asyncio
+import os
 import re
 
 from webbee.account import Account
-from webbee.repl import run_marathon, run_repl
+from webbee.repl import (_cancel_all_background, _cancel_slot, _exit_dump,
+                         _finish_slot, _live_session_id, _make_session_slot,
+                         _slot_ctx, _steer_target, run_marathon, run_repl)
+from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
 
@@ -305,6 +309,23 @@ def test_mode_command_switches_agent_mode():
 def test_clear_command_clears_sink():
     sink, agent = _run(read_line=_lines("/clear", "/exit"))
     assert sink.cleared is True
+
+
+def test_clear_command_scopes_to_the_active_slot_only():
+    # Task 7 item 3: /clear must touch ONLY the ACTIVE slot's own sink --
+    # same "the action lands on the right slot's sink, not the original"
+    # proof style as test_new_tab_notes_on_the_new_slots_own_sink_not_the_original.
+    sink, agent = _run(read_line=_lines("/new /tmp", "/clear", "/tab 0", "/exit"))
+    # /clear ran while the NEW (real-sink) slot was active -- the ORIGINAL
+    # FakeSink was a BACKGROUND slot at that moment and must be untouched.
+    assert sink.cleared is False
+    assert not any("cleared" in n.lower() for n in sink.notes)
+
+    sink2, agent2 = _run(read_line=_lines("/new /tmp", "/tab 0", "/clear", "/exit"))
+    # Reversed order: /clear now runs while the ORIGINAL slot IS active --
+    # positive proof the active slot's own sink.clear() genuinely fires.
+    assert sink2.cleared is True
+    assert any("cleared" in n.lower() for n in sink2.notes)
 
 
 def test_ctrl_c_mid_turn_aborts_and_returns_to_prompt():
@@ -1012,3 +1033,942 @@ def test_drained_queued_line_threads_its_steer_iid_into_the_turn():
     assert runs["run the fallback"]["steer_iid"] == "iid-77"
     assert runs["plain typed"]["steer_iid"] == ""
     assert "run the fallback" in getattr(sink, "echoed", [])   # normal ❯ echo path
+
+
+# ── W4a Task 2: repl boot split -- slot factory + process/workspace/slot ─────
+# `_make_session_slot`/`_finish_slot` build the atomic {agent, sink, pane}
+# triple (wiring map §6); `_slot_ctx`/`_live_session_id` are the pure,
+# module-level extractions the run_repl closures (_ctx, the steer poller's
+# live_session_id) now read from -- driven directly here without needing to
+# run the whole REPL loop.
+
+async def _noop_token_provider():
+    return "tok"
+
+
+def _mk_cfg():
+    from webbee.config import Config
+    return Config(api_url="http://x", panel_url="http://p")
+
+
+def test_make_session_slot_builds_coupled_atomic_triple():
+    # The sink must point at THIS slot's own pane/console (wiring map §6 --
+    # a sink must never point at another slot's pane), and its local queue
+    # must be THIS slot's own pending deque, not a shared/global one.
+    agent = FakeAgent()
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, "/tmp", "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: agent,
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    slot = asyncio.run(_drive())
+    assert slot.kind == "session"
+    assert slot.sink.console is slot.pane.console
+    assert slot.sink.local_pending is slot.pending
+    assert slot.agent is agent
+
+
+def test_make_session_slot_shares_resources_bundle_on_same_workspace():
+    # Two slots opened on the SAME repo root must share ONE intel instance
+    # (map §6: same workspace -> same intel/shadow/git_branch bundle) --
+    # the intel_factory must fire exactly once, not once per slot.
+    resources = WorkspaceResources()
+    built = []
+
+    def intel_factory(cfg, ws):
+        svc = _NoopIntel()
+        built.append(svc)
+        return svc
+
+    cfg = _mk_cfg()
+    workspace = os.getcwd()
+
+    async def _drive():
+        s1 = await _make_session_slot(
+            cfg, _noop_token_provider, workspace, "default",
+            resources=resources, shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=intel_factory, shadow_factory=lambda cfg, ws: None,
+            first=False)
+        s2 = await _make_session_slot(
+            cfg, _noop_token_provider, workspace, "default",
+            resources=resources, shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=intel_factory, shadow_factory=lambda cfg, ws: None,
+            first=False)
+        return s1, s2
+
+    s1, s2 = asyncio.run(_drive())
+    assert len(built) == 1                              # ONE boot, not two
+    bundle = resources.get(workspace)
+    assert bundle["intel"] is built[0]
+    # both slots' default agent_factory (if used) would have captured the
+    # SAME bundle -- here the custom agent_factory ignores it, but the
+    # sharing itself (the cache) is the thing under test.
+    assert s1.git_branch == s2.git_branch
+
+
+def test_make_session_slot_first_false_skips_replay(monkeypatch):
+    from webbee import boot
+    calls = []
+
+    async def fake_replay(cfg, tp, sink):
+        calls.append(sink)
+
+    monkeypatch.setattr(boot, "replay_thread", fake_replay)
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False)
+
+    asyncio.run(_drive())
+    assert calls == []            # first=False -> replay_thread never awaited
+
+
+def test_make_session_slot_first_true_runs_replay(monkeypatch):
+    from webbee import boot
+    calls = []
+
+    async def fake_replay(cfg, tp, sink):
+        calls.append(sink)
+
+    monkeypatch.setattr(boot, "replay_thread", fake_replay)
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=lambda c, tp, ws, m: FakeAgent(),
+            intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=True)
+
+    slot = asyncio.run(_drive())
+    assert calls == [slot.sink]   # first=True -> replay runs into THIS slot's sink
+
+
+def test_slot_ctx_reads_active_slot_and_flips_on_switch():
+    mgr = SlotManager()
+    home = SessionSlot(kind="home", workspace="/ws-home", label="Home",
+                       pane=object(), sink=None, agent=None)
+    mgr.add(home)
+
+    sink = FakeSink()
+    sink.session_tokens, sink.session_credits = 42, 7
+    session = SessionSlot(kind="session", workspace="/ws-a", label="a",
+                          pane=object(), sink=sink, agent=FakeAgent(),
+                          mode="plan", git_branch="feature-x")
+    session.pending.append("queued line")
+    mgr.add(session)
+    mgr.active_idx = 1
+
+    ctx = _slot_ctx(mgr.active(), logged_in=True)
+    assert (ctx.mode, ctx.workspace, ctx.git_branch) == ("plan", "/ws-a", "feature-x")
+    assert ctx.queued == ("queued line",)
+    assert (ctx.session_tokens, ctx.session_credits) == (42, 7)
+
+    mgr.active_idx = 0   # switch to Home -- agentless/sinkless, must not crash
+    ctx_home = _slot_ctx(mgr.active(), logged_in=True)
+    assert ctx_home.workspace == "/ws-home"
+    assert ctx_home.git_branch == "-"           # SessionSlot's own default
+    assert ctx_home.session_tokens == 0         # sink is None -> getattr default
+
+
+def test_slot_ctx_flips_between_two_session_slots_with_distinct_state():
+    # Task 7 item 3: /status, /cost and /queue all render straight from
+    # `_ctx()` -> `_slot_ctx(slots.active(), ...)` -- two REAL session slots
+    # (not Home vs. session) with their own mode/queue/spend prove the
+    # snapshot genuinely flips with the active slot, not just "Home reads as
+    # empty" (already covered above).
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace="/ws-home", label="Home",
+                        pane=object(), sink=None, agent=None))
+    sink_a = FakeSink()
+    sink_a.session_tokens, sink_a.session_credits = 100, 10
+    slot_a = SessionSlot(kind="session", workspace="/ws-a", label="a",
+                         pane=object(), sink=sink_a, agent=FakeAgent(),
+                         mode="plan", git_branch="feature-a")
+    slot_a.pending.append("a's queued line")
+    mgr.add(slot_a)
+    sink_b = FakeSink()
+    sink_b.session_tokens, sink_b.session_credits = 5, 1
+    slot_b = SessionSlot(kind="session", workspace="/ws-b", label="b",
+                         pane=object(), sink=sink_b, agent=FakeAgent(),
+                         mode="autopilot", git_branch="feature-b")
+    slot_b.pending.extend(["b1", "b2"])
+    mgr.add(slot_b)
+
+    mgr.active_idx = 1
+    ctx_a = _slot_ctx(mgr.active(), logged_in=True)
+    assert (ctx_a.mode, ctx_a.workspace, ctx_a.git_branch) == ("plan", "/ws-a", "feature-a")
+    assert ctx_a.queued == ("a's queued line",)
+    assert (ctx_a.session_tokens, ctx_a.session_credits) == (100, 10)
+
+    mgr.active_idx = 2
+    ctx_b = _slot_ctx(mgr.active(), logged_in=True)
+    assert (ctx_b.mode, ctx_b.workspace, ctx_b.git_branch) == ("autopilot", "/ws-b", "feature-b")
+    assert ctx_b.queued == ("b1", "b2")
+    assert (ctx_b.session_tokens, ctx_b.session_credits) == (5, 1)
+
+
+def test_live_session_id_survives_agent_none_on_home():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace="/ws", label="Home",
+                        pane=object(), sink=None, agent=None))
+    mgr.add(SessionSlot(kind="session", workspace="/ws", label="a", pane=object(),
+                        sink=FakeSink(), agent=StepAgent(session_id="sess-123")))
+
+    mgr.active_idx = 0
+    assert _live_session_id(mgr) == ""           # Home active -> no crash, empty id
+
+    mgr.active_idx = 1
+    assert _live_session_id(mgr) == "sess-123"
+
+
+def test_watcher_task_cancelled_on_repl_exit(monkeypatch):
+    # W4a: the per-workspace resources bundle's watcher_task lives in
+    # WorkspaceResources now, not a repl-level nonlocal -- _cancel_background
+    # must still reach it and cancel it on exit (map §5).
+    fate = {}
+
+    async def hanging_watch(root, on_change):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            fate["cancelled"] = True
+            raise
+
+    from webbee.intel import watch
+    monkeypatch.setattr(watch, "watch_workspace", hanging_watch)
+
+    class _RootedIntel:
+        def __init__(self):
+            self.root = os.getcwd()
+        def build(self): ...
+        def apply_changes(self, paths): ...
+
+    sink, agent = _run(read_line=_lines("/exit"), intel_factory=lambda cfg, ws: _RootedIntel())
+    assert fate.get("cancelled") is True
+
+
+# ── W4a Task 5: tab keys + commands + lifecycle — repl-side wiring ──────────
+
+
+class _FakeTask:
+    def __init__(self, done=False):
+        self._done = done
+        self.cancelled = False
+    def done(self):
+        return self._done
+    def cancel(self):
+        self.cancelled = True
+
+
+def test_cancel_slot_cancels_the_running_turn_task_and_bg_tasks():
+    slot = SessionSlot(kind="session", workspace=".", label="t",
+                       pane=object(), sink=None, agent=None)
+    live_turn = _FakeTask()
+    slot.turn["task"] = live_turn
+    live_bg, done_bg = _FakeTask(), _FakeTask(done=True)
+    slot.bg_tasks = [live_bg, done_bg, None]
+
+    _cancel_slot(slot)
+
+    assert live_turn.cancelled is True
+    assert live_bg.cancelled is True
+    assert done_bg.cancelled is False        # already done -- never double-cancelled
+
+
+def test_cancel_slot_survives_no_turn_task_and_no_bg_tasks():
+    slot = SessionSlot(kind="session", workspace=".", label="t",
+                       pane=object(), sink=None, agent=None)
+    _cancel_slot(slot)                       # must not raise -- turn["task"] is None
+
+
+def test_cancel_slot_flags_turn_stopped_before_cancelling():
+    # FIX2 (ghost drain on close): closing a busy tab must flag
+    # turn["stopped"] = True -- the SAME "user is taking control" marker
+    # Esc/Ctrl-C set -- so tui's _run_turn finally block holds the queue
+    # instead of draining it into a brand-new turn on a slot that no longer
+    # exists in the SlotManager.
+    slot = SessionSlot(kind="session", workspace=".", label="t",
+                       pane=object(), sink=None, agent=None)
+    slot.turn["task"] = _FakeTask()
+    slot.pending.extend(["queued 1", "queued 2"])
+
+    _cancel_slot(slot)
+
+    assert slot.turn.get("stopped") is True
+    assert slot.turn["task"].cancelled is True
+    assert list(slot.pending) == ["queued 1", "queued 2"]   # untouched -- dies with the slot
+
+
+def test_new_tab_command_opens_a_second_slot_and_switches_to_it():
+    # Fallback (non-dock) path: ui_hooks stays {} so /new's switch falls back
+    # to slots.switch directly -- no history swap needed with no dock, but
+    # the slot itself must exist and become active, and /tabs (after
+    # switching back) must show BOTH tabs with the right glyphs/labels.
+    sink, agent = _run(read_line=_lines("/new /tmp", "/tab 0", "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert "●0" in listing and "○1" in listing
+    assert "tmp" in listing
+
+
+def test_new_tab_notes_on_the_new_slots_own_sink_not_the_original():
+    sink, agent = _run(read_line=_lines("/new /tmp", "/exit"))
+    # the "tab N opened" note lands on the NEW slot's own (real) sink, so the
+    # original FakeSink returned by _run never sees it.
+    assert not any("opened" in n for n in sink.notes)
+
+
+def test_tab_switch_bad_index_notes_helpfully():
+    sink, agent = _run(read_line=_lines("/tab 5", "/exit"))
+    assert any("No such tab" in n for n in sink.notes)
+
+
+def test_tab_switch_valid_index_switches_active_slot():
+    sink, agent = _run(read_line=_lines("/new /tmp", "/tab 0", "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert listing.startswith("Open tabs:")
+    assert "●0" in listing                    # back on the original slot
+
+
+def test_close_command_on_the_only_slot_notes_nothing_to_close():
+    # The fallback loop's single slot sits at index 0 -- unconditionally
+    # guarded by SlotManager.close (the real Home-at-0 invariant), same as
+    # production's Home tab.
+    sink, agent = _run(read_line=_lines("/close", "/exit"))
+    assert any("Nothing to close" in n for n in sink.notes)
+
+
+def test_close_command_closes_the_new_tab_and_notes_the_survivor():
+    sink, agent = _run(read_line=_lines("/new /tmp", "/close", "/tabs", "/exit"))
+    assert any("server-side" in n and "/new" in n for n in sink.notes)
+    listing = sink.notes[-1]
+    assert "●0" in listing and "1" not in listing.replace("/tmp", "")
+
+
+def test_tabs_list_note_contains_one_line_per_tab_with_glyphs():
+    # /new switches active to the new slot -- switch back to 0 first so the
+    # /tabs note lands on the ORIGINAL (inspectable) FakeSink.
+    sink, agent = _run(read_line=_lines("/new /tmp", "/tab 0", "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    lines = listing.split("\n")
+    assert lines[0] == "Open tabs:"
+    assert len(lines) == 3                    # header + 2 tabs
+    assert lines[1].startswith("●0")           # back on the original slot
+    assert lines[2].startswith("○1")
+
+
+# ── W4a Task 7: multi-tab edges -- steer targeting, exit dump, cancellation ──
+# _steer_target/_exit_dump/_cancel_all_background are module-level and pure
+# (same DI-testing philosophy as _gate_busy/_live_session_id/_cancel_slot) so
+# each is driven directly here without needing a live dock or the fallback
+# loop's single-slot world (which can never grow a Home slot to exercise the
+# Home-routing/none-target branches at all).
+
+def test_steer_target_active_session_returns_itself():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    session = SessionSlot(kind="session", workspace=".", label="a",
+                          pane=object(), sink=FakeSink(), agent=None)
+    mgr.add(session)
+    mgr.active_idx = 1
+    assert _steer_target(mgr) is session
+
+
+def test_steer_target_home_active_routes_to_the_first_session_slot():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    first = SessionSlot(kind="session", workspace=".", label="a",
+                        pane=object(), sink=FakeSink(), agent=None)
+    second = SessionSlot(kind="session", workspace=".", label="b",
+                         pane=object(), sink=FakeSink(), agent=None)
+    mgr.add(first)
+    mgr.add(second)
+    mgr.active_idx = 0                          # Home is the ACTIVE tab
+    assert _steer_target(mgr) is first          # lowest-index session, never second
+
+
+def test_steer_target_none_when_no_session_slot_exists():
+    # Every tab closed down to bare Home -- both _poller_busy and
+    # _steer_submit must treat this as "nothing to submit into", not crash
+    # reaching for a None sink.
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    mgr.active_idx = 0
+    assert _steer_target(mgr) is None
+
+
+class _FakePane:
+    """Minimal `.dump()` double for `_exit_dump` -- doesn't need a real
+    OutputPane (or prompt_toolkit) at all, unlike an end-to-end dock test."""
+    def __init__(self, text):
+        self._text = text
+    def dump(self):
+        return self._text
+
+
+def test_exit_dump_single_session_slot_has_no_separator():
+    # Pinned: today's single-tab output must stay byte-identical to a bare
+    # `pane.dump()` -- no separator text appears at all with just one slot.
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=_FakePane("HOME"), sink=None, agent=None))
+    mgr.add(SessionSlot(kind="session", workspace=".", label="a",
+                        pane=_FakePane("transcript-a"), sink=None, agent=None))
+    assert _exit_dump(mgr) == "transcript-a"
+
+
+def test_exit_dump_multi_session_slots_get_separators_and_skip_home():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=_FakePane("HOME-STUFF"), sink=None, agent=None))
+    mgr.add(SessionSlot(kind="session", workspace=".", label="a",
+                        pane=_FakePane("A-TEXT"), sink=None, agent=None))
+    mgr.add(SessionSlot(kind="session", workspace=".", label="b",
+                        pane=_FakePane("B-TEXT"), sink=None, agent=None))
+    out = _exit_dump(mgr)
+    assert "HOME-STUFF" not in out                          # Home never dumped
+    # a separator lands BETWEEN panes only -- none before the first, and its
+    # index is the slot's OWN SlotManager index (matches /tab N + the tab
+    # bar's own numbering), not a 1-based session ordinal.
+    assert out == "A-TEXT── tab 2: b ──\nB-TEXT"
+
+
+def test_exit_dump_no_session_slots_is_empty():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=_FakePane("HOME"), sink=None, agent=None))
+    assert _exit_dump(mgr) == ""
+
+
+def test_cancel_all_background_sweeps_every_slots_bg_tasks_and_watchers(tmp_path):
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                         pane=object(), sink=None, agent=None)
+    live_a, done_a = _FakeTask(), _FakeTask(done=True)
+    slot_a.bg_tasks = [live_a, done_a, None]
+    slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                         pane=object(), sink=None, agent=None)
+    live_b = _FakeTask()
+    slot_b.bg_tasks = [live_b]
+    mgr.add(slot_a)
+    mgr.add(slot_b)
+
+    resources = WorkspaceResources()
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    root_a.mkdir(); root_b.mkdir()
+    live_watcher, done_watcher = _FakeTask(), _FakeTask(done=True)
+    resources.put(str(root_a), {"watcher_task": live_watcher})
+    resources.put(str(root_b), {"watcher_task": done_watcher})
+
+    steer = _FakeTask()
+    _cancel_all_background(steer, mgr, resources)
+
+    assert steer.cancelled is True
+    assert live_a.cancelled is True
+    assert done_a.cancelled is False        # already done -- never double-cancelled
+    assert live_b.cancelled is True
+    assert live_watcher.cancelled is True
+    assert done_watcher.cancelled is False  # via the PUBLIC bundles() accessor, same guard
+
+
+def test_cancel_all_background_survives_no_steer_task_and_empty_state():
+    mgr = SlotManager()
+    mgr.add(SessionSlot(kind="home", workspace=".", label="Home",
+                        pane=object(), sink=None, agent=None))
+    _cancel_all_background(None, mgr, WorkspaceResources())   # must not raise
+
+
+# ── W4a final-review FIX1: cross-tab execution -- the slot is threaded
+# through the on_line boundary end to end. `_handle`/`_run_turn` used to
+# resolve `slots.active()` internally, so a drain (or the turn itself) ran
+# in whatever tab happened to be VISIBLE by the time its background task's
+# body actually executed, not the tab it was typed into. These two tests
+# drive the REAL dock through `run_repl` (sys.stdin.isatty forced True,
+# wrapped in a genuine prompt_toolkit pipe-input session) so the actual repl
+# closures are what's under test -- not a hand-written double standing in
+# for them (unlike the tui-level `test_on_line_receives_the_pinned_slot_
+# never_whatever_becomes_active_later` above, which only proves tui's OWN
+# half of the contract).
+
+def _spy_output_panes(monkeypatch):
+    """Records every OutputPane the dock creates, in creation order (Home
+    first, then each session slot as it's made) -- gives a test a handle on
+    a SPECIFIC slot's own scrollback (`pane.dump()`) without needing to reach
+    into the closure-private SlotManager `run_repl` builds."""
+    from webbee import tui
+    created = []
+
+    class _SpyPane(tui.OutputPane):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            created.append(self)
+
+    monkeypatch.setattr(tui, "OutputPane", _SpyPane)
+    return created
+
+
+def _mute_dock_background_io(monkeypatch):
+    """Test hygiene for a real-dock run: no steer polling, no PyPI update
+    check, no real filesystem watcher against `_NoopIntel`'s fake root --
+    all three are best-effort background tasks a dock boot always starts,
+    and none of them should touch the network (or race a real dock's
+    multi-second lifetime against `watchfiles` raising on a nonexistent
+    path, `_NoopIntel.root`) just because this test drives the real dock
+    instead of the fallback loop."""
+    import webbee.steer as SP
+    import webbee.update as UP
+    from webbee.intel import watch as WATCH
+
+    async def noop_poller(cfg, token_provider, **kw):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            raise
+
+    async def hanging_watch(root, on_change):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(SP, "poll_idle_steer", noop_poller)
+    monkeypatch.setattr(UP, "default_fetch", lambda: None)
+    monkeypatch.setattr(WATCH, "watch_workspace", hanging_watch)
+
+
+async def _until(pred, timeout=5.0):
+    import time
+    t0 = time.time()
+    while not pred():
+        assert time.time() - t0 < timeout, "timed out"
+        await asyncio.sleep(0.01)
+
+
+def test_real_dock_turn_and_drain_stay_pinned_to_the_originating_slot(monkeypatch):
+    # Turn runs in slot A; the user switches active to slot B mid-turn;
+    # natural completion drains A's OWN queued line -- it must echo and run
+    # IN A (A's agent, A's pane), never in B, even though B is what's on
+    # screen the instant the drain's background task body executes.
+    import sys
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    _mute_dock_background_io(monkeypatch)
+    created_panes = _spy_output_panes(monkeypatch)
+
+    gate = asyncio.Event()
+    agents = []
+
+    class GatedAgent(FakeAgent):
+        async def run(self, task, sink, *, marathon=False, goal="", surface="", steer_iid=""):
+            self.tasks.append(task)
+            self.runs.append({"task": task})
+            await gate.wait()
+            return f"answer:{task}"
+
+    def agent_factory(cfg, tp, ws, mode):
+        a = GatedAgent() if not agents else FakeAgent()
+        agents.append(a)
+        return a
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def scenario():
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(run_repl(
+                    cfg, "default", agent_factory=agent_factory,
+                    auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+                    sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
+                    shadow_factory=lambda c, ws: None))
+                await asyncio.sleep(0.1)   # boot: Home(0) + slot A(1), active=1
+
+                pipe.send_text("/new /tmp\r")          # opens slot B(2), auto-switches active->2
+                await _until(lambda: len(agents) == 2)
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("\x1b1")                 # Alt+1 -- back to A
+                await _until(lambda: created_panes and True)
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("first\r")               # starts a (gated) turn IN A
+                await _until(lambda: agents[0].tasks == ["first"])
+
+                pipe.send_text("queued-in-a\r")         # busy(A) -> local queue (no live session_id)
+                await asyncio.sleep(0.1)
+
+                pipe.send_text("\x1b2")                 # Alt+2 -- switch to B mid-turn
+                await asyncio.sleep(0.1)
+
+                gate.set()                              # A's turn completes naturally
+                await _until(lambda: agents[0].tasks == ["first", "queued-in-a"])
+                await asyncio.sleep(0.05)
+
+                pane_a, pane_b = created_panes[1], created_panes[2]
+                assert "queued-in-a" in pane_a.dump()          # the drained echo landed in A
+                assert "queued-in-a" not in pane_b.dump()      # B's own pane never touched
+                assert agents[1].tasks == []                   # B's own agent never ran anything
+
+                pipe.send_text("/exit\r")
+                await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_real_dock_enter_started_turn_lands_in_the_slot_captured_at_keypress(monkeypatch):
+    # A FRESH (non-drain) turn: pressing Enter on slot A must land the echo
+    # and the agent.run call in A, even when the switch-to-B keystroke is
+    # sent immediately after (back to back, no await in between) -- i.e.
+    # BEFORE the scheduled background task's body has had any chance to run
+    # its own on_line/_handle call and re-derive "whatever is active now".
+    import sys
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    _mute_dock_background_io(monkeypatch)
+    created_panes = _spy_output_panes(monkeypatch)
+
+    gate = asyncio.Event()
+    agents = []
+
+    class GatedAgent(FakeAgent):
+        async def run(self, task, sink, *, marathon=False, goal="", surface="", steer_iid=""):
+            self.tasks.append(task)
+            await gate.wait()
+            return f"answer:{task}"
+
+    def agent_factory(cfg, tp, ws, mode):
+        a = GatedAgent() if not agents else FakeAgent()
+        agents.append(a)
+        return a
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def scenario():
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(run_repl(
+                    cfg, "default", agent_factory=agent_factory,
+                    auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+                    sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
+                    shadow_factory=lambda c, ws: None))
+                await asyncio.sleep(0.1)   # boot: Home(0) + slot A(1), active=1
+
+                pipe.send_text("/new /tmp\r")          # opens slot B(2), auto-switches active->2
+                await _until(lambda: len(agents) == 2)
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("\x1b1")                 # back to A
+                await asyncio.sleep(0.05)
+
+                # No await between these two sends: both land in the pipe's
+                # buffer before the event loop gets a chance to run anything,
+                # simulating the switch happening strictly between the Enter
+                # key handler (which only SCHEDULES the turn's background
+                # task) and that task's body actually starting.
+                pipe.send_text("first\r")
+                pipe.send_text("\x1b2")
+
+                await _until(lambda: agents[0].tasks == ["first"])
+                await asyncio.sleep(0.05)
+
+                pane_a, pane_b = created_panes[1], created_panes[2]
+                assert "first" in pane_a.dump()             # the echo landed in A, not B
+                assert "first" not in pane_b.dump()
+                assert agents[1].tasks == []                 # B's own agent never touched
+
+                gate.set()
+                await asyncio.sleep(0.05)
+                pipe.send_text("/exit\r")
+                await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+# ── W4a final-review FIX4: Home None-sink command crashes ───────────────────
+# Home's sink is None -- dispatching a command while Home is active used to
+# crash on an unguarded `_sink.note`/`_sink.clear()`, or (for the few call
+# sites already `if _sink is not None:`-guarded) silently swallow the reply
+# instead of showing one. `_say(slot, msg)` fixes both: a real session's
+# `sink.note` unchanged, Home's own pane console otherwise. These drive the
+# REAL dock (same harness as FIX1/FIX3 above) so the actual `_handle` action
+# ladder is what's under test.
+
+def test_home_active_help_renders_into_the_home_pane(monkeypatch):
+    import sys
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    _mute_dock_background_io(monkeypatch)
+    created_panes = _spy_output_panes(monkeypatch)
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def scenario():
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(run_repl(
+                    cfg, "default", agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                    auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+                    sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
+                    shadow_factory=lambda c, ws: None))
+                await asyncio.sleep(0.1)          # boot: Home(0) + slot A(1), active=1
+
+                pipe.send_text("\x14")             # Ctrl-T -- jump to Home
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("/help\r")
+                await asyncio.sleep(0.15)
+                pane_home = created_panes[0]
+                assert "show this help" in pane_home.dump()   # help text landed in Home's OWN pane
+
+                pipe.send_text("/exit\r")
+                await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_home_active_steps_yields_open_a_tab_note(monkeypatch):
+    import sys
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    _mute_dock_background_io(monkeypatch)
+    created_panes = _spy_output_panes(monkeypatch)
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def scenario():
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(run_repl(
+                    cfg, "default", agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                    auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+                    sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
+                    shadow_factory=lambda c, ws: None))
+                await asyncio.sleep(0.1)
+
+                pipe.send_text("\x14")             # Ctrl-T -- jump to Home
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("/steps\r")          # session-specific -- must not crash
+                await asyncio.sleep(0.15)
+                pane_home = created_panes[0]
+                assert "open a session tab first" in pane_home.dump()
+
+                pipe.send_text("/exit\r")
+                await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_home_active_tabs_lists_tabs(monkeypatch):
+    import sys
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    _mute_dock_background_io(monkeypatch)
+    created_panes = _spy_output_panes(monkeypatch)
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def scenario():
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(run_repl(
+                    cfg, "default", agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                    auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+                    sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
+                    shadow_factory=lambda c, ws: None))
+                await asyncio.sleep(0.1)
+
+                pipe.send_text("\x14")             # Ctrl-T -- jump to Home
+                await asyncio.sleep(0.05)
+
+                pipe.send_text("/tabs\r")
+                await asyncio.sleep(0.15)
+                pane_home = created_panes[0]
+                assert "Open tabs:" in pane_home.dump()
+                assert "●0" in pane_home.dump()     # Home itself listed as active
+
+                pipe.send_text("/exit\r")
+                await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+# ── W4a final-review FIX7e: land-on-Home ─────────────────────────────────────
+# boot.replay_thread now returns the count of replayed display messages
+# (0 on skip/error, keeping the never-raise contract) -- the dock boot uses
+# it to land on the session tab only when the replay actually showed
+# something; a fresh/empty thread lands on Home instead (Alt+1 away).
+
+def _spy_slot_manager(monkeypatch):
+    """Records every SlotManager `run_repl` constructs, so a test can
+    inspect its `active_idx` after boot without needing a reference the
+    closure never hands out."""
+    import webbee.repl as repl_mod
+    from webbee.slots import SlotManager as _RealSlotManager
+    created = []
+
+    class _SpySlotManager(_RealSlotManager):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            created.append(self)
+
+    monkeypatch.setattr(repl_mod, "SlotManager", _SpySlotManager)
+    return created
+
+
+def test_land_on_home_when_boot_replay_is_fresh_and_empty(monkeypatch):
+    import sys
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    import imperal_mcp.client as ic
+    import webbee.thread as TH
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    async def fake_fetch(cfg, token_provider, session_id):
+        return []                                   # fresh/empty thread
+
+    monkeypatch.setattr(TH, "fetch_recent_thread", fake_fetch)
+
+    _mute_dock_background_io(monkeypatch)
+    created_slots = _spy_slot_manager(monkeypatch)
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def scenario():
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(run_repl(
+                    cfg, "default", agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                    auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+                    sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
+                    shadow_factory=lambda c, ws: None))
+                await asyncio.sleep(0.15)
+                assert created_slots and created_slots[0].active_idx == 0   # landed on Home
+
+                pipe.send_text("/exit\r")
+                await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_land_on_session_when_boot_replay_shows_something(monkeypatch):
+    import sys
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    import imperal_mcp.client as ic
+    import webbee.thread as TH
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    async def fake_fetch(cfg, token_provider, session_id):
+        return [{"role": "assistant", "content": "done", "surface": "terminal"}]
+
+    monkeypatch.setattr(TH, "fetch_recent_thread", fake_fetch)
+
+    _mute_dock_background_io(monkeypatch)
+    created_slots = _spy_slot_manager(monkeypatch)
+
+    from webbee.config import Config
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def scenario():
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(run_repl(
+                    cfg, "default", agent_factory=lambda c, tp, ws, m: FakeAgent(),
+                    auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
+                    sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
+                    shadow_factory=lambda c, ws: None))
+                await asyncio.sleep(0.15)
+                assert created_slots and created_slots[0].active_idx == 1   # landed on the session
+
+                pipe.send_text("/exit\r")
+                await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_replay_thread_returns_shown_count_and_zero_on_failure(monkeypatch):
+    # Unit-level companion: boot.replay_thread's own new return contract,
+    # driven directly (no dock needed) -- 0 on a fresh/empty thread AND on
+    # any failure, matching the never-raise contract; the actual count on
+    # a real replay.
+    import imperal_mcp.client as ic
+    import webbee.thread as TH
+    from webbee import boot as BOOT
+    from webbee.config import Config
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+    cfg = Config(api_url="http://x", panel_url="http://p")
+
+    async def _tp():
+        return "tok"
+
+    async def fake_fetch_two(cfg, tp, session_id):
+        return [{"role": "user", "content": "hi", "surface": "terminal"},
+               {"role": "assistant", "content": "done", "surface": "terminal"}]
+
+    monkeypatch.setattr(TH, "fetch_recent_thread", fake_fetch_two)
+    n = asyncio.run(BOOT.replay_thread(cfg, _tp, FakeSink()))
+    assert n == 2
+
+    async def fake_fetch_empty(cfg, tp, session_id):
+        return []
+
+    monkeypatch.setattr(TH, "fetch_recent_thread", fake_fetch_empty)
+    assert asyncio.run(BOOT.replay_thread(cfg, _tp, FakeSink())) == 0
+
+    async def boom(cfg, tp, session_id):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(TH, "fetch_recent_thread", boom)
+    assert asyncio.run(BOOT.replay_thread(cfg, _tp, FakeSink())) == 0

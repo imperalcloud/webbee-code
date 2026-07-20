@@ -19,12 +19,13 @@ Application is TTY/headless-smoke verified. Grounded in prompt_toolkit
 3.0.52."""
 import asyncio
 import re
-from collections import deque
 
 from webbee import sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
+from webbee.slots import close_active, close_at
+from webbee.tabs import tab_fragments
 from webbee.todo_panel import todo_fragments, todo_height
 
 _MODES = ("default", "plan", "autopilot")
@@ -150,17 +151,22 @@ def _width_watch(pane, app) -> None:
             pass
 
 
-def _tick_once(pane, app, is_busy) -> None:
+def _tick_once(slots, app, is_busy) -> None:
     """One iteration of run_session's `_ticker` loop, extracted module-level
     so the wiring itself is directly unit-testable (an `async def` infinite
-    loop otherwise only proves itself by running the whole dock). Three
-    effects, in order: (1) `_width_watch` — resize-detect + reflow bridge,
-    UNCONDITIONAL busy or idle; (2) `pane.edge_tick()` — repeat-scroll while
-    parked at a drag edge, error-swallowed so a broken edge-tick can never
-    kill the dock's only animation loop; (3) `app.invalidate()` exactly when
-    a turn is running OR the copy-flash toast is still fresh, so the spinner/
-    elapsed-clock/flash-expiry all animate without redrawing on every idle
-    tick for nothing."""
+    loop otherwise only proves itself by running the whole dock). W4a Task 3:
+    takes the SlotManager, not a pane — `slots.active().pane` is resolved
+    HERE, every tick, so a tab switch immediately redirects the ticker at the
+    newly-visible slot's own pane (its edge-drag, its resize-reflow) with no
+    stale reference left over from the slot that was active a moment ago.
+    Three effects, in order: (1) `_width_watch` — resize-detect + reflow
+    bridge, UNCONDITIONAL busy or idle; (2) `pane.edge_tick()` — repeat-scroll
+    while parked at a drag edge, error-swallowed so a broken edge-tick can
+    never kill the dock's only animation loop; (3) `app.invalidate()` exactly
+    when a turn is running OR the copy-flash toast is still fresh, so the
+    spinner/elapsed-clock/flash-expiry all animate without redrawing on every
+    idle tick for nothing."""
+    pane = slots.active().pane
     _width_watch(pane, app)
     try:
         pane.edge_tick()
@@ -225,6 +231,26 @@ def _interrupt_action(turn: dict, is_busy, stop_turn, event) -> None:
             event.app.create_background_task(stop_turn())
         turn["stopped"] = True   # user STOP → the type-ahead queue must NOT auto-run
         t.cancel()                          # cancel the running turn; dock survives
+
+
+def _can_close_tab(buf, slot) -> bool:
+    """PURE. Ctrl-W's filter predicate (Task 5) — same DI-testing philosophy
+    as `_escape_action`/`_interrupt_action`, exposed module-level so a test
+    drives it directly instead of only through a live Application. Ctrl-W
+    closes the active tab ONLY when the input is empty (a non-empty draft
+    means the user wants PT's normal word-delete, not a tab close) AND the
+    active slot is an actual session (Home has nothing to close)."""
+    return not buf.text and slot is not None and slot.kind == "session"
+
+
+def _should_close_on_eof(slots) -> bool:
+    """PURE. Ctrl-D's tab-vs-quit policy (Task 5): closing the active SESSION
+    tab is the natural Ctrl-D action as long as at least one OTHER session
+    tab survives — closing the last one instead falls through to the
+    original behavior (exit the app when idle), since landing on a bare Home
+    with nothing left open is close enough to "quit" that a second Ctrl-D
+    finishes the job instead of a tab-close silently doing nothing new."""
+    return slots.session_count() > 1 and slots.active().kind == "session"
 
 
 class QueuedLine(str):
@@ -392,56 +418,95 @@ def _rewrap_pulled(pulled: dict, text: str):
     return text
 
 
-async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
-                      is_busy, consent_pending, resolve_consent, steps_nav=None,
-                      stop_turn=None, pending=None, queued_run=None,
-                      remote_pending=None, todos=None, inject=None,
-                      turn=None) -> bool:
-    """The full-screen dock: `pane` fills the top (scrollable), a bordered input
-    box + toolbar are FIXED at the bottom. Enter either resolves a pending
-    consent reply (ICNLI: raw verbatim) or starts a turn as a BACKGROUND task
-    (the box stays fixed during it); while a turn runs, Enter QUEUES the line
-    (type-ahead — the LIVE queue panel pinned above the input shows it at
-    once and tracks every edit/drain, the toolbar shows `⋯N queued` in
-    accent, and it starts right after the current turn with a `queued_run`
-    marker — the transcript itself stays real-turns-only). ↑ on an empty
-    input pulls the newest queued line back into the box for editing (it
-    leaves the panel; re-submit re-queues/runs it); clicking a panel row
-    pulls THAT item. Either pull carries the item's steer_iid into the
-    one-shot `pulled` dict; if the line is resubmitted BYTE-IDENTICAL it goes
-    back out under the SAME iid (_rewrap_pulled) so the kernel ring can dedup
-    a landed twin instead of running a genuine duplicate turn — ANY edit
-    mints a fresh iid, since the landed twin said something else.
-    `pending` is the queue deque — the repl passes its OWN
-    so /queue and /queue clear (dispatched through the normal command layer)
-    see and manage the live queue; /queue itself always runs immediately,
-    even mid-turn. When `steps_nav` is given and the input is empty and no turn
-    is running, Up/Down move a step selection (toolbar shows `step k/N`) and
-    Enter expands it via `steps_nav["expand"]`; Esc clears it. In every other
-    state Up/Down recall submitted lines (readline-style history).
-    `remote_pending` (full-queue-layer K1) is the sink-owned list of items
-    already queued in the RUNNING kernel session from other surfaces — the
-    panel renders them ABOVE the local rows, tagged `[origin]`, DISPLAY-ONLY
-    (never pullable via ↑/click; the kernel owns their drain). `inject`
-    (mid-turn inject, 0.3.15) is the repl's async `inject(text, iid) -> bool`
-    gateway leg: when wired, Enter-while-busy flies the line into the RUNNING
-    turn immediately instead of holding it locally (fallback to the local
-    queue on failure — see _inject_or_queue). `todos` is the sink-owned
-    current-checklist list (RichSink.current_todos): a STICKY panel above the
-    queue panel renders it live (todo_panel builders), zero rows when empty.
-    `turn` (lockout-proof poller gate) lets the CALLER share its own turn
-    dict (same object, keys `task`/`stopped`) instead of a private one --
-    the repl passes its `turn_ref` so `_poller_busy` can read whether the
-    turn task is genuinely alive, mirroring `_busy_live` below; omitted, a
-    local dict is used (tests that don't care about the shared gate).
-    Returns True on clean exit; False if prompt_toolkit is unavailable (caller
-    uses the plain fallback loop)."""
+def _swap_history(buf, slot) -> None:
+    """Per-slot input-history plumbing (W4a Task 3 — Task 5 wires it to an
+    actual tab switch): the dock keeps ONE shared Buffer (one input box,
+    unchanged), but each slot should recall (↑ readline-style) only the
+    lines IT submitted — so a slot's OWN `InMemoryHistory` is minted on
+    first touch (stored on `slot.history`) and the shared buffer is
+    re-pointed at it. A repeat call for the SAME slot reuses its existing
+    history verbatim (never mints a second one, never loses recall)."""
+    from prompt_toolkit.history import InMemoryHistory
+    if slot.history is None:
+        slot.history = InMemoryHistory()
+    buf.history = slot.history
+
+
+async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
+                      stop_turn=None, queued_run=None, inject=None,
+                      home_input=None, cancel_slot=None, ui_hooks=None,
+                      on_switch=None) -> bool:
+    """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
+    CALL TIME (W4a Task 3 — the single most structural change of the
+    multisession-tabs wave: no more one session's objects captured once at
+    the top). `slots.active().pane` fills the top (a `DynamicContainer`, so
+    it re-resolves on every redraw — a tab switch repaints a different
+    slot's transcript with zero stale references); a bordered input box +
+    toolbar are FIXED at the bottom, shared by every tab (one Buffer — see
+    `_swap_history`, wired in a later task). Enter either resolves a pending
+    consent reply on the ACTIVE slot's sink (ICNLI: raw verbatim) or starts a
+    turn as a BACKGROUND task PINNED to the slot it started in
+    (`_start_turn_in` captures that slot ONCE — its own turn dict, queue
+    drain, and turn-failed read all stay targeted at it even if the user
+    switches tabs while it runs; every OTHER read in this function — Esc/
+    Ctrl-C, the toolbar, the queue/todo panels, ↑/click-pull — always acts on
+    whatever slot is VISIBLE right now). While a turn runs, Enter on that
+    SAME slot queues the line (type-ahead — the LIVE queue panel above the
+    input shows it and the toolbar shows `⋯N queued` in accent) or flies it
+    into the running turn via `inject` (mid-turn inject, 0.3.15) — both keyed
+    off the active slot's own `pending`/`turn`/`pulled`/`qp_ui`/`tp_ui`
+    (`SessionSlot` fields, not this function's own locals anymore). A Home
+    slot (`sink=None`) has no busy/consent/queue/todo state at all — the
+    `_sink_attr` accessor's `default` covers every read; Enter with a
+    non-command line on Home calls `home_input(text)` when the caller wired
+    one (Task 6 — `None` means ignored), while a slash command on Home still
+    reaches `on_line`, same as every other slot. `steps_nav`/`stop_turn`/
+    `inject`/`on_cycle`/`queued_run` are INJECTED callables the repl already
+    resolves through `slots.active()` itself before handing them here — this
+    function only calls them, it never reaches into a session object through
+    them. A tab bar (Task 4, `webbee.tabs.tab_fragments`) is pinned at the
+    very top of the dock, ALWAYS visible: a click switches tabs (`_switch_to`
+    — a no-op on the already-active tab or a stale idx, since
+    `slots.switch` already guards both); a session tab's ✕ closes THAT tab
+    (`_close_tab_click(idx)` -> `webbee.slots.close_at(slots, idx,
+    cancel_slot)`, Task 7 -- the clicked idx, not necessarily whichever tab
+    is active), while Ctrl-W AND Ctrl-D-with-other-tabs-open have no per-tab
+    idx of their own and keep reaching `_close_flow` -> `close_active(slots,
+    cancel_slot)` (Task 5) — always "close what I'm looking at". Both PT-free
+    functions live in `webbee.slots` (`close_active` is a thin wrapper over
+    `close_at`), shared verbatim with repl's `/close` command. `cancel_slot`
+    (a NEW repl-injected callable) tears down the removed slot's OWN
+    background tasks; the kernel's run keeps going server-side regardless
+    (browser-tab model). `Ctrl-T` and `Alt+0..9` (prompt_toolkit sees the
+    latter as the two-key sequence `("escape", "<digit>")`) both land on
+    `_switch_to` — the bare `escape` binding (stop-turn / step-clear) stays
+    registered too; prompt_toolkit's own key-processor timeout disambiguates
+    a lone Escape from an Escape-then-digit chord, same mechanism its own
+    default emacs bindings already lean on for `escape,f`/`escape,b`/etc —
+    `app.timeoutlen` is turned down well below its 1.0s default (see below)
+    so a genuine lone Escape still resolves quickly instead of only your
+    patience finding out. `ui_hooks` (optional, repl-owned mutable dict):
+    this function fills `ui_hooks["switch"] = _switch_to` and
+    `ui_hooks["close"] = _close_flow` at construction time, so repl's
+    `/tab`/`/new`/`/close` commands route through the EXACT same switch/close
+    path the keys and clicks use (the history swap on every switch, the
+    close note) instead of mutating
+    `slots` directly and missing it. `on_switch` (Task 6, optional): called
+    with the NEW active idx after every successful `_switch_to` -- click,
+    Ctrl-T, Alt+N, or a repl command via `ui_hooks["switch"]` all converge
+    on `_switch_to`, so this one seam covers every path. repl wires it to
+    its own stale-Home-refill check (`home.is_stale` + `fill_home`
+    re-scheduled as a bg task) -- this function has no idea what "Home" or
+    "stale" mean, it only calls the hook.
+    Returns True on clean exit; False if prompt_toolkit is unavailable
+    (the caller uses the plain fallback loop)."""
     try:
         from prompt_toolkit.application import Application, get_app, get_app_or_none
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
+        from prompt_toolkit.layout import (ConditionalContainer, DynamicContainer,
+                                          HSplit, Layout, Window)
         from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.layout.processors import BeforeInput
         from prompt_toolkit.styles import Style
@@ -449,37 +514,56 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     except Exception:
         return False
 
+    def _a():
+        return slots.active()
+
+    def _pane():
+        return _a().pane
+
+    def _sink_attr(name, default=None):
+        s = _a().sink
+        return getattr(s, name, default) if s is not None else default
+
     buf = Buffer(multiline=False)
-    if turn is None:
-        turn = {"task": None}   # caller-shared (repl's poller gate reads it)
-    turn.setdefault("task", None)
-    if pending is None:
-        pending = deque()   # type-ahead queue: lines submitted while a turn runs
-    if remote_pending is None:
-        remote_pending = []   # cross-surface kernel-queued items (display-only)
-    if todos is None:
-        todos = []            # sink-less callers: the todo panel never shows
-    pulled = {"text": "", "iid": ""}   # one-shot carry: pull-to-edit's steer_iid,
-                                       # consumed by _rewrap_pulled on the next Enter
 
     def _launch_inject(text):
         # Fire the fly-in as a background task (a key handler can't await):
         # _inject_or_queue owns the iid mint + the local-queue fallback.
+        # `slot` is captured HERE, SYNCHRONOUSLY, at Enter keypress time
+        # (FIX7a — mirrors the turn-start pinning everywhere else in this
+        # module) -- both the target deque AND the inject POST itself stay
+        # pinned to THIS slot even if the user switches tabs before the
+        # scheduled background task's body actually runs. `inject` itself
+        # keeps its existing 2-arg (text, iid) contract as far as
+        # `_inject_or_queue` is concerned -- the slot rides along in a thin
+        # wrapper closure, so `_inject_or_queue`'s own signature/tests need
+        # no change at all.
+        slot = _a()
         app = get_app()
         app.create_background_task(
-            _inject_or_queue(inject, text, pending, invalidate=app.invalidate))
+            _inject_or_queue(lambda t, i: inject(t, i, slot), text, slot.pending,
+                             invalidate=app.invalidate))
+
+    def _start_turn_in(slot, text):
+        slot.turn.pop("stopped", None)   # a stale stop flag must never eat the next natural drain
+        slot.turn["task"] = get_app().create_background_task(_run_turn(slot, text))
 
     def _start_turn(text):
-        turn.pop("stopped", None)   # a stale stop flag must never eat the next natural drain
-        turn["task"] = get_app().create_background_task(_run_turn(text))
+        _start_turn_in(_a(), text)
 
-    async def _run_turn(text):
+    async def _run_turn(slot, text):
+        # `slot` is bound ONCE by the caller (Enter's idle path, or a drain
+        # re-submitting into the SAME slot it drained from) -- a turn belongs
+        # to the slot it started in. Every read/mutation below stays pinned
+        # to THAT slot even if the user switches tabs while it runs; this is
+        # the one deliberate exception to "always resolve active() at call
+        # time" everywhere else in this function.
         done = False
         try:
-            await on_line(text)
+            await on_line(text, slot)
             done = True
         finally:
-            turn["task"] = None
+            slot.turn["task"] = None
             # DRAIN RULE: natural completion ONLY. A user STOP (Esc/Ctrl-C sets
             # turn["stopped"] before cancelling; repl._run_turn absorbs the
             # cancel so on_line still returns) means "I'm taking control" — the
@@ -487,46 +571,68 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
             # never auto-runs; /queue clear drops it, and the next NATURAL
             # completion resumes draining. A propagating exception (dock
             # teardown) also leaves the queue be. An ERROR-terminated turn
-            # (status()["turn_failed"], set by repl's except branch via
-            # RichSink.mark_turn_failed — W1 front-3b) holds the queue too: a
-            # broken backend must never burn one queued line per failing turn.
-            stopped = turn.pop("stopped", False)
+            # (slot.sink.status()["turn_failed"], set by repl's except branch
+            # via RichSink.mark_turn_failed — W1 front-3b) holds the queue
+            # too: a broken backend must never burn one queued line per
+            # failing turn.
+            stopped = slot.turn.pop("stopped", False)
             failed = False
             try:
-                failed = bool(status().get("turn_failed"))
+                failed = bool(slot.sink.status().get("turn_failed"))
             except Exception:
                 pass
             if done and not stopped and not failed:
                 # Submit the oldest queued line through the SAME path a typed
-                # line takes; queued_run announces it — never a silent start.
-                _drain_pending(pending, _start_turn, mark=queued_run)
+                # line takes, back into the SAME (pinned) slot; queued_run
+                # announces it — never a silent start.
+                _drain_pending(slot.pending, lambda t: _start_turn_in(slot, t), mark=queued_run)
             get_app().invalidate()
 
     kb = KeyBindings()
 
     def _busy_live() -> bool:
-        """Lockout-proof busy for the key handlers: busy only while the turn
-        TASK is genuinely alive. A turn that died without clearing the sink's
-        busy flag (an error path that skipped end_turn) must never brick the
-        dock -- Enter/Esc/Ctrl-C/Ctrl-D all gate on THIS, so a stale flag
-        degrades to a cosmetic toolbar glitch instead of an unusable input
-        (Valentin, live 2026-07-15: 'working' spun and NO key reacted)."""
-        t = turn.get("task")
-        return bool(is_busy() and t is not None and not t.done())
+        """Lockout-proof busy for the key handlers, on the ACTIVE slot: busy
+        only while ITS turn TASK is genuinely alive. A turn that died without
+        clearing the sink's busy flag (an error path that skipped end_turn)
+        must never brick the dock -- Enter/Esc/Ctrl-C all gate on THIS, so a
+        stale flag degrades to a cosmetic toolbar glitch instead of an
+        unusable input (Valentin, live 2026-07-15: 'working' spun and NO key
+        reacted). A Home slot (no sink) is never busy. Thin wrapper over the
+        per-slot `_slot_busy` (FIX5) -- Ctrl-D's `_eof` uses THAT directly,
+        across every slot, not just the active one."""
+        return _slot_busy(_a())
+
+    def _slot_busy(slot) -> bool:
+        """Lockout-proof busy for an ARBITRARY slot (FIX5, generalizes
+        `_busy_live` above -- same predicate, parameterized): busy only
+        while ITS OWN turn TASK is genuinely alive AND its sink reports
+        busy. Ctrl-D's `_eof` needs this across EVERY slot, not just the
+        active one -- a background tab's live turn must never let a Ctrl-D
+        pressed on Home (or any other idle tab) exit right through it."""
+        t = slot.turn.get("task")
+        sink = slot.sink
+        ib = getattr(sink, "is_busy", None) if sink is not None else None
+        busy = bool(ib()) if callable(ib) else False
+        return bool(busy and t is not None and not t.done())
 
     @kb.add("enter")
     def _enter(event):
         # never send leaked mouse reports; _rewrap_pulled keeps the ORIGINAL
         # steer_iid alive when this is a pulled queued line resubmitted
-        # UNCHANGED (one-shot — `pulled` is consumed either way).
-        text = _rewrap_pulled(pulled, scrub_mouse_residue(buf.text))
+        # UNCHANGED (one-shot — the ACTIVE slot's `pulled` is consumed
+        # either way).
+        slot = _a()
+        text = _rewrap_pulled(slot.pulled, scrub_mouse_residue(buf.text))
         buf.reset()
-        if consent_pending():
-            resolve_consent(text)              # ICNLI: relay the raw reply verbatim
+        cp = _sink_attr("consent_pending")
+        if cp and cp():
+            rc = _sink_attr("resolve_consent")
+            if rc:
+                rc(text)                       # ICNLI: relay the raw reply verbatim
             return
         if not text.strip() and sel["i"] is not None and steps_nav and not _busy_live():
             idx, sel["i"] = sel["i"], None
-            event.app.create_background_task(steps_nav["expand"](idx))
+            event.app.create_background_task(steps_nav["expand"](idx, slot))
             return
         if not text.strip():
             return
@@ -534,16 +640,31 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
             # Queue MANAGEMENT runs NOW, even mid-turn (it never queues
             # itself): a display-only background task — the handler only
             # reads/clears the shared deque and prints, so it can't collide
-            # with the live turn and never touches turn["task"].
+            # with the live turn and never touches turn["task"]. `slot` is
+            # the ACTIVE-AT-KEYPRESS slot captured above (FIX1) — the SAME
+            # slot on_line acts against no matter what becomes active
+            # before this scheduled task's body actually runs.
             buf.history.append_string(text)
-            event.app.create_background_task(on_line(text))
+            event.app.create_background_task(on_line(text, slot))
+            return
+        if slot.sink is None:
+            # Home: no busy/queue/inject semantics at all. A slash command
+            # still reaches on_line exactly like every other slot (against
+            # the Home slot itself, FIX1); plain text is the caller's own
+            # affair (Task 6 wires home_input -- None here simply means
+            # "ignored").
+            buf.history.append_string(text)
+            if text.strip().startswith("/"):
+                event.app.create_background_task(on_line(text, slot))
+            elif home_input is not None:
+                event.app.create_background_task(home_input(text))
             return
         # Non-empty line: record for up-arrow recall, then fly-while-busy
         # (mid-turn inject — the line reaches the RUNNING turn within one
         # brain step; the kernel's task_queued[terminal] echo shows the panel
         # row) with local type-ahead as the no-inject/failure fallback, or
         # start a turn now (idle — unchanged).
-        if _submit_line(text, buf, pending, _busy_live(), _start_turn,
+        if _submit_line(text, buf, slot.pending, _busy_live(), _start_turn,
                         inject=None if inject is None else _launch_inject
                         ) in ("queued", "injected"):
             event.app.invalidate()             # panel + toolbar show the new depth
@@ -555,12 +676,52 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("c-c")
     def _interrupt(event):
-        _interrupt_action(turn, _busy_live, stop_turn, event)
+        _interrupt_action(_a().turn, _busy_live, stop_turn, event)
+
+    @kb.add("c-t")
+    def _new_tab_key(event):
+        # Ctrl-T: jump to Home (slot 0) — the new-tab page. Typing there
+        # starts a real session tab (Task 6); this key itself never creates
+        # a slot, exactly like clicking the Home tab does.
+        _switch_to(0)
+
+    def _alt_digit_handler(d: int):
+        def _h(event):
+            _switch_to(d)
+        return _h
+
+    for _d in range(10):
+        # Alt+N == prompt_toolkit's two-key sequence ("escape", "<digit>") —
+        # the SAME mechanism its own default emacs bindings use for
+        # escape+f/escape+b/etc, coexisting with the plain "escape" binding
+        # below (stop-turn / step-clear) via the key-processor's own
+        # prefix-of-longer-match timeout, tuned down further below.
+        kb.add("escape", str(_d))(_alt_digit_handler(_d))
+
+    @kb.add("c-w", filter=Condition(lambda: _can_close_tab(buf, _a())))
+    def _close_tab_key(event):
+        # Filtered, not unconditional (contract): an empty input on an
+        # active SESSION tab closes it; any OTHER state (draft text present,
+        # or Home active) leaves this binding's filter False, so the match
+        # falls through to prompt_toolkit's own default emacs/basic Ctrl-W
+        # (unix-word-rubout) untouched.
+        _close_flow()
 
     @kb.add("c-d")
     def _eof(event):
-        if not _busy_live():
-            event.app.exit()
+        # Ctrl-D policy (Task 5, generalized FIX5): closing the active
+        # SESSION tab is the natural action as long as another session tab
+        # survives it; otherwise a running turn must never be torn down by
+        # a stray EOF -- but FIX5 widens that guard past the ACTIVE slot:
+        # a background tab's live turn (e.g. Home-spawned via _home_input,
+        # or any tab left running while you switched away) must ALSO block
+        # exit, not just whichever slot happens to be visible right now.
+        if _should_close_on_eof(slots):
+            _close_flow()
+            return
+        if any(_slot_busy(s) for s in slots.slots):
+            return
+        event.app.exit()
 
     sel = {"i": None}   # None = no selection; else 0-based step index
 
@@ -572,7 +733,8 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("up")
     def _step_up(event):
-        _arrow_up_action(event, buf, sel, _nav_count(), _busy_live(), pending, pulled)
+        slot = _a()
+        _arrow_up_action(event, buf, sel, _nav_count(), _busy_live(), slot.pending, slot.pulled)
 
     @kb.add("down")
     def _step_down(event):
@@ -580,29 +742,39 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
 
     @kb.add("escape")
     def _step_clear(event):
-        _escape_action(sel, turn, _busy_live, stop_turn, event, buf=buf)
+        _escape_action(sel, _a().turn, _busy_live, stop_turn, event, buf=buf)
 
     @kb.add("pageup")
     def _pgup(event):
+        pane = _pane()
         pane.scroll(-(max(1, pane._view_h) - 2))
 
     @kb.add("pagedown")
     def _pgdn(event):
+        pane = _pane()
         pane.scroll(max(1, pane._view_h) - 2)
 
     def _toolbar():
+        pane = _pane()
         f = pane.flash()
         if f:
             frags = [("class:tb.working", "  " + f)]   # transient copy confirmation
         elif sel["i"] is not None and steps_nav:
             frags = [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
         else:
-            st = status()
-            frags = build_toolbar(mode_getter(), st["tokens"], st["credits"], busy=st["busy"],
-                                  current=st["current"], elapsed=st["elapsed"],
-                                  tools=st["tools"], consent=st["consent"],
-                                  queued=len(pending) + len(remote_pending),
-                                  reconnecting=st.get("reconnecting", 0))
+            st_fn = _sink_attr("status")
+            if callable(st_fn):
+                slot = _a()
+                st = st_fn()
+                frags = build_toolbar(slot.mode, st["tokens"], st["credits"], busy=st["busy"],
+                                      current=st["current"], elapsed=st["elapsed"],
+                                      tools=st["tools"], consent=st["consent"],
+                                      queued=len(slot.pending) + len(_sink_attr("remote_pending", [])),
+                                      reconnecting=st.get("reconnecting", 0))
+            else:
+                # Home has no sink -- an idle toolbar of its own, no tokens/
+                # credits/mode to show (there's no session yet).
+                frags = [("class:tb.dim", "  ◆ home · type to start a session · Alt+№ switch")]
         # W2 Task 8: the toolbar has no mouse handling of its own, so
         # `_forwarding(None, pane)` is wrapped onto every fragment purely for
         # drag-forwarding — a release that lands on the toolbar row while a
@@ -630,27 +802,20 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     def _prompt_fragments():
         # The ❯ takes the CURRENT mode's colour (same classes the toolbar uses)
         # so the mode is obvious from the input line itself, not just the toolbar.
-        return [(f"class:tb.mode.{mode_getter()}", "❯ ")]
+        return [(f"class:tb.mode.{_a().mode}", "❯ ")]
 
     def _pull_at(index: int) -> None:
         """Mouse pull (a panel row's MOUSE_UP handler, queue_panel._item_handler):
         move the CLICKED queued item into the input for editing — the SAME
         pull_item the ↑ key uses, arbitrary index instead of newest (never
         clobbers a typed draft, ignores a stale index). Mirrors _arrow_up_action:
-        records the item's text + steer_iid into `pulled` so an unchanged
-        resubmit keeps the original iid (see _rewrap_pulled)."""
-        item = pull_item(pending, buf, index)
+        records the item's text + steer_iid into the ACTIVE slot's `pulled`
+        so an unchanged resubmit keeps the original iid (see _rewrap_pulled)."""
+        slot = _a()
+        item = pull_item(slot.pending, buf, index)
         if item is not None:
-            pulled["text"], pulled["iid"] = str(item), getattr(item, "iid", "")
+            slot.pulled["text"], slot.pulled["iid"] = str(item), getattr(item, "iid", "")
             get_app().invalidate()
-
-    # Task 11 click-to-collapse: per-session UI state for the queue/todo
-    # panels (a plain dict, not a Buffer/observable — the header's own
-    # redraw-on-invalidate is the only "reactivity" either panel needs).
-    # Clicking a panel's header toggles between full render and ONE row
-    # ending ▸ (collapsed) / ▾ (expanded) — screen space back on demand.
-    qp_ui = {"collapsed": False}
-    tp_ui = {"collapsed": False}
 
     def _panel_size(floor: int):
         """(cols, item-row cap) shared by a panel's fragment builder AND its
@@ -664,25 +829,29 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
         return cols, sizing.panel_cap(rows, floor)
 
     def _toggle_queue():
-        qp_ui["collapsed"] = not qp_ui["collapsed"]
+        slot = _a()
+        slot.qp_ui["collapsed"] = not slot.qp_ui["collapsed"]
         get_app().invalidate()
 
     def _toggle_todos():
-        tp_ui["collapsed"] = not tp_ui["collapsed"]
+        slot = _a()
+        slot.tp_ui["collapsed"] = not slot.tp_ui["collapsed"]
         get_app().invalidate()
 
     def _queue_fragments():
-        # Live like _toolbar: re-invoked every redraw, reads the shared deque
-        # + the sink-owned remote list (pull serves the LOCAL rows only —
-        # remote rows are display-only by construction in queue_fragments).
-        # forward=pane.forward_mouse (W2 Task 8): first refusal on every
-        # row/header click so a drag armed on the pane above can still be
-        # extended/completed once it releases on this panel.
+        # Live like _toolbar: re-invoked every redraw, reads the ACTIVE
+        # slot's own deque + the sink-owned remote list (pull serves the
+        # LOCAL rows only — remote rows are display-only by construction in
+        # queue_fragments). forward=pane.forward_mouse (W2 Task 8): first
+        # refusal on every row/header click so a drag armed on the pane
+        # above can still be extended/completed once it releases here.
+        slot = _a()
         cols, cap = _panel_size(5)
-        return queue_fragments(pending, pull=_pull_at, width=cols,
-                               remote=remote_pending, collapsed=qp_ui["collapsed"],
+        return queue_fragments(slot.pending, pull=_pull_at, width=cols,
+                               remote=_sink_attr("remote_pending", []),
+                               collapsed=slot.qp_ui["collapsed"],
                                toggle=_toggle_queue, max_items=cap,
-                               forward=pane.forward_mouse)
+                               forward=_pane().forward_mouse)
 
     # The LIVE pending-queue panel — pinned BETWEEN the output pane and the
     # input box; zero rows (hidden) while the queue is empty, so the empty
@@ -690,19 +859,23 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # focus on the input even when a row is clicked.
     queue_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_queue_fragments, focusable=False),
-                       height=lambda: queue_height(pending, remote_pending, qp_ui["collapsed"],
+                       height=lambda: queue_height(_a().pending, _sink_attr("remote_pending", []),
+                                                   _a().qp_ui["collapsed"],
                                                    max_items=_panel_size(5)[1]),
                        always_hide_cursor=True, wrap_lines=False),
-        filter=Condition(lambda: bool(pending) or bool(remote_pending)))
+        filter=Condition(lambda: bool(_a().pending) or bool(_sink_attr("remote_pending", []))))
 
     def _todo_fragments():
         # Live like _queue_fragments: re-invoked every redraw, reads the
-        # sink-owned current_todos list in place (todo frames mutate it).
-        # forward=pane.forward_mouse (W2 Task 8): same first-refusal seam.
+        # ACTIVE slot's sink-owned current_todos list in place (todo frames
+        # mutate it). forward=pane.forward_mouse (W2 Task 8): same
+        # first-refusal seam.
+        slot = _a()
         cols, cap = _panel_size(6)
-        return todo_fragments(todos, width=cols, collapsed=tp_ui["collapsed"],
+        return todo_fragments(_sink_attr("current_todos", []), width=cols,
+                              collapsed=slot.tp_ui["collapsed"],
                               toggle=_toggle_todos, max_items=cap,
-                              forward=pane.forward_mouse)
+                              forward=_pane().forward_mouse)
 
     # The STICKY todo panel — pinned ABOVE the queue panel (the queue stays
     # adjacent to the input; its bottom row is the ↑-pullable newest). Same
@@ -710,19 +883,126 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     # is empty, focusable=False keeps focus on the input.
     todo_panel = ConditionalContainer(
         content=Window(FormattedTextControl(_todo_fragments, focusable=False),
-                       height=lambda: todo_height(todos, tp_ui["collapsed"],
+                       height=lambda: todo_height(_sink_attr("current_todos", []),
+                                                  _a().tp_ui["collapsed"],
                                                   max_items=_panel_size(6)[1]),
                        always_hide_cursor=True, wrap_lines=False),
-        filter=Condition(lambda: bool(todos)))
+        filter=Condition(lambda: bool(_sink_attr("current_todos", []))))
 
     input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)]),
         height=_input_height, wrap_lines=True)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
-    root = HSplit([pane.window, todo_panel, queue_panel, Frame(input_win), toolbar])
+
+    def _switch_to(idx: int) -> None:
+        # Tab-bar click -> switch tabs. `slots.switch` already guards a
+        # no-op (the clicked tab is already active) and a stale idx (the
+        # tab closed between render and release) by returning False -- when
+        # it does, neither the history swap nor the redraw happen, so a
+        # click on the active tab is a true no-op, never a crash. `prev`
+        # captured BEFORE the switch (FIX7b) -- it's the slot we're LEAVING.
+        prev = slots.active()
+        if slots.switch(idx):
+            _swap_history(buf, slots.active())
+            # FIX7b: a draft mid-type must NOT survive a switch (it belongs
+            # to the tab you were looking at, not the one you're switching
+            # into -- history load already re-points the buffer's recall
+            # list; the buffer's own live TEXT needs the same reset), and
+            # the LEAVING slot's own pulled-queue-item carry (↑ pull-to-edit,
+            # see _rewrap_pulled) must be dropped -- otherwise a stale
+            # steer_iid can ride along into a totally different slot's
+            # later resubmit (the kernel's dedup ring would then wrongly
+            # dedup a genuinely new message against a landed twin that was
+            # never even the SAME conversation).
+            buf.reset()
+            prev.pulled["text"] = ""
+            prev.pulled["iid"] = ""
+            if on_switch is not None:
+                on_switch(idx)
+            get_app().invalidate()
+
+    def _close_flow() -> bool:
+        # The REAL close flow (Task 5): delegates to webbee.slots.close_active
+        # (Home guard, active-idx adjustment, cancel_slot, the post-close
+        # note — all PT-free and shared verbatim with repl's `/close`), then
+        # invalidates on a genuine close so the tab bar/pane repaint at once.
+        # FIX7d: the SURVIVOR (post-close active) slot's own history takes
+        # over the shared input buffer, exactly like any other switch — a
+        # closed tab's history dies with it, so the buffer must never keep
+        # pointing at it; the buffer's own draft is dropped too (same
+        # discipline as `_switch_to`'s FIX7b — a close ALSO changes which
+        # tab you're looking at).
+        if close_active(slots, cancel_slot):
+            _swap_history(buf, slots.active())
+            buf.reset()
+            get_app().invalidate()
+            return True
+        return False
+
+    def _close_tab_click(idx: int) -> bool:
+        # Task 7 hygiene fix (was: "honest v1" -- clicking ANY ✕ closed the
+        # CURRENTLY ACTIVE tab, ignoring which one was actually clicked).
+        # `close_at` already resolves the correct post-close active_idx no
+        # matter which slot disappears -- the clicked tab itself, one before
+        # the active tab, or one after it -- so this needs no branching.
+        # Ctrl-W/Ctrl-D/the /close command are UNCHANGED: they have no
+        # per-tab idx of their own, so they keep meaning "close what I'm
+        # looking at" via `_close_flow`/`close_active` below.
+        if close_at(slots, idx, cancel_slot):
+            _swap_history(buf, slots.active())   # FIX7d, same as _close_flow above
+            buf.reset()
+            get_app().invalidate()
+            return True
+        return False
+
+    # repl-owned hook seam (Task 5, map contract item 5): `/tab`, `/new` and
+    # `/close` live in repl.py and only ever mutate `slots` directly -- filled
+    # in here so they route through the EXACT same switch/close path as a
+    # click or a key (the history swap on every switch, the close note),
+    # instead of quietly bypassing it. `ui_hooks=None` (headless/no-dock
+    # callers, and every existing test that doesn't pass one) leaves repl's
+    # own `ui_hooks.get("switch", slots.switch)` fallback in charge.
+    if ui_hooks is not None:
+        ui_hooks["switch"] = _switch_to
+        ui_hooks["close"] = _close_flow
+        # FIX3: the Home-spawned first turn seam — repl's `_home_input` uses
+        # this so the NEW slot's turn is started through the SAME path a
+        # normal Enter-idle submit uses (`slot.turn["task"]` actually gets
+        # populated), instead of a bare `await` that ran the turn invisibly
+        # (no busy glyph, no Esc/Ctrl-C cancel -- nothing ever recorded it).
+        ui_hooks["start_turn_in"] = _start_turn_in
+
+    def _tab_fragments_live():
+        # Live like _toolbar/_queue_fragments: re-invoked every redraw, so a
+        # status_glyph flip (consent armed in a background tab) or an
+        # active-slot change repaints the bar at once. forward=pane.
+        # forward_mouse(clamp="top") (FIX6): first refusal on every tab-bar
+        # click so a drag armed in the pane just below can still be
+        # extended/completed once it releases up here, mirroring the
+        # queue/todo panels' own forward=pane.forward_mouse below the pane.
+        cols, _rows = sizing.get_size(get_app_or_none())
+        return tab_fragments(slots, on_switch=_switch_to, on_close=_close_tab_click, width=cols,
+                             forward=lambda ev: _pane().forward_mouse(ev, clamp="top"))
+
+    # The tab bar — pinned at the very TOP, fixed height 1, NEVER hidden
+    # (unlike the queue/todo panels below it): it IS the new look, even with
+    # only Home showing. focusable=False keeps focus on the input.
+    tab_bar = Window(FormattedTextControl(_tab_fragments_live, focusable=False),
+                     height=1, always_hide_cursor=True)
+    # The single most structural change of the W4a wave (map §3): the pane
+    # slot in the root layout is a DynamicContainer, not a bound window —
+    # it re-resolves `slots.active().pane.window` on EVERY redraw, so a tab
+    # switch repaints a different slot's transcript with no stale reference
+    # left over anywhere in the tree.
+    pane_container = DynamicContainer(lambda: _pane().window)
+    root = HSplit([tab_bar, pane_container, todo_panel, queue_panel, Frame(input_win), toolbar])
     style = Style.from_dict({
         "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
         "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
+        "tab": "#8a8a8a",                    # idle tab — dim, same family as tb.dim
+        "tab.active": "#e8a317 bold",        # the VISIBLE tab — bee-yellow, same accent as tb.spin
+        "tab.alert": "#e8a317 bold reverse", # ⚠ consent waiting in a BACKGROUND tab — reversed so it pops next to tab.active
+        "tab.close": "#8a8a8a",              # the ✕ — dim, closing is never the default action
         "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
         "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
         "tb.working": "#e8a317",             # 'working' — yellow
@@ -743,16 +1023,41 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     })
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)
+    # Task 5: registering ("escape", "<digit>") chords makes bare Escape a
+    # prefix of a longer match, so prompt_toolkit's key-processor now waits
+    # up to `timeoutlen` (default 1.0s) before resolving a genuinely LONE
+    # Escape (stop-turn / step-clear) when nothing follows it — a real,
+    # noticeable regression for a key pressed to stop a turn RIGHT NOW. A
+    # true Alt+digit press sends both bytes together (same write, same
+    # packet even over SSH), so a much shorter window still disambiguates it
+    # correctly; this only shortens the WAIT for a lone Escape, it changes
+    # nothing about which binding ultimately fires.
+    app.timeoutlen = 0.2
     configure_mouse_modes(app.output)   # ?1002 button-event, never ?1003 any-event
 
     async def _ticker():
         # animate the spinner + tick the elapsed clock while a turn runs.
         # _tick_once runs UNCONDITIONALLY every tick, busy or idle — a
         # resize while idle must re-wrap the transcript too, and the
-        # no-change cost is just two int reads.
+        # no-change cost is just two int reads. It resolves the ACTIVE
+        # slot's pane itself (slots, not a bound pane) -- _busy_live is the
+        # is_busy this ticker feeds it, since the old top-level is_busy
+        # param died with the rest of the sink-shaped params.
         while True:
             await asyncio.sleep(0.25)
-            _tick_once(pane, app, is_busy)
+            _tick_once(slots, app, _busy_live)
+
+    # FIX7c (W4a final review — history seeding): the FIRST active slot's
+    # own history is pointed at from the START, before a single key is
+    # pressed -- not only on the FIRST actual `_switch_to` call. Without
+    # this, every line typed pre-switch recorded into the Buffer's own
+    # THROWAWAY default `InMemoryHistory()` (never touched `slot.history`,
+    # which stayed None); the first later switch away and back then MINTED
+    # a brand-new empty history for the slot (`_swap_history`'s own None
+    # check), silently losing every line typed before that first switch --
+    # ↑ recall on a slot you never left would work, but come back after a
+    # Home-and-back and it's gone.
+    _swap_history(buf, _a())
 
     tick = asyncio.ensure_future(_ticker())
     try:
