@@ -118,6 +118,21 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
             ("class:tb.dim", "   ·   Shift + TAB: switch mode")]
 
 
+def _width_watch(pane, app) -> None:
+    """Per-tick resize detector (W2 front-2): prompt_toolkit repaints on
+    SIGWINCH by itself, but the RICH side (console width) must be told to
+    re-wrap — this is the bridge. Two int compares when nothing changed.
+    Swallows any reflow error — the ticker is the dock's only animation
+    loop (spinner + queue drains ride on it too) and must never die."""
+    from webbee.sizing import get_size
+    cols, _rows = get_size(app)
+    if cols and cols != pane.console.width:
+        try:
+            pane.reflow(cols)
+        except Exception:
+            pass
+
+
 def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event, buf=None) -> None:
     """Esc key binding (P5g). While a turn is running, STOP it — cancel the LOCAL
     turn task (what actually tears the turn down, same as Ctrl-C) AND ask the
@@ -643,9 +658,15 @@ async def run_session(*, pane, on_line, mode_getter, on_cycle, status,
     configure_mouse_modes(app.output)   # ?1002 button-event, never ?1003 any-event
 
     async def _ticker():
-        # animate the spinner + tick the elapsed clock while a turn runs
+        # animate the spinner + tick the elapsed clock while a turn runs.
+        # _width_watch runs UNCONDITIONALLY every tick, busy or idle — a
+        # resize while idle must re-wrap the transcript too, and the
+        # no-change cost is just two int reads (it self-guards any reflow
+        # error, so it can never kill this loop — the dock's only
+        # animation source).
         while True:
             await asyncio.sleep(0.25)
+            _width_watch(pane, app)
             if is_busy() or pane.flash():
                 app.invalidate()
 

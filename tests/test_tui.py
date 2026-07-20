@@ -409,6 +409,49 @@ def test_reflow_does_not_duplicate_records_or_reenter_recording():
     assert sum(p._record_lines) == len(p._all_lines()) - 1
 
 
+# ── W2 Task 4: _width_watch — the ticker's per-tick bridge from PT's
+# SIGWINCH repaint to the Rich-side reflow ──────────────────────────────────
+
+def test_ticker_width_watch_triggers_reflow(monkeypatch):
+    """Drive the extracted _width_watch(pane, app) helper directly: app
+    reports 72 cols while pane.console.width is 100 ⇒ pane.reflow(72) called
+    (record with a stub); same width ⇒ no call."""
+    from webbee.tui import _width_watch
+
+    class _Pane:
+        def __init__(self, width):
+            self.console = type("Console", (), {"width": width})()
+            self.calls = []
+
+        def reflow(self, cols):
+            self.calls.append(cols)
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    pane = _Pane(100)
+    _width_watch(pane, object())
+    assert pane.calls == [72]
+
+    same = _Pane(72)
+    _width_watch(same, object())
+    assert same.calls == []
+
+
+def test_ticker_width_watch_swallows_reflow_error(monkeypatch):
+    """A reflow crash must never kill the ticker — it's the dock's only
+    animation loop (spinner + queued-line drains all ride on it)."""
+    from webbee.tui import _width_watch
+
+    class _BrokenPane:
+        def __init__(self, width):
+            self.console = type("Console", (), {"width": width})()
+
+        def reflow(self, cols):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    _width_watch(_BrokenPane(100), object())   # must not raise
+
+
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
 # Previously Ctrl-C only cancelled the local asyncio task while the cloud
 # brain kept running server-side; Esc did nothing while busy. Both key
