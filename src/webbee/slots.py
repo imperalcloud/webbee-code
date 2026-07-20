@@ -78,6 +78,32 @@ class SlotManager:
         return sum(1 for s in self.slots if s.kind == "session")
 
 
+def close_active(slots: SlotManager, cancel_slot=None) -> bool:
+    """The shared tab-close flow (W4a Task 5) — PT-free so tui's Ctrl-W/✕
+    handler AND repl's `/close` command call the EXACT same function instead
+    of growing two copies of the same policy. Closes whichever tab is
+    CURRENTLY active via `slots.close(slots.active_idx)` — Home (index 0) is
+    already guarded there (never removable), so calling this while Home is
+    active is a safe no-op (returns False, `cancel_slot` never runs).
+
+    On a genuine close: `cancel_slot(removed)` runs first when given (repl's
+    own callable — cancels the removed slot's OWN background tasks; the
+    kernel's MarathonWorkflow keeps running server-side regardless, browser-
+    tab model — `/new` against the same repo re-attaches later), then a short
+    note lands in the now-ACTIVE (post-close) slot's sink, when it has one:
+    Home has none, and a minimal test sink may not implement `.note` either,
+    so this is `getattr`-guarded rather than assumed."""
+    removed = slots.close(slots.active_idx)
+    if removed is None:
+        return False
+    if cancel_slot is not None:
+        cancel_slot(removed)
+    note = getattr(slots.active().sink, "note", None)
+    if note is not None:
+        note("tab closed — the run keeps going server-side; /new in that repo re-attaches")
+    return True
+
+
 class WorkspaceResources:
     """Per-repo-root shared pieces (map §6): intel+watcher, shadow, git
     branch. Keyed by realpath of the repo root; get() returns the cached

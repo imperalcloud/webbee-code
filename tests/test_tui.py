@@ -3092,7 +3092,15 @@ def test_enter_resolves_consent_on_the_active_slot_only():
 
                 sink_a.consent_pending = lambda: False
                 sink_b.consent_pending = lambda: False
-                pipe.send_text("\x04")                        # Ctrl-D exit (idle, active=B)
+                # Two session tabs, no Home in this fixture (it predates
+                # Task 4's Home concept): Ctrl-D now closes the ACTIVE tab
+                # first (Task 5 policy: session_count() > 1) instead of
+                # exiting outright -- the first press closes B and lands
+                # back on A, the second exits cleanly once only one tab
+                # (idle) is left.
+                pipe.send_text("\x04")
+                await _until(lambda: len(slots.slots) == 1)
+                pipe.send_text("\x04")                        # Ctrl-D exit (idle, single tab)
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
 
@@ -3167,7 +3175,13 @@ def test_turn_pinned_to_originating_slot_drains_its_own_queue_after_switch():
                 assert not slot_b.pending                         # B never touched by A's drain
                 await _until(lambda: not busy_a["v"])
 
-                slots.active_idx = 0                              # back to A to exit cleanly
+                # Two session tabs, no Home here either -- index 0 (A) is
+                # unconditionally guarded by SlotManager.close (the real
+                # Home-at-0 invariant), so the close has to fire FROM B
+                # (still active): first Ctrl-D closes B and lands on A,
+                # second Ctrl-D exits cleanly (idle, single tab left).
+                pipe.send_text("\x04")
+                await _until(lambda: len(slots.slots) == 1)
                 pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
@@ -3318,6 +3332,401 @@ def test_tab_bar_window_is_root_hsplit_first_child():
                 assert "◆ Home" in text                            # Home always first
                 assert "●1 proj" in text                           # active session, marked ●N
                 pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+# ── W4a Task 5: tab keys + commands + lifecycle ─────────────────────────────
+# Pure decision helpers first (same DI-testing philosophy as _escape_action),
+# then end-to-end dock coverage for Ctrl-T, Alt+N, Ctrl-W, Ctrl-D and the
+# ui_hooks seam repl's /tab, /new, /close route through.
+
+def test_can_close_tab_true_on_empty_buffer_session_slot():
+    from webbee.slots import SessionSlot
+    from webbee.tui import _can_close_tab
+    slot = SessionSlot(kind="session", workspace=".", label="t", pane=None, sink=None, agent=None)
+    assert _can_close_tab(_FakeBuf(""), slot) is True
+
+
+def test_can_close_tab_false_with_draft_text():
+    from webbee.slots import SessionSlot
+    from webbee.tui import _can_close_tab
+    slot = SessionSlot(kind="session", workspace=".", label="t", pane=None, sink=None, agent=None)
+    assert _can_close_tab(_FakeBuf("still typing"), slot) is False
+
+
+def test_can_close_tab_false_on_home():
+    from webbee.slots import SessionSlot
+    from webbee.tui import _can_close_tab
+    slot = SessionSlot(kind="home", workspace=".", label="Home", pane=None, sink=None, agent=None)
+    assert _can_close_tab(_FakeBuf(""), slot) is False
+
+
+def test_should_close_on_eof_true_with_more_than_one_session_active():
+    from webbee.slots import SessionSlot
+    from webbee.tui import _should_close_on_eof
+    slots = mk_slots()
+    slots.add(SessionSlot(kind="session", workspace=".", label="b", pane=None, sink=None, agent=None))
+    slots.active_idx = 1
+    assert _should_close_on_eof(slots) is True
+
+
+def test_should_close_on_eof_false_with_a_single_session():
+    from webbee.tui import _should_close_on_eof
+    slots = mk_slots()
+    assert _should_close_on_eof(slots) is False
+
+
+def test_should_close_on_eof_false_on_home_even_with_other_sessions_open():
+    from webbee.slots import SessionSlot, SlotManager
+    from webbee.tui import _should_close_on_eof
+    slots = SlotManager()
+    slots.add(SessionSlot(kind="home", workspace=".", label="Home", pane=None, sink=None, agent=None))
+    slots.add(SessionSlot(kind="session", workspace=".", label="a", pane=None, sink=None, agent=None))
+    slots.add(SessionSlot(kind="session", workspace=".", label="b", pane=None, sink=None, agent=None))
+    slots.active_idx = 0
+    assert _should_close_on_eof(slots) is False
+
+
+def _idle_status():
+    return {"tokens": 0, "credits": 0, "busy": False, "current": "",
+            "elapsed": 0.0, "tools": 0, "consent": False}
+
+
+def _idle_sink(**extra):
+    return SimpleNamespace(status=_idle_status, is_busy=lambda: False,
+                           consent_pending=lambda: False, resolve_consent=lambda t: None, **extra)
+
+
+async def _until(pred, timeout=5.0):
+    import time
+    t0 = time.time()
+    while not pred():
+        assert time.time() - t0 < timeout, "timed out"
+        await asyncio.sleep(0.01)
+
+
+def test_ctrl_t_jumps_to_home_from_a_session_tab():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="proj",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 1
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x14")                    # Ctrl-T
+                await _until(lambda: slots.active_idx == 0)
+                pipe.send_text("\x04")                     # single session left -> idle exit
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_alt_1_switches_from_home_to_session_tab_and_swaps_history():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="proj",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 0
+        assert session.history is None
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x1b1")                    # Alt+1 -- both bytes together
+                await _until(lambda: slots.active_idx == 1)
+                assert session.history is not None          # _swap_history fired, same as a click
+                pipe.send_text("\x04")                       # single session -> idle exit
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_w_with_empty_buffer_closes_active_session_and_notes_survivor():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        notes_a = []
+        slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(note=notes_a.append), agent=None)
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(slot_a)
+        slots.add(slot_b)
+        slots.active_idx = 2                                # active = b, input empty
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x17")                       # Ctrl-W, empty buffer, active=b
+                await _until(lambda: len(slots.slots) == 2)
+                assert slots.active_idx == 1                 # landed on the neighbor (a)
+                assert notes_a and "server-side" in notes_a[0] and "/new" in notes_a[0]
+                pipe.send_text("\x04")                        # single session left -> idle exit
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_w_with_draft_text_falls_through_to_word_delete_not_close():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(slot_a)
+        slots.add(slot_b)
+        slots.active_idx = 2
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("hello world")
+                await asyncio.sleep(0.05)
+                before = get_app().current_buffer.text
+                assert before == "hello world"
+                pipe.send_text("\x17")                        # Ctrl-W with draft text present
+                await asyncio.sleep(0.05)
+                after = get_app().current_buffer.text
+                assert after != before and len(after) < len(before)   # normal word-delete ran
+                assert len(slots.slots) == 3                  # nothing closed
+                assert slots.active_idx == 2
+                get_app().current_buffer.reset()
+                slots.active_idx = 1                          # avoid closing idx 0 on exit
+                pipe.send_text("\x04")
+                await _until(lambda: len(slots.slots) == 2)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_d_closes_active_session_when_others_remain():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        slot_a = SessionSlot(kind="session", workspace=".", label="a",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(slot_a)
+        slots.add(slot_b)
+        slots.active_idx = 2                                  # active = b (session), idle
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x04")                        # closes b (session_count 2 > 1)
+                await _until(lambda: len(slots.slots) == 2)
+                assert slots.active_idx == 1
+                pipe.send_text("\x04")                        # now exits (single session, idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_key_processor_timeoutlen_tuned_down_below_default():
+    # Registering ("escape", "<digit>") chords makes bare Escape a prefix of
+    # a longer match, so the key-processor would otherwise wait its FULL
+    # default timeoutlen (1.0s) before resolving a genuinely lone Escape --
+    # this guards that the Task 5 mitigation (a shorter app.timeoutlen) is
+    # actually in place on the constructed Application.
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        slots = mk_slots(pane=tui.OutputPane(width=80), sink=_idle_sink())
+        async def on_line(text): ...
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                assert get_app().timeoutlen < 1.0
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_lone_escape_still_stops_the_turn_after_alt_digit_bindings_added():
+    # The regression Task 5 explicitly calls out: adding ("escape","0".."9")
+    # bindings must not silently BREAK the existing stop-turn Escape -- it
+    # may resolve a little later (key-processor chord-timeout), but it must
+    # still fire. Generous timeout budget covers app.timeoutlen (tuned down,
+    # see above) plus prompt_toolkit's own unrelated vt100-level ttimeoutlen.
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        gate = asyncio.Event()
+        busy = {"v": False}
+        ran = []
+        stopped = []
+
+        async def on_line(text):
+            busy["v"] = True
+            ran.append(text)
+            try:
+                await gate.wait()
+            finally:
+                busy["v"] = False
+
+        async def stop_turn():
+            stopped.append(1)
+
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=tui.OutputPane(width=80), sink=sink)
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None, stop_turn=stop_turn))
+                await asyncio.sleep(0.05)
+                pipe.send_text("go\r")
+                await _until(lambda: ran == ["go"])
+                pipe.send_text("\x1b")                       # LONE Escape -- nothing follows it
+                await _until(lambda: stopped == [1], timeout=3.0)
+                await _until(lambda: not busy["v"], timeout=3.0)
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_ui_hooks_filled_with_switch_and_close_routing_through_the_real_flow():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="proj",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 0
+        ui_hooks = {}
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None, ui_hooks=ui_hooks))
+                await asyncio.sleep(0.05)
+                assert set(ui_hooks) == {"switch", "close"}
+                assert ui_hooks["close"]() is False          # Home guarded -- no-op
+                assert len(slots.slots) == 2
+
+                ui_hooks["switch"](1)                        # same effect as a tab-bar click
+                await asyncio.sleep(0.02)
+                assert slots.active_idx == 1
+                assert session.history is not None            # history swap happened too
+
+                assert ui_hooks["close"]() is True
+                await asyncio.sleep(0.02)
+                assert len(slots.slots) == 1                  # only Home left
+
+                pipe.send_text("\x04")                        # idle, no sessions -> exit
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
 

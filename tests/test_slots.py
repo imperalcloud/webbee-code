@@ -5,7 +5,7 @@ same-repo-root sharing (wiring map §6 boot split)."""
 import os
 import subprocess
 
-from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
+from webbee.slots import SessionSlot, SlotManager, WorkspaceResources, close_active
 
 
 def _mk_repo(tmp_path):
@@ -183,6 +183,74 @@ def test_workspace_resources_get_missing_returns_none(tmp_path):
     root = _mk_repo(tmp_path)
     res = WorkspaceResources()
     assert res.get(str(root)) is None
+
+
+# --- close_active (W4a Task 5 — shared tab-close flow, PT-free) ---
+
+
+def test_close_active_guards_home_never_calls_cancel_slot():
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    calls = []
+    assert close_active(mgr, calls.append) is False
+    assert calls == []
+    assert len(mgr.slots) == 1
+
+
+def test_close_active_closes_the_active_tab_and_adjusts_active_idx():
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    mgr.add(_mk_slot(label="a"))
+    victim = _mk_slot(label="b")
+    mgr.add(victim)
+    mgr.active_idx = 2
+    assert close_active(mgr, None) is True
+    assert len(mgr.slots) == 2
+    assert mgr.active_idx == 1
+    assert mgr.slots[mgr.active_idx].label == "a"
+
+
+def test_close_active_calls_cancel_slot_with_the_removed_slot():
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    victim = _mk_slot(label="victim")
+    mgr.add(victim)
+    mgr.active_idx = 1
+    seen = []
+    assert close_active(mgr, seen.append) is True
+    assert seen == [victim]
+
+
+def test_close_active_notes_into_the_post_close_active_slots_sink():
+    from types import SimpleNamespace
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    notes = []
+    mgr.add(_mk_slot(label="a", sink=SimpleNamespace(note=notes.append)))
+    mgr.add(_mk_slot(label="b"))
+    mgr.active_idx = 2
+    assert close_active(mgr, None) is True
+    assert mgr.active_idx == 1                     # the note lands on "a", not "b"
+    assert len(notes) == 1
+    assert "server-side" in notes[0] and "/new" in notes[0]
+
+
+def test_close_active_note_is_getattr_guarded_when_sink_has_none():
+    # Home (sink=None) or a minimal test sink without .note must never crash
+    # the close flow -- the note is a nice-to-have, not a hard dependency.
+    mgr = SlotManager()
+    mgr.add(_mk_slot(kind="home"))
+    mgr.add(_mk_slot(label="a", sink=_FakeSink()))  # _FakeSink has no .note
+    mgr.add(_mk_slot(label="b"))
+    mgr.active_idx = 2
+    assert close_active(mgr, None) is True          # must not raise
+
+    mgr2 = SlotManager()
+    mgr2.add(_mk_slot(kind="home"))
+    mgr2.add(_mk_slot(label="only-session"))
+    mgr2.active_idx = 1
+    assert close_active(mgr2, None) is True          # lands back on Home (sink=None)
+    assert mgr2.active_idx == 0
 
 
 def test_workspace_resources_distinct_roots_do_not_collide(tmp_path):

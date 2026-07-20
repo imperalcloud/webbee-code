@@ -3,8 +3,8 @@ import os
 import re
 
 from webbee.account import Account
-from webbee.repl import (_finish_slot, _live_session_id, _make_session_slot,
-                         _slot_ctx, run_marathon, run_repl)
+from webbee.repl import (_cancel_slot, _finish_slot, _live_session_id,
+                         _make_session_slot, _slot_ctx, run_marathon, run_repl)
 from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
@@ -1201,3 +1201,94 @@ def test_watcher_task_cancelled_on_repl_exit(monkeypatch):
 
     sink, agent = _run(read_line=_lines("/exit"), intel_factory=lambda cfg, ws: _RootedIntel())
     assert fate.get("cancelled") is True
+
+
+# ── W4a Task 5: tab keys + commands + lifecycle — repl-side wiring ──────────
+
+
+class _FakeTask:
+    def __init__(self, done=False):
+        self._done = done
+        self.cancelled = False
+    def done(self):
+        return self._done
+    def cancel(self):
+        self.cancelled = True
+
+
+def test_cancel_slot_cancels_the_running_turn_task_and_bg_tasks():
+    slot = SessionSlot(kind="session", workspace=".", label="t",
+                       pane=object(), sink=None, agent=None)
+    live_turn = _FakeTask()
+    slot.turn["task"] = live_turn
+    live_bg, done_bg = _FakeTask(), _FakeTask(done=True)
+    slot.bg_tasks = [live_bg, done_bg, None]
+
+    _cancel_slot(slot)
+
+    assert live_turn.cancelled is True
+    assert live_bg.cancelled is True
+    assert done_bg.cancelled is False        # already done -- never double-cancelled
+
+
+def test_cancel_slot_survives_no_turn_task_and_no_bg_tasks():
+    slot = SessionSlot(kind="session", workspace=".", label="t",
+                       pane=object(), sink=None, agent=None)
+    _cancel_slot(slot)                       # must not raise -- turn["task"] is None
+
+
+def test_new_tab_command_opens_a_second_slot_and_switches_to_it():
+    # Fallback (non-dock) path: ui_hooks stays {} so /new's switch falls back
+    # to slots.switch directly -- no history swap needed with no dock, but
+    # the slot itself must exist and become active, and /tabs (after
+    # switching back) must show BOTH tabs with the right glyphs/labels.
+    sink, agent = _run(read_line=_lines("/new /tmp", "/tab 0", "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert "●0" in listing and "○1" in listing
+    assert "tmp" in listing
+
+
+def test_new_tab_notes_on_the_new_slots_own_sink_not_the_original():
+    sink, agent = _run(read_line=_lines("/new /tmp", "/exit"))
+    # the "tab N opened" note lands on the NEW slot's own (real) sink, so the
+    # original FakeSink returned by _run never sees it.
+    assert not any("opened" in n for n in sink.notes)
+
+
+def test_tab_switch_bad_index_notes_helpfully():
+    sink, agent = _run(read_line=_lines("/tab 5", "/exit"))
+    assert any("No such tab" in n for n in sink.notes)
+
+
+def test_tab_switch_valid_index_switches_active_slot():
+    sink, agent = _run(read_line=_lines("/new /tmp", "/tab 0", "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    assert listing.startswith("Open tabs:")
+    assert "●0" in listing                    # back on the original slot
+
+
+def test_close_command_on_the_only_slot_notes_nothing_to_close():
+    # The fallback loop's single slot sits at index 0 -- unconditionally
+    # guarded by SlotManager.close (the real Home-at-0 invariant), same as
+    # production's Home tab.
+    sink, agent = _run(read_line=_lines("/close", "/exit"))
+    assert any("Nothing to close" in n for n in sink.notes)
+
+
+def test_close_command_closes_the_new_tab_and_notes_the_survivor():
+    sink, agent = _run(read_line=_lines("/new /tmp", "/close", "/tabs", "/exit"))
+    assert any("server-side" in n and "/new" in n for n in sink.notes)
+    listing = sink.notes[-1]
+    assert "●0" in listing and "1" not in listing.replace("/tmp", "")
+
+
+def test_tabs_list_note_contains_one_line_per_tab_with_glyphs():
+    # /new switches active to the new slot -- switch back to 0 first so the
+    # /tabs note lands on the ORIGINAL (inspectable) FakeSink.
+    sink, agent = _run(read_line=_lines("/new /tmp", "/tab 0", "/tabs", "/exit"))
+    listing = sink.notes[-1]
+    lines = listing.split("\n")
+    assert lines[0] == "Open tabs:"
+    assert len(lines) == 3                    # header + 2 tabs
+    assert lines[1].startswith("●0")           # back on the original slot
+    assert lines[2].startswith("○1")

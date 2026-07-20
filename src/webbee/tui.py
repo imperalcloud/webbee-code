@@ -24,6 +24,7 @@ from webbee import sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
+from webbee.slots import close_active
 from webbee.tabs import tab_fragments
 from webbee.todo_panel import todo_fragments, todo_height
 
@@ -232,6 +233,26 @@ def _interrupt_action(turn: dict, is_busy, stop_turn, event) -> None:
         t.cancel()                          # cancel the running turn; dock survives
 
 
+def _can_close_tab(buf, slot) -> bool:
+    """PURE. Ctrl-W's filter predicate (Task 5) — same DI-testing philosophy
+    as `_escape_action`/`_interrupt_action`, exposed module-level so a test
+    drives it directly instead of only through a live Application. Ctrl-W
+    closes the active tab ONLY when the input is empty (a non-empty draft
+    means the user wants PT's normal word-delete, not a tab close) AND the
+    active slot is an actual session (Home has nothing to close)."""
+    return not buf.text and slot is not None and slot.kind == "session"
+
+
+def _should_close_on_eof(slots) -> bool:
+    """PURE. Ctrl-D's tab-vs-quit policy (Task 5): closing the active SESSION
+    tab is the natural Ctrl-D action as long as at least one OTHER session
+    tab survives — closing the last one instead falls through to the
+    original behavior (exit the app when idle), since landing on a bare Home
+    with nothing left open is close enough to "quit" that a second Ctrl-D
+    finishes the job instead of a tab-close silently doing nothing new."""
+    return slots.session_count() > 1 and slots.active().kind == "session"
+
+
 class QueuedLine(str):
     """A locally-queued type-ahead line that remembers the steer_iid minted at
     enqueue time (mid-turn inject fallback, 0.3.15). A plain str everywhere it
@@ -413,7 +434,7 @@ def _swap_history(buf, slot) -> None:
 
 async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
-                      home_input=None, close_tab=None) -> bool:
+                      home_input=None, cancel_slot=None, ui_hooks=None) -> bool:
     """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
     CALL TIME (W4a Task 3 — the single most structural change of the
     multisession-tabs wave: no more one session's objects captured once at
@@ -445,9 +466,26 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     them. A tab bar (Task 4, `webbee.tabs.tab_fragments`) is pinned at the
     very top of the dock, ALWAYS visible: a click switches tabs (`_switch_to`
     — a no-op on the already-active tab or a stale idx, since
-    `slots.switch` already guards both); a session tab's ✕ calls
-    `close_tab(idx)` when the caller wires one (`None` — today's default —
-    means the ✕ safely no-ops; the real close flow is a later task).
+    `slots.switch` already guards both); a session tab's ✕ AND Ctrl-W AND
+    Ctrl-D-with-other-tabs-open all reach the SAME `_close_flow` (Task 5),
+    which delegates to `webbee.slots.close_active(slots, cancel_slot)` — PT-
+    free, shared verbatim with repl's `/close` command. `cancel_slot` (a NEW
+    repl-injected callable) tears down the removed slot's OWN background
+    tasks; the kernel's run keeps going server-side regardless (browser-tab
+    model). `Ctrl-T` and `Alt+0..9` (prompt_toolkit sees the latter as the
+    two-key sequence `("escape", "<digit>")`) both land on `_switch_to` —
+    the bare `escape` binding (stop-turn / step-clear) stays registered too;
+    prompt_toolkit's own key-processor timeout disambiguates a lone Escape
+    from an Escape-then-digit chord, same mechanism its own default emacs
+    bindings already lean on for `escape,f`/`escape,b`/etc — `app.timeoutlen`
+    is turned down well below its 1.0s default (see below) so a genuine lone
+    Escape still resolves quickly instead of only your patience finding
+    out. `ui_hooks` (optional, repl-owned mutable dict): this function fills
+    `ui_hooks["switch"] = _switch_to` and `ui_hooks["close"] = _close_flow`
+    at construction time, so repl's `/tab`/`/new`/`/close` commands route
+    through the EXACT same switch/close path the keys and clicks use (the
+    history swap on every switch, the close note) instead of mutating
+    `slots` directly and missing it.
     Returns True on clean exit; False if prompt_toolkit is unavailable
     (the caller uses the plain fallback loop)."""
     try:
@@ -604,8 +642,45 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     def _interrupt(event):
         _interrupt_action(_a().turn, _busy_live, stop_turn, event)
 
+    @kb.add("c-t")
+    def _new_tab_key(event):
+        # Ctrl-T: jump to Home (slot 0) — the new-tab page. Typing there
+        # starts a real session tab (Task 6); this key itself never creates
+        # a slot, exactly like clicking the Home tab does.
+        _switch_to(0)
+
+    def _alt_digit_handler(d: int):
+        def _h(event):
+            _switch_to(d)
+        return _h
+
+    for _d in range(10):
+        # Alt+N == prompt_toolkit's two-key sequence ("escape", "<digit>") —
+        # the SAME mechanism its own default emacs bindings use for
+        # escape+f/escape+b/etc, coexisting with the plain "escape" binding
+        # below (stop-turn / step-clear) via the key-processor's own
+        # prefix-of-longer-match timeout, tuned down further below.
+        kb.add("escape", str(_d))(_alt_digit_handler(_d))
+
+    @kb.add("c-w", filter=Condition(lambda: _can_close_tab(buf, _a())))
+    def _close_tab_key(event):
+        # Filtered, not unconditional (contract): an empty input on an
+        # active SESSION tab closes it; any OTHER state (draft text present,
+        # or Home active) leaves this binding's filter False, so the match
+        # falls through to prompt_toolkit's own default emacs/basic Ctrl-W
+        # (unix-word-rubout) untouched.
+        _close_flow()
+
     @kb.add("c-d")
     def _eof(event):
+        # Ctrl-D policy (Task 5): closing the active SESSION tab is the
+        # natural action as long as another session tab survives it;
+        # otherwise fall through to the original behavior (quit when idle —
+        # unchanged, still gated on _busy_live so a running turn is never
+        # torn down by a stray EOF).
+        if _should_close_on_eof(slots):
+            _close_flow()
+            return
         if not _busy_live():
             event.app.exit()
 
@@ -790,13 +865,34 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             _swap_history(buf, slots.active())
             get_app().invalidate()
 
+    def _close_flow() -> bool:
+        # The REAL close flow (Task 5): delegates to webbee.slots.close_active
+        # (Home guard, active-idx adjustment, cancel_slot, the post-close
+        # note — all PT-free and shared verbatim with repl's `/close`), then
+        # invalidates on a genuine close so the tab bar/pane repaint at once.
+        if close_active(slots, cancel_slot):
+            get_app().invalidate()
+            return True
+        return False
+
     def _close_tab_click(idx: int) -> None:
-        # Placeholder half of the ✕ handler (Task 5 wires the real close
-        # flow — cancel the slot's bg_tasks, drop it from SlotManager, land
-        # back on a neighbor). `close_tab=None` today -> this safely no-ops,
-        # exactly like a switch onto a stale idx.
-        if close_tab is not None:
-            close_tab(idx)
+        # Honest v1 (matches Ctrl-W, which has no per-tab idx concept
+        # either): clicking ANY session tab's ✕ closes the CURRENTLY ACTIVE
+        # tab, not necessarily the one clicked. `idx` is accepted (mouse
+        # dispatch always passes one) but intentionally unused -- a later
+        # wave can make ✕ target its own tab if that surprises people.
+        _close_flow()
+
+    # repl-owned hook seam (Task 5, map contract item 5): `/tab`, `/new` and
+    # `/close` live in repl.py and only ever mutate `slots` directly -- filled
+    # in here so they route through the EXACT same switch/close path as a
+    # click or a key (the history swap on every switch, the close note),
+    # instead of quietly bypassing it. `ui_hooks=None` (headless/no-dock
+    # callers, and every existing test that doesn't pass one) leaves repl's
+    # own `ui_hooks.get("switch", slots.switch)` fallback in charge.
+    if ui_hooks is not None:
+        ui_hooks["switch"] = _switch_to
+        ui_hooks["close"] = _close_flow
 
     def _tab_fragments_live():
         # Live like _toolbar/_queue_fragments: re-invoked every redraw, so a
@@ -844,6 +940,16 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     })
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)
+    # Task 5: registering ("escape", "<digit>") chords makes bare Escape a
+    # prefix of a longer match, so prompt_toolkit's key-processor now waits
+    # up to `timeoutlen` (default 1.0s) before resolving a genuinely LONE
+    # Escape (stop-turn / step-clear) when nothing follows it — a real,
+    # noticeable regression for a key pressed to stop a turn RIGHT NOW. A
+    # true Alt+digit press sends both bytes together (same write, same
+    # packet even over SSH), so a much shorter window still disambiguates it
+    # correctly; this only shortens the WAIT for a lone Escape, it changes
+    # nothing about which binding ultimately fires.
+    app.timeoutlen = 0.2
     configure_mouse_modes(app.output)   # ?1002 button-event, never ?1003 any-event
 
     async def _ticker():

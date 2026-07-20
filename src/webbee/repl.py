@@ -7,7 +7,7 @@ from webbee import __version__, boot
 from webbee.account import login_device_flow
 from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
-from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
+from webbee.slots import SessionSlot, SlotManager, WorkspaceResources, close_active
 from webbee.tui import _MODES, next_mode
 
 
@@ -125,6 +125,25 @@ def _live_session_id(slots: SlotManager) -> str:
     at all (Home)."""
     agent = slots.active().agent
     return getattr(agent, "session_id", "") if agent is not None else ""
+
+
+def _cancel_slot(slot: SessionSlot) -> None:
+    """The tab-close flow's CLIENT-side teardown (Task 5) — the `cancel_slot`
+    callable `webbee.slots.close_active` invokes on the slot it just removed
+    from the SlotManager. Cancels this slot's own running turn (if any --
+    the actual `_run_turn` background task tui.py started, tracked in
+    `slot.turn["task"]`) plus anything parked in `slot.bg_tasks`, each guarded
+    by `.done()` so an already-finished task is never double-cancelled.
+    Does NOT touch the server-side run at all -- browser-tab model, per the
+    wiring map: the kernel's MarathonWorkflow keeps going: only the local
+    await/stream-read this PROCESS was doing for the tab dies here, so `/new`
+    against the same repo later re-attaches to a run that never stopped."""
+    task = slot.turn.get("task")
+    if task is not None and not task.done():
+        task.cancel()
+    for t in slot.bg_tasks:
+        if t is not None and not t.done():
+            t.cancel()
 
 
 async def _resources_bundle(cfg, workspace: str, resources: WorkspaceResources,
@@ -257,6 +276,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     slots = SlotManager()
     resources = WorkspaceResources()   # per-workspace boot cache (map §6)
     steer_task = None   # assigned by _spawn_steer -- idle-steer poller (webbee.steer), cancelled on exit
+    # Task 5 (map contract item 5): the dock fills this at construction time
+    # with `switch`/`close` -- the SAME `_switch_to`/`_close_flow` a click or
+    # a key goes through (history swap, close note) -- so /tab, /new and
+    # /close route through it too instead of mutating `slots` blind. Stays
+    # `{}` forever on the fallback (non-dock) path -- `.get(..., default)`
+    # below then falls back to a plain SlotManager call with no history/UI
+    # side effects, which is exactly right where there is no dock at all.
+    ui_hooks: dict = {}
 
     # Process-wide boot phase: ONE account fetch regardless of which slot(s)
     # end up existing.
@@ -378,6 +405,63 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     _sink.note(_remote.describe(st))
                 except Exception as e:
                     _sink.note(f"Remote control unavailable: {type(e).__name__}")
+                return "continue"
+            if res.action == "new_tab":
+                # Task 5: no path -> clone the ACTIVE slot's own workspace
+                # into a fresh tab (falling back to the process cwd only if
+                # that's somehow empty too — defensive, shouldn't happen in
+                # practice); a GIVEN path is resolved against the process's
+                # cwd (`os.path.abspath`, the SAME anchor `workspace` itself
+                # uses everywhere else in this file), not the active slot's
+                # own directory — so `/new ../sibling` means the same thing
+                # no matter which tab you typed it from. Always `first=False`
+                # (map §6 replay landmine): only the process's very first
+                # session slot ever gets the welcome banner + thread replay.
+                # A fresh tab starts in the process's BASELINE `mode`, never
+                # inheriting whatever the active tab is currently running in
+                # — an autopilot tab must never spawn another autopilot tab
+                # silently.
+                ws = os.path.abspath(res.arg) if res.arg else (slot.workspace or workspace)
+                new_slot = await _make_session_slot(
+                    cfg, token_provider, ws, mode, resources=resources,
+                    shared_client=shared_client, agent_factory=agent_factory,
+                    intel_factory=intel_factory, shadow_factory=shadow_factory,
+                    first=False)
+                idx = slots.add(new_slot)
+                ui_hooks.get("switch", slots.switch)(idx)
+                new_slot.sink.note(f"tab {idx} opened — {new_slot.label}")
+                return "continue"
+            if res.action == "tab_switch":
+                try:
+                    idx = int(res.arg)
+                except (TypeError, ValueError):
+                    idx = -1
+                if idx < 0 or idx >= len(slots.slots):
+                    if _sink is not None:
+                        _sink.note(f"No such tab '{res.arg}'. /tabs lists the open ones.")
+                    return "continue"
+                ui_hooks.get("switch", slots.switch)(idx)
+                return "continue"
+            if res.action == "tab_close":
+                # Share the EXACT close flow the dock's Ctrl-W/✕ use
+                # (`ui_hooks["close"]` == tui's `_close_flow`) when a dock is
+                # actually running; the fallback (headless/no-dock) calls
+                # webbee.slots.close_active directly with the SAME
+                # `_cancel_slot` -- no UI to invalidate, but identical
+                # Home-guard/cancel/note semantics either way.
+                close_fn = ui_hooks.get("close")
+                closed = close_fn() if close_fn is not None else close_active(slots, _cancel_slot)
+                if not closed and _sink is not None:
+                    # Guarded by SlotManager.close's own idx<=0 invariant --
+                    # the dock's Home tab, or (fallback loop) the only slot
+                    # there is, since it always sits at index 0 too.
+                    _sink.note("Nothing to close.")
+                return "continue"
+            if res.action == "tabs_list":
+                lines = [f"{'●' if i == slots.active_idx else '○'}{i} {s.label} {s.status_glyph()}"
+                         for i, s in enumerate(slots.slots)]
+                if _sink is not None:
+                    _sink.note("Open tabs:\n" + "\n".join(lines))
                 return "continue"
             if res.action == "queue_clear":
                 # dispatch built the message (with the drop count) from the
@@ -609,6 +693,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         inject=lambda text, iid: _inject_via_gateway(
                             cfg, token_provider, slots.active().agent, slots.active().sink, text, iid,
                             client=shared_client),
+                        cancel_slot=_cancel_slot, ui_hooks=ui_hooks,
                     )
                 finally:
                     _cancel_background()
