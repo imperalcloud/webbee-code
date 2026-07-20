@@ -99,29 +99,28 @@ def test_output_pane_captures_colored_text():
 # ── copy-on-select (drag → OSC 52) ────────────────────────────────────────────
 
 def test_selected_text_single_line():
+    # _selected_text now takes ABSOLUTE (line, col) pairs directly (W2 front-3a:
+    # the caller resolves viewport + _offset once, at press/move/release time).
     from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
     pane = OutputPane(width=80)
     pane.console.print("hello world")
-    assert pane._selected_text(Point(6, 0), Point(10, 0)) == "world"
+    assert pane._selected_text((0, 6), (0, 10)) == "world"
 
 
 def test_selected_text_multi_line_strips_ansi():
     from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
     pane = OutputPane(width=80)
     pane.console.print("abcdef")
     pane.console.print("[bold]ghijkl[/]")   # coloured — must be stripped
     pane.console.print("mnopqr")
-    assert pane._selected_text(Point(3, 0), Point(2, 2)) == "def\nghijkl\nmno"
+    assert pane._selected_text((0, 3), (2, 2)) == "def\nghijkl\nmno"
 
 
 def test_selected_text_reversed_order_normalizes():
     from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
     pane = OutputPane(width=80)
     pane.console.print("hello")
-    assert pane._selected_text(Point(4, 0), Point(0, 0)) == "hello"
+    assert pane._selected_text((0, 4), (0, 0)) == "hello"
 
 
 def test_copy_flash_expires():
@@ -130,6 +129,47 @@ def test_copy_flash_expires():
     pane.copy_flash = "✓ copied 5 chars"
     pane._flash_until = 0.0            # already in the past
     assert pane.flash() == ""
+
+
+def test_selection_survives_scroll_between_press_and_release(monkeypatch):
+    # W2 front-3a correctness base: the drag anchor is captured ABSOLUTE at
+    # MOUSE_DOWN and never re-derived from a later (scrolled) offset. Press
+    # at viewport (row=2, col=1) with offset=10 (abs line 12); scroll +5
+    # mid-drag (offset becomes 15); release at viewport (row=3, col=4)
+    # (abs line 18). Under the OLD viewport-anchor math (re-adding the
+    # CURRENT offset to a stale viewport row at MOVE/UP time) the start
+    # would have drifted to abs line 17 (2 + 15) instead of staying pinned
+    # at 12 — corrupting both the highlight and the copied text.
+    import webbee.clipboard as clipboard
+    from webbee.tui import OutputPane
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._view_h = 5
+    pane._io.write("\n".join(f"line{i}" for i in range(40)))   # numbered transcript
+    pane._offset = 10
+
+    down = MouseEvent(position=Point(1, 2), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    pane.scroll(5)                      # scroll mid-drag: offset 10 → 15
+
+    move = MouseEvent(position=Point(4, 3), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+
+    up = MouseEvent(position=Point(4, 3), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+
+    # abs lines 12..18 exactly (line12[1:] .. line18[:5]) — never line17..
+    assert captured["text"] == "ine12\nline13\nline14\nline15\nline16\nline17\nline1"
 
 
 # ── virtualization: render only the visible slice, follow the tail ────────────
@@ -155,13 +195,16 @@ def test_pane_scroll_up_pauses_follow_then_rearms():
     assert pane._offset == 40 and pane._follow is True
 
 
-def test_selected_text_respects_scroll_offset():
+def test_selected_text_ignores_offset_now_absolute():
+    # _selected_text no longer re-adds `_offset` — its start/end are already
+    # ABSOLUTE lines, so a scrolled viewport is irrelevant to this call (the
+    # mouse handler is the one place `_offset` gets applied, exactly once,
+    # at press/move/release time — see test_selection_survives_scroll_*).
     from webbee.tui import OutputPane
-    from prompt_toolkit.data_structures import Point
     pane = OutputPane(width=80)
     pane._io.write("aaa\nbbb\nccc\nddd\n")
-    pane._offset = 2                   # viewport top = content line 2 ("ccc")
-    assert pane._selected_text(Point(0, 0), Point(2, 0)) == "ccc"
+    pane._offset = 2                   # scrolled — must NOT affect the result below
+    assert pane._selected_text((2, 0), (2, 2)) == "ccc"
 
 
 def test_output_pane_no_full_reread_on_unchanged_redraw():
