@@ -911,8 +911,8 @@ class AttachAgent(SurfaceAgent):
         super().__init__()
         self.attach_calls = []
 
-    async def attach(self, sink, *, task_id, start_id):
-        self.attach_calls.append((task_id, start_id))
+    async def attach(self, sink, *, task_id, start_id, marathon=True):
+        self.attach_calls.append((task_id, start_id, marathon))
         await asyncio.sleep(0)
         return f"attached:{task_id}"
 
@@ -1051,9 +1051,29 @@ def test_spawn_slot_poller_wires_attach_turn_to_slot_agent_attach(monkeypatch):
 
     assert captured.get("attach_turn") is not None
     asyncio.run(captured["attach_turn"]({"task_id": "t1", "last_id": "5-0", "kind": "tool"}))
-    assert agent.attach_calls == [("t1", "5-0")]
+    assert agent.attach_calls == [("t1", "5-0", True)]  # marathon=not once -> True (default mode)
     assert "attached:t1" in sink.turns              # ended through the normal end_turn path
     assert any("attaching" in n for n in sink.notes)  # the honest attach note fired
+
+
+def test_attach_turn_threads_marathon_flag_matching_once_mode(monkeypatch):
+    # A --once slot's poller derives the "coding-"-prefixed session id
+    # (marathon=not once); attach() must derive the SAME prefix or it
+    # resumes a DIFFERENT (wrong) session than the one whose `attach`
+    # field this actually is.
+    import webbee.steer as SP
+    captured = {}
+
+    async def spy_poller(cfg, token_provider, *, workspace, attach_turn=None, **kw):
+        captured["attach_turn"] = attach_turn
+
+    monkeypatch.setattr(SP, "poll_idle_steer", spy_poller)
+
+    agent = AttachAgent()
+    sink, agent = _run(read_line=_lines("hello", "/exit"), agent=agent, once=True)
+
+    asyncio.run(captured["attach_turn"]({"task_id": "t1", "last_id": "5-0", "kind": "tool"}))
+    assert agent.attach_calls == [("t1", "5-0", False)]  # once=True -> marathon=False
 
 
 # ── W4b T5 item 3: ONE poller per SESSION slot, not one process-wide poller ──

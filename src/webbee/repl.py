@@ -987,7 +987,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         {task_id, last_id, kind} (GET /pending-steer's additive `attach`
         field); `slot.agent.attach()` opens the SSE with NO start POST at
         all -- doing so alone fires client_connected server-side, which is
-        what makes the kernel re-dispatch the pending request.
+        what makes the kernel re-dispatch the pending request. `marathon=not
+        once` (the SAME flag `_spawn_slot_poller` already threads into
+        poll_idle_steer/derive_session_id for THIS slot's poller) so a
+        --once slot's attach derives its "coding-"-prefixed id, never the
+        "marathon-" one -- a mismatched prefix would derive a DIFFERENT,
+        wrong session id than the one whose `attach` field this actually is.
 
         Runs through the SAME slot-explicit start seam `_home_input` uses
         (`ui_hooks["start_attach_in"]`, tui's own `_start_attach_in`) so
@@ -1009,7 +1014,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             task_id = str(attach_info.get("task_id") or "")
             start_id = str(attach_info.get("last_id") or "0-0")
             try:
-                text = await slot.agent.attach(_sink, task_id=task_id, start_id=start_id)
+                text = await slot.agent.attach(_sink, task_id=task_id, start_id=start_id,
+                                               marathon=not once)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 _sink.abort()
                 _sink.note("Interrupted.")
