@@ -465,6 +465,16 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         slot = slots.active()
         return _gate_busy(slot.sink, slot.turn)
 
+    async def _stop_active_turn() -> None:
+        """tui.run_session's `stop_turn` leg (Esc/Ctrl-C) -- resolves the
+        ACTIVE slot's agent AT CALL TIME (W4a Task 3: the injected callable
+        itself stays fixed for the whole dock lifetime; only what it reads
+        is slot-aware). A Home slot has no agent -- a no-op, matching
+        _busy_live's is_busy=False default there (nothing to stop)."""
+        agent = slots.active().agent
+        if agent is not None:
+            await agent.stop()
+
     def _on_mode(mode: str, surface: str) -> None:
         """Remote coding-mode request (TG/panel → gateway one-shot req_mode →
         the pending-steer poll). AUTOPILOT SAFE ASYMMETRY (Valentin-chosen):
@@ -551,7 +561,6 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
 
     if use_dock:
         ok = False
-        session_slot = None
         # Route stderr to a log file for the dock's ENTIRE lifetime (boot's
         # model-download included) so no stray write can corrupt the full-screen
         # renderer. Restored the instant the dock exits (the transcript dump
@@ -589,24 +598,17 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
 
                 try:
                     ok = await tui.run_session(
-                        pane=session_slot.pane, on_line=_on_line,
-                        mode_getter=lambda: session_slot.mode,
-                        on_cycle=_cycle, status=session_slot.sink.status,
-                        is_busy=session_slot.sink.is_busy,
-                        consent_pending=session_slot.sink.consent_pending,
-                        resolve_consent=session_slot.sink.resolve_consent,
+                        slots=slots, on_line=_on_line, on_cycle=_cycle,
                         steps_nav={
-                            "count": lambda: len(getattr(session_slot.agent, "steps", [])),
+                            "count": lambda: len(getattr(slots.active().agent, "steps", [])),
                             "expand": lambda i: _handle(f"/steps {i + 1}"),
                         },
-                        stop_turn=lambda: session_slot.agent.stop(),
-                        pending=session_slot.pending, queued_run=session_slot.sink.queued_run,
-                        remote_pending=getattr(session_slot.sink, "remote_pending", None),
-                        todos=getattr(session_slot.sink, "current_todos", None),
+                        stop_turn=_stop_active_turn,
+                        queued_run=lambda n: (slots.active().sink.queued_run(n)
+                                              if slots.active().sink is not None else None),
                         inject=lambda text, iid: _inject_via_gateway(
-                            cfg, token_provider, session_slot.agent, session_slot.sink, text, iid,
+                            cfg, token_provider, slots.active().agent, slots.active().sink, text, iid,
                             client=shared_client),
-                        turn=session_slot.turn,
                     )
                 finally:
                     _cancel_background()
@@ -625,8 +627,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         if ok:
             # the alt screen is gone — reprint the session transcript to real
             # stdout so the conversation stays in the terminal scrollback.
-            if session_slot is not None:
-                sys.stdout.write(session_slot.pane.dump())
+            # Task 3: slots.active().pane, not the fixed session_slot -- for
+            # now (no tab-bar UI, no /close) this is always the same slot,
+            # but the dump follows whichever tab was visible on exit.
+            if slots.slots:
+                sys.stdout.write(slots.active().pane.dump())
                 sys.stdout.flush()
             return
         # dock unavailable/failed → fall through to the plain fallback loop

@@ -1,7 +1,35 @@
 import asyncio
 import re
+from types import SimpleNamespace
 
 from webbee.tui import next_mode, build_toolbar
+
+
+def mk_slots(*, pane=None, sink=None, pending=None, turn=None, mode="default",
+            agent=None, workspace=".", label="test", **extra):
+    """Task 3 test helper: builds a ONE-session-slot SlotManager so a
+    run_session harness test can pass `slots=` instead of the individual
+    pane/sink/pending/turn/status/is_busy/... params the OLD signature
+    exposed directly. Single-slot behavior is the parity oracle for this
+    conversion — every assertion in the converted tests stays untouched.
+    `sink` is whatever attribute-bag a test built (a `SimpleNamespace` with
+    `status`/`is_busy`/`consent_pending`/`resolve_consent`/`remote_pending`/
+    `current_todos` as attributes, or `None` for a sink-less/Home slot) —
+    tui reads every one of them via getattr, so a plain namespace works.
+    `**extra` sets any other SessionSlot field directly (`qp_ui`, `tp_ui`,
+    `pulled`, `history`, ...) for the handful of tests that need one."""
+    from webbee.slots import SessionSlot, SlotManager
+    slot = SessionSlot(kind="session", workspace=workspace, label=label,
+                       pane=pane, sink=sink, agent=agent, mode=mode)
+    if pending is not None:
+        slot.pending = pending
+    if turn is not None:
+        slot.turn = turn
+    for k, v in extra.items():
+        setattr(slot, k, v)
+    sm = SlotManager()
+    sm.add(slot)
+    return sm
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -1349,7 +1377,7 @@ def test_tick_once_fires_width_watch_edge_tick_and_invalidate(monkeypatch):
             calls["invalidate"] += 1
 
     monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
-    _tick_once(_Pane(), _App(), lambda: True)
+    _tick_once(mk_slots(pane=_Pane()), _App(), lambda: True)
 
     assert calls["reflow"] == [72]     # _width_watch fired (resize bridge)
     assert calls["edge_tick"] == 1     # pane.edge_tick() fired
@@ -1374,7 +1402,52 @@ def test_tick_once_swallows_edge_tick_error(monkeypatch):
             pass
 
     monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
-    _tick_once(_Pane(), _App(), lambda: False)   # must not raise
+    _tick_once(mk_slots(pane=_Pane()), _App(), lambda: False)   # must not raise
+
+
+def test_tick_once_drives_the_active_slots_pane_after_a_switch(monkeypatch):
+    # W4a Task 3: _tick_once now takes the SlotManager, not a bound pane --
+    # it must re-resolve slots.active().pane EVERY call, so a tab switch
+    # immediately redirects the ticker's edge_tick/width_watch at the
+    # newly-visible slot's own pane, never a stale reference to whichever
+    # slot was active when the ticker started.
+    from webbee.slots import SessionSlot, SlotManager
+    from webbee.tui import _tick_once
+
+    class _Pane:
+        def __init__(self, width):
+            self.console = type("Console", (), {"width": width})()
+            self.reflow_calls = []
+            self.edge_ticks = 0
+
+        def reflow(self, cols):
+            self.reflow_calls.append(cols)
+
+        def edge_tick(self):
+            self.edge_ticks += 1
+
+        def flash(self):
+            return ""
+
+    class _App:
+        def invalidate(self):
+            pass
+
+    pane_a, pane_b = _Pane(100), _Pane(100)
+    slots = mk_slots(pane=pane_a)
+    slots.add(SessionSlot(kind="session", workspace=".", label="b",
+                          pane=pane_b, sink=None, agent=None))
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    app = _App()
+    _tick_once(slots, app, lambda: False)
+    assert pane_a.reflow_calls == [72] and pane_a.edge_ticks == 1
+    assert pane_b.reflow_calls == [] and pane_b.edge_ticks == 0   # B untouched while A active
+
+    slots.active_idx = 1                                          # switch to B
+    _tick_once(slots, app, lambda: False)
+    assert pane_b.reflow_calls == [72] and pane_b.edge_ticks == 1  # NOW B is driven
+    assert pane_a.reflow_calls == [72] and pane_a.edge_ticks == 1  # A untouched further
 
 
 # ── W2 Task 5: input_rows — the pure estimator behind _input_height ─────────
@@ -1841,13 +1914,14 @@ def test_dock_end_to_end_type_ahead_queues_then_drains_fifo():
             return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
                     "elapsed": 0.0, "tools": 0, "consent": False}
 
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane, sink=sink)
+
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
-                    on_cycle=lambda: None, status=status,
-                    is_busy=lambda: busy["v"],
-                    consent_pending=lambda: False, resolve_consent=lambda t: None))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
                 await asyncio.sleep(0.05)
                 pipe.send_text("first\r")
                 await _until(lambda: ran == ["first"])      # turn 1 is running
@@ -2004,14 +2078,14 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
                     "elapsed": 0.0, "tools": 0, "consent": False}
 
         pend = deque()
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane, sink=sink, pending=pend)
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
-                    on_cycle=lambda: None, status=status,
-                    is_busy=lambda: busy["v"],
-                    consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    pending=pend, queued_run=markers.append))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    queued_run=markers.append))
                 await asyncio.sleep(0.05)
                 pipe.send_text("first\r")
                 await _until(lambda: ran == ["first"])         # turn 1 is running
@@ -2038,9 +2112,9 @@ def test_dock_stop_preserves_queue_then_natural_completion_drains():
 
 
 def test_run_session_uses_caller_turn_dict():
-    # The repl shares turn_ref with tui.run_session (the poller's lockout-
-    # proof gate reads THIS dict) -- when the caller passes turn=, run_session
-    # must mutate the SAME object, not a private one of its own.
+    # The repl's poller gate (_poller_busy) reads slots.active().turn -- when
+    # a caller-built slot carries its OWN turn dict object, run_session must
+    # mutate THAT object, not a private one of its own.
     import time
 
     from prompt_toolkit.application import create_app_session
@@ -2070,14 +2144,14 @@ def test_run_session_uses_caller_turn_dict():
             return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
                     "elapsed": 0.0, "tools": 0, "consent": False}
 
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane, sink=sink, turn=caller_turn)
+
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
-                    on_cycle=lambda: None, status=status,
-                    is_busy=lambda: busy["v"],
-                    consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    turn=caller_turn))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
                 await asyncio.sleep(0.05)
                 pipe.send_text("hello\r")
                 await _until(lambda: busy["v"])
@@ -2141,14 +2215,14 @@ def test_error_turn_holds_queue():
                     "turn_failed": failed["v"]}
 
         pend = deque()
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane, sink=sink, pending=pend)
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
-                    on_cycle=lambda: None, status=status,
-                    is_busy=lambda: busy["v"],
-                    consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    pending=pend, queued_run=markers.append))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    queued_run=markers.append))
                 await asyncio.sleep(0.05)
                 pipe.send_text("boom\r")
                 await _until(lambda: ran == ["boom"])          # the ERROR turn is running
@@ -2213,14 +2287,13 @@ def test_dock_queue_command_runs_immediately_even_while_busy():
             return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
                     "elapsed": 0.0, "tools": 0, "consent": False}
 
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane, sink=sink, pending=pend)
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
-                    on_cycle=lambda: None, status=status,
-                    is_busy=lambda: busy["v"],
-                    consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    pending=pend))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
                 await asyncio.sleep(0.05)
                 pipe.send_text("first\r")
                 await _until(lambda: ran == ["first"])
@@ -2575,14 +2648,14 @@ def test_dock_end_to_end_panel_pull_reedit_requeue_and_clean_transcript():
             return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
                     "elapsed": 0.0, "tools": 0, "consent": False}
 
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane, sink=sink, pending=pend)
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
-                    on_cycle=lambda: None, status=status,
-                    is_busy=lambda: busy["v"],
-                    consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    pending=pend, queued_run=markers.append))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    queued_run=markers.append))
                 await asyncio.sleep(0.05)
                 pipe.send_text("first\r")
                 await _until(lambda: ran == ["first"])           # turn 1 is running
@@ -2852,14 +2925,14 @@ def test_dock_end_to_end_busy_enter_injects_ok_and_failure_falls_back():
             return {"tokens": 0, "credits": 0, "busy": busy["v"], "current": "",
                     "elapsed": 0.0, "tools": 0, "consent": False}
 
+        sink = SimpleNamespace(status=status, is_busy=lambda: busy["v"],
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane, sink=sink, pending=pending)
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
-                    on_cycle=lambda: None, status=status,
-                    is_busy=lambda: busy["v"],
-                    consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    pending=pending, inject=inject))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    inject=inject))
                 await asyncio.sleep(0.05)
                 pipe.send_text("first\r")
                 await _until(lambda: ran == ["first"])          # turn 1 running
@@ -2907,13 +2980,14 @@ def test_dock_mounts_sticky_todo_panel_above_queue_panel():
 
         async def on_line(text): ...
 
+        sink = SimpleNamespace(status=status, is_busy=lambda: False,
+                               consent_pending=lambda: False, resolve_consent=lambda t: None,
+                               current_todos=todos)
+        slots = mk_slots(pane=pane, sink=sink, pending=pending)
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    pane=pane, on_line=on_line, mode_getter=lambda: "default",
-                    on_cycle=lambda: None, status=status, is_busy=lambda: False,
-                    consent_pending=lambda: False, resolve_consent=lambda t: None,
-                    pending=pending, todos=todos))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
                 await asyncio.sleep(0.05)
                 conds = [c for c in get_app().layout.container.children
                          if isinstance(c, ConditionalContainer)]
@@ -2930,6 +3004,266 @@ def test_dock_mounts_sticky_todo_panel_above_queue_panel():
                 todos.clear()
                 assert not todo_cc.filter()              # /clear empties → hidden
                 pipe.send_text("\x04")                   # Ctrl-D exit (idle)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+# ── W4a Task 3: run_session takes the SlotManager -- every internal closure
+# resolves slots.active() AT CALL TIME (map §1/§2), and a turn's own dict/
+# queue-drain/failure-read stay PINNED to the slot it started in even across
+# a mid-turn tab switch. No tab-bar UI yet (Task 4) -- these tests switch
+# tabs directly via `slots.active_idx`, exactly as a future keybinding will.
+
+def test_swap_history_creates_and_repoints_per_slot_history():
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.history import InMemoryHistory
+
+    from webbee.slots import SessionSlot
+    from webbee.tui import _swap_history
+
+    buf = Buffer(multiline=False)
+    slot = SessionSlot(kind="session", workspace=".", label="a", pane=None, sink=None, agent=None)
+    assert slot.history is None
+    _swap_history(buf, slot)
+    assert isinstance(slot.history, InMemoryHistory)
+    assert buf.history is slot.history
+    created = slot.history
+
+    other_buf = Buffer(multiline=False)
+    _swap_history(other_buf, slot)          # a second touch on the SAME slot reuses it
+    assert slot.history is created
+    assert other_buf.history is created
+
+
+def test_enter_resolves_consent_on_the_active_slot_only():
+    # Two slots, both with a consent armed on their OWN sink: Enter must
+    # resolve whichever slot is ACTIVE -- the other slot's consent future
+    # stays untouched even though both are "pending" at once (a background
+    # slot's own ask_consent arms independently -- map §4 consent landmine).
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": False, "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": True}
+
+        resolved_a, resolved_b = [], []
+        sink_a = SimpleNamespace(status=status, is_busy=lambda: False,
+                                 consent_pending=lambda: True,
+                                 resolve_consent=resolved_a.append)
+        sink_b = SimpleNamespace(status=status, is_busy=lambda: False,
+                                 consent_pending=lambda: True,
+                                 resolve_consent=resolved_b.append)
+        pane_a, pane_b = tui.OutputPane(width=80), tui.OutputPane(width=80)
+        slots = mk_slots(pane=pane_a, sink=sink_a)
+        slots.add(SessionSlot(kind="session", workspace=".", label="b",
+                              pane=pane_b, sink=sink_b, agent=None))
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("yes\r")
+                await _until(lambda: resolved_a == ["yes"])
+                assert resolved_b == []                      # B's own consent untouched
+
+                slots.active_idx = 1                         # switch to B (no tab-bar UI yet)
+                pipe.send_text("also yes\r")
+                await _until(lambda: resolved_b == ["also yes"])
+                assert resolved_a == ["yes"]                  # A untouched by the second Enter
+
+                sink_a.consent_pending = lambda: False
+                sink_b.consent_pending = lambda: False
+                pipe.send_text("\x04")                        # Ctrl-D exit (idle, active=B)
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_turn_pinned_to_originating_slot_drains_its_own_queue_after_switch():
+    # A turn started in slot A keeps draining A's OWN queue after the user
+    # switches to slot B mid-turn -- the pinned `slot` _run_turn captured at
+    # start time, not whatever's active when the turn actually finishes.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane_a, pane_b = tui.OutputPane(width=80), tui.OutputPane(width=80)
+        ran = []
+        gate = asyncio.Event()
+        busy_a = {"v": False}
+
+        async def on_line(text):
+            busy_a["v"] = True
+            ran.append(text)
+            await gate.wait()
+            busy_a["v"] = False
+
+        def status_a():
+            return {"tokens": 0, "credits": 0, "busy": busy_a["v"], "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        def status_b():
+            return {"tokens": 0, "credits": 0, "busy": False, "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        sink_a = SimpleNamespace(status=status_a, is_busy=lambda: busy_a["v"],
+                                 consent_pending=lambda: False, resolve_consent=lambda t: None)
+        sink_b = SimpleNamespace(status=status_b, is_busy=lambda: False,
+                                 consent_pending=lambda: False, resolve_consent=lambda t: None)
+        slots = mk_slots(pane=pane_a, sink=sink_a)
+        slot_b = SessionSlot(kind="session", workspace=".", label="b",
+                             pane=pane_b, sink=sink_b, agent=None)
+        slots.add(slot_b)
+        slot_a = slots.slots[0]
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("first\r")                       # starts a turn IN A (A active)
+                await _until(lambda: ran == ["first"])
+                pipe.send_text("queued-in-a\r")                 # busy(A) -> queues into A's own deque
+                await _until(lambda: list(slot_a.pending) == ["queued-in-a"])
+
+                slots.active_idx = 1                            # switch to B mid-turn
+                assert not slot_b.pending and slot_b.turn["task"] is None
+
+                gate.set()                                       # A's turn completes naturally
+                await _until(lambda: ran == ["first", "queued-in-a"])   # A's OWN queue drained
+                assert not slot_a.pending
+                assert not slot_b.pending                         # B never touched by A's drain
+                await _until(lambda: not busy_a["v"])
+
+                slots.active_idx = 0                              # back to A to exit cleanly
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_home_active_enter_routes_plain_text_to_home_input_not_on_line():
+    # Home (sink=None) has no busy/queue semantics: a slash command still
+    # reaches on_line like every other slot, but plain text routes to
+    # home_input (Task 6 wires a real one; None just means "ignored") and
+    # NEVER to on_line.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        home = SessionSlot(kind="home", workspace=".", label="Home", pane=pane, sink=None, agent=None)
+        slots = SlotManager()
+        slots.add(home)
+
+        on_line_calls, home_calls = [], []
+
+        async def on_line(text):
+            on_line_calls.append(text)
+
+        async def home_input(text):
+            home_calls.append(text)
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    home_input=home_input))
+                await asyncio.sleep(0.05)
+                pipe.send_text("hello there\r")
+                await _until(lambda: home_calls == ["hello there"])
+                assert on_line_calls == []                       # never routed to on_line
+
+                pipe.send_text("/help\r")                         # a slash command still goes to on_line
+                await _until(lambda: on_line_calls == ["/help"])
+                assert home_calls == ["hello there"]              # unchanged
+
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_home_active_enter_with_no_home_input_ignores_plain_text():
+    # home_input=None (the repl's Task 3 wiring, before Task 6) must never
+    # crash -- a plain line on Home is simply dropped.
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def _until(pred, timeout=5.0):
+        t0 = time.time()
+        while not pred():
+            assert time.time() - t0 < timeout, "timed out"
+            await asyncio.sleep(0.01)
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        home = SessionSlot(kind="home", workspace=".", label="Home", pane=pane, sink=None, agent=None)
+        slots = SlotManager()
+        slots.add(home)
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("hello there\r")
+                await asyncio.sleep(0.1)                          # must not raise
+                pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
 
