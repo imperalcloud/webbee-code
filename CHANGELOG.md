@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.19
+
+The browser wave: Webbee Code becomes a browser inside your terminal.
+
+- A tab bar lives at the top: ◆ Home first, your sessions after it, each with
+  a live status glyph (▶ working · ⚠ waiting for your approval · ○ idle).
+  Click a tab or press Alt+0..9 to switch; Ctrl+T jumps to Home; Ctrl+W or
+  /close closes a tab (the run keeps living server-side); the ✕ on a tab
+  closes exactly that tab.
+- Home is a new-tab page: your identity and plan, every open tab, the current
+  repo's intelligence and checkpoints, remote-control state and updates —
+  filled live, resize-aware. Start typing on Home and a new session tab opens
+  with your message. A fresh install lands on Home; an ongoing conversation
+  lands back in its session tab.
+- Every tab is its own world: transcript, queue, todos, approvals, mode and
+  input history never leak between tabs. Background tabs keep streaming; a
+  tab waiting for your approval shows a ⚠ badge from anywhere; a running
+  background turn is protected from a stray Ctrl+D.
+
 ## 0.3.18
 
 The adaptive wave: the terminal finally behaves like a real app.
