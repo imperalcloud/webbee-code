@@ -24,6 +24,7 @@ from webbee import sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
+from webbee.tabs import tab_fragments
 from webbee.todo_panel import todo_fragments, todo_height
 
 _MODES = ("default", "plan", "autopilot")
@@ -412,7 +413,7 @@ def _swap_history(buf, slot) -> None:
 
 async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
-                      home_input=None) -> bool:
+                      home_input=None, close_tab=None) -> bool:
     """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
     CALL TIME (W4a Task 3 — the single most structural change of the
     multisession-tabs wave: no more one session's objects captured once at
@@ -441,7 +442,13 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     `inject`/`on_cycle`/`queued_run` are INJECTED callables the repl already
     resolves through `slots.active()` itself before handing them here — this
     function only calls them, it never reaches into a session object through
-    them. Returns True on clean exit; False if prompt_toolkit is unavailable
+    them. A tab bar (Task 4, `webbee.tabs.tab_fragments`) is pinned at the
+    very top of the dock, ALWAYS visible: a click switches tabs (`_switch_to`
+    — a no-op on the already-active tab or a stale idx, since
+    `slots.switch` already guards both); a session tab's ✕ calls
+    `close_tab(idx)` when the caller wires one (`None` — today's default —
+    means the ✕ safely no-ops; the real close flow is a later task).
+    Returns True on clean exit; False if prompt_toolkit is unavailable
     (the caller uses the plain fallback loop)."""
     try:
         from prompt_toolkit.application import Application, get_app, get_app_or_none
@@ -772,16 +779,51 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)]),
         height=_input_height, wrap_lines=True)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
+
+    def _switch_to(idx: int) -> None:
+        # Tab-bar click -> switch tabs. `slots.switch` already guards a
+        # no-op (the clicked tab is already active) and a stale idx (the
+        # tab closed between render and release) by returning False -- when
+        # it does, neither the history swap nor the redraw happen, so a
+        # click on the active tab is a true no-op, never a crash.
+        if slots.switch(idx):
+            _swap_history(buf, slots.active())
+            get_app().invalidate()
+
+    def _close_tab_click(idx: int) -> None:
+        # Placeholder half of the ✕ handler (Task 5 wires the real close
+        # flow — cancel the slot's bg_tasks, drop it from SlotManager, land
+        # back on a neighbor). `close_tab=None` today -> this safely no-ops,
+        # exactly like a switch onto a stale idx.
+        if close_tab is not None:
+            close_tab(idx)
+
+    def _tab_fragments_live():
+        # Live like _toolbar/_queue_fragments: re-invoked every redraw, so a
+        # status_glyph flip (consent armed in a background tab) or an
+        # active-slot change repaints the bar at once.
+        cols, _rows = sizing.get_size(get_app_or_none())
+        return tab_fragments(slots, on_switch=_switch_to, on_close=_close_tab_click, width=cols)
+
+    # The tab bar — pinned at the very TOP, fixed height 1, NEVER hidden
+    # (unlike the queue/todo panels below it): it IS the new look, even with
+    # only Home showing. focusable=False keeps focus on the input.
+    tab_bar = Window(FormattedTextControl(_tab_fragments_live, focusable=False),
+                     height=1, always_hide_cursor=True)
     # The single most structural change of the W4a wave (map §3): the pane
     # slot in the root layout is a DynamicContainer, not a bound window —
     # it re-resolves `slots.active().pane.window` on EVERY redraw, so a tab
     # switch repaints a different slot's transcript with no stale reference
-    # left over anywhere in the tree. The tab bar itself is Task 4.
+    # left over anywhere in the tree.
     pane_container = DynamicContainer(lambda: _pane().window)
-    root = HSplit([pane_container, todo_panel, queue_panel, Frame(input_win), toolbar])
+    root = HSplit([tab_bar, pane_container, todo_panel, queue_panel, Frame(input_win), toolbar])
     style = Style.from_dict({
         "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
         "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
+        "tab": "#8a8a8a",                    # idle tab — dim, same family as tb.dim
+        "tab.active": "#e8a317 bold",        # the VISIBLE tab — bee-yellow, same accent as tb.spin
+        "tab.alert": "#e8a317 bold reverse", # ⚠ consent waiting in a BACKGROUND tab — reversed so it pops next to tab.active
+        "tab.close": "#8a8a8a",              # the ✕ — dim, closing is never the default action
         "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
         "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
         "tb.working": "#e8a317",             # 'working' — yellow

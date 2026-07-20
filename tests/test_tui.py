@@ -3268,3 +3268,57 @@ def test_home_active_enter_with_no_home_input_ignores_plain_text():
         assert ok is True
 
     asyncio.run(scenario())
+
+
+# ── W4a Task 4: the tab bar mounts at the TOP of the root layout ────────────
+
+def test_tab_bar_window_is_root_hsplit_first_child():
+    # Layout contract update (was: root = [pane, TODO, QUEUE, input, toolbar]
+    # -- see test_dock_mounts_sticky_todo_panel_above_queue_panel): the tab
+    # bar is now pinned ABOVE everything else, a plain always-visible Window
+    # (not a ConditionalContainer -- unlike the queue/todo panels it never
+    # hides), rendering Home + every session tab live off the SlotManager.
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.containers import ConditionalContainer, Window
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        def status():
+            return {"tokens": 0, "credits": 0, "busy": False, "current": "",
+                    "elapsed": 0.0, "tools": 0, "consent": False}
+
+        home_pane, session_pane = tui.OutputPane(width=80), tui.OutputPane(width=80)
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=home_pane, sink=None, agent=None)
+        sink = SimpleNamespace(status=status, is_busy=lambda: False,
+                               consent_pending=lambda: False, resolve_consent=lambda t: None)
+        session = SessionSlot(kind="session", workspace=".", label="proj",
+                              pane=session_pane, sink=sink, agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 1
+
+        async def on_line(text): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                children = get_app().layout.container.children
+                bar = children[0]
+                assert isinstance(bar, Window)
+                assert not isinstance(bar, ConditionalContainer)   # ALWAYS visible
+                text = "".join(f[1] for f in bar.content.text())
+                assert "◆ Home" in text                            # Home always first
+                assert "●1 proj" in text                           # active session, marked ●N
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
