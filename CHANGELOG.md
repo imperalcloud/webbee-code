@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.21
+
+- A mode change sent from the panel or Telegram now reliably reaches your
+  coding session — whichever tab is on screen. Previously the request could
+  land on the Home tab and vanish silently; the terminal kept its old mode
+  while the panel claimed the switch happened.
+
 ## 0.3.20
 
 Webbee remembers your mode per project (autopilot always asks again),

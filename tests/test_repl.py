@@ -2266,3 +2266,25 @@ def test_replay_thread_returns_shown_count_and_zero_on_failure(monkeypatch):
 
     monkeypatch.setattr(TH, "fetch_recent_thread", boom)
     assert asyncio.run(BOOT.replay_thread(cfg, _tp, FakeSink())) == 0
+
+
+
+
+def test_remote_mode_flip_targets_polled_slot_not_active(monkeypatch):
+    """v0.3.21 regression (Valentin live 2026-07-20): the remote req_mode flip
+    lands on the POLLED session slot even when the sink-less Home tab is
+    active — the old slots.active() targeting crashed on Home (None sink) and
+    the one-shot GETDEL request was lost; the panel kept showing default."""
+    import inspect
+    import webbee.repl as repl_mod
+
+    src = inspect.getsource(repl_mod)
+    i = src.index("def _on_mode")
+    j = src.index("def _confirm_autopilot")
+    on_mode_src = src[i:j]
+    assert "slots.active()" not in on_mode_src, "flip must not target the active tab"
+    assert "first_session_slot" in on_mode_src
+    assert "_say(slot" in on_mode_src, "notes must be Home/None-sink safe"
+    confirm_src = src[j : src.index("def _cancel_background")]
+    assert "slots.active()" not in confirm_src
+    assert "first_session_slot" in confirm_src

@@ -910,15 +910,21 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         at the terminal is the risk bearer; a remote surface must not disarm
         the consent prompt it is about to exploit). Unknown modes and no-ops
         are dropped. Sync + non-blocking by contract (the poller calls it):
-        the confirm runs as its own background task. Reads the ACTIVE slot
-        at call time (map §6 steer policy)."""
+        the confirm runs as its own background task. Targets the POLLED
+        session slot (`first_session_slot` — the session whose gateway id the
+        poller drains), NEVER the visible/active tab: with land-on-Home that
+        slot is routinely the sink-less Home tab, and the old active-slot
+        targeting either crashed on Home's None sink or applied the flip to
+        an unrelated tab — the one-shot req_mode (GETDEL) was then lost
+        forever, «panel says plan, terminal stays default» (Valentin, live
+        2026-07-20)."""
         surface = surface or "remote"
-        slot = slots.active()
-        if mode not in _MODES or mode == slot.mode:
+        slot = first_session_slot
+        if slot is None or mode not in _MODES or mode == slot.mode:
             return
         if mode != "autopilot":
             set_slot_mode(slot, mode)
-            slot.sink.note(f"mode → {mode} [{surface}]")
+            _say(slot, f"mode → {mode} [{surface}]")
             return
         asyncio.ensure_future(_confirm_autopilot(surface))
 
@@ -931,20 +937,22 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         poller holds off (_poller_busy gates it), so it can never collide
         with a real kernel consent (those only exist mid-turn, when the
         poller does not fetch at all). Reads the ACTIVE slot once at call
-        time (map §6) -- there is no tab-switch UI yet, so this always
-        targets the slot the request was raised against."""
-        slot = slots.active()
+        the POLLED session slot, mirroring _on_mode — the confirm must land
+        in the pane of the session it would arm, whatever tab is visible."""
+        slot = first_session_slot
+        if slot is None:
+            return
         ask = getattr(slot.sink, "ask_yes_no", None)
         if ask is None or _poller_busy():
-            slot.sink.note(f"autopilot request from {surface} not applied — mode stays {slot.mode}")
+            _say(slot, f"autopilot request from {surface} not applied — mode stays {slot.mode}")
             return
         ok = await ask(f"{surface} asks to switch to autopilot "
                        f"(auto-approve everything) — allow? [y/n]")
         if ok:
             set_slot_mode(slot, "autopilot")
-            slot.sink.note(f"mode → autopilot [{surface}] — approved at this terminal")
+            _say(slot, f"mode → autopilot [{surface}] — approved at this terminal")
         else:
-            slot.sink.note(f"autopilot request from {surface} declined — mode stays {slot.mode}")
+            _say(slot, f"autopilot request from {surface} declined — mode stays {slot.mode}")
 
     def _cancel_background() -> None:
         # Task 7: the actual walk moved to the module-level, directly-tested
