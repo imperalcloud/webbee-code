@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.29
+
+- The Home screen scrolls for real now — mouse wheel and PageUp/PageDown move
+  through the whole page, however tall it gets.
+- The Webbee Code logo now opens every new tab you start, and Home itself is
+  kept clean (the logo is no longer on Home).
+
 ## 0.3.28
 
 The Home screen scrolls now. When Home has more than fills the window — a tall
