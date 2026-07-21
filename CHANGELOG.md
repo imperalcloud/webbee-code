@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.30
+
+- Removed the stray "◆ Home" title from the top of the Home screen — Home now
+  opens straight into your tiles.
+
 ## 0.3.29
 
 - The Home screen scrolls for real now — mouse wheel and PageUp/PageDown move
