@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.28
+
+The Home screen scrolls now. When Home has more than fills the window — a tall
+stack of tabs, or command output — scroll it with the mouse wheel or
+PageUp/PageDown, like any other view. Output from a command run on Home (for
+example `/help`) shows inline at the bottom and the view jumps to it.
+
 ## 0.3.27
 
 Home dashboard polish.
