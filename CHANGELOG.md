@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.26
+
+The Home tab is now an interactive dashboard — a little website inside your
+terminal. Everything is clickable and keyboard-navigable, with a highlight
+that follows your focus and the mouse.
+
+- Home shows your account and plan, your credits balance, your open tabs
+  (with each tab's mode, a close button, and how much that session has
+  spent), your recent repositories (one click reopens one in a new tab),
+  the devices you're signed in on, and a small Settings panel.
+- Settings you can change right from Home: the mode new tabs open in,
+  where a running session sends notifications, and a Top-up credits button.
+- A Trust & security panel explains, in plain terms, how your data is
+  handled — with a link to the full security and privacy docs.
+- The new-tab "+" button is now bee-yellow and easy to spot.
+- Ctrl+T now opens a new tab, like a browser (it used to jump to Home).
+  Home is still one click away on its own tab (or Alt+0).
+
 ## 0.3.25
 
 Tabs name themselves after your first message, a + button opens a tab like
