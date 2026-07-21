@@ -54,6 +54,45 @@ def scrub_mouse_residue(text: str) -> str:
     return _FOCUS_RESIDUE.sub("", text)
 
 
+_STYLE_DICT = {
+    "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
+    "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
+    "tabbar": "bg:#262626",              # 0.3.25: the bar itself — a browser-look strip the chips sit on
+    "tab": "#9e9e9e",                    # idle chip — dim text, no bg (brightened a notch, 0.3.25, to read clearly on `tabbar`'s bg)
+    "tab.active": "bg:#e8a317 #1c1c1c bold",  # the ACTIVE chip — solid bee-yellow bg, dark text: unmistakable
+    "tab.alert": "#e8a317 bold",         # ⚠ consent waiting in a BACKGROUND tab — yellow text, no bg (only the active chip owns one); also the armed "✕?" busy-close-confirm glyph (0.3.25)
+    "tab.close": "#9e9e9e",              # the ✕ on a background tab — dim, closing is never the default action (brightened alongside `tab`)
+    "tab.close.active": "bg:#e8a317 #1c1c1c",  # the ✕ on the ACTIVE tab — same bg as its chip, reads as one contiguous block
+    "tab.new": "#e8a317 bold",            # 0.3.26: bee-yellow + prominent (was #6f6f6f)
+    "tab.sep": "#3a3a3a",                # the │ between tabs — dim, consistent, exactly one per pair, none at the ends
+    "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
+    "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
+    "tb.working": "#e8a317",             # 'working' — yellow
+    "tb.action": "#00afd7",              # current action — cyan
+    "tb.consent": "#e8a317 bold",        # consent prompt line — yellow
+    "tb.mode.default": "#00afd7",        # default — cyan
+    "tb.mode.plan": "#af87ff",           # plan — purple
+    "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
+    "qp.header": "#e8a317 bold",         # queue-panel header — bee-yellow, pops
+    "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
+    "qp.last": "#e8a317",                # newest row — the one ↑ pulls
+    "qp.remote": "#af87ff italic",       # cross-surface rows — purple (not yours to pull)
+    "tp.header": "#e8a317 bold",         # todo-panel header — bee-yellow, pops
+    "tp.done": "#5faf5f",                # ✓ glyph — green
+    "tp.done.text": "#8a8a8a strike",    # completed text — dim + struck
+    "tp.now": "#e8a317 bold",            # ▶ current item — bee-yellow, always pops
+    "tp.item": "#8a8a8a",                # pending rows / overflow — muted
+    # W5 interactive Home dashboard
+    "home.header": "#e8a317 bold",
+    "home.value": "#ffffff bold",
+    "home.item": "#00afd7",
+    "home.dim": "#8a8a8a",
+    "home.disabled": "#5f5f5f",
+    "home.focus": "bg:#e8a317 #1c1c1c bold",
+    "home.hint": "#00afd7",
+}
+
+
 def configure_mouse_modes(output) -> None:
     """Replace prompt_toolkit's ANY-EVENT mouse tracking (?1003 — every bare
     mouse move fires a report) with BUTTON-EVENT tracking (?1002 — reports only
@@ -769,10 +808,11 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
 
     @kb.add("c-t")
     def _new_tab_key(event):
-        # Ctrl-T: jump to Home (slot 0) — the new-tab page. Typing there
-        # starts a real session tab (Task 6); this key itself never creates
-        # a slot, exactly like clicking the Home tab does.
-        _switch_to(0)
+        # 0.3.26: Ctrl-T opens a NEW tab (the browser gesture), via the exact
+        # seam the tab bar's + chip uses (`_new_tab_click` -> on_new ->
+        # repl._open_new_tab). Home stays reachable by clicking its ◆ chip or
+        # Alt+1-style switch (footer legend reminds muscle-memory users).
+        _new_tab_click()
 
     def _alt_digit_handler(d: int):
         def _h(event):
@@ -1142,35 +1182,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     pane_container = DynamicContainer(lambda: _pane().window)
     root = HSplit([tab_bar, tab_bar_spacer, pane_container, todo_panel, queue_panel,
                    Frame(input_win), toolbar])
-    style = Style.from_dict({
-        "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
-        "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
-        "tabbar": "bg:#262626",              # 0.3.25: the bar itself — a browser-look strip the chips sit on
-        "tab": "#9e9e9e",                    # idle chip — dim text, no bg (brightened a notch, 0.3.25, to read clearly on `tabbar`'s bg)
-        "tab.active": "bg:#e8a317 #1c1c1c bold",  # the ACTIVE chip — solid bee-yellow bg, dark text: unmistakable
-        "tab.alert": "#e8a317 bold",         # ⚠ consent waiting in a BACKGROUND tab — yellow text, no bg (only the active chip owns one); also the armed "✕?" busy-close-confirm glyph (0.3.25)
-        "tab.close": "#9e9e9e",              # the ✕ on a background tab — dim, closing is never the default action (brightened alongside `tab`)
-        "tab.close.active": "bg:#e8a317 #1c1c1c",  # the ✕ on the ACTIVE tab — same bg as its chip, reads as one contiguous block
-        "tab.new": "#6f6f6f",                # 0.3.25: the trailing + chip — dimmer than an idle tab, a quiet affordance, not a tab itself
-        "tab.sep": "#3a3a3a",                # the │ between tabs — dim, consistent, exactly one per pair, none at the ends
-        "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
-        "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
-        "tb.working": "#e8a317",             # 'working' — yellow
-        "tb.action": "#00afd7",              # current action — cyan
-        "tb.consent": "#e8a317 bold",        # consent prompt line — yellow
-        "tb.mode.default": "#00afd7",        # default — cyan
-        "tb.mode.plan": "#af87ff",           # plan — purple
-        "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
-        "qp.header": "#e8a317 bold",         # queue-panel header — bee-yellow, pops
-        "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
-        "qp.last": "#e8a317",                # newest row — the one ↑ pulls
-        "qp.remote": "#af87ff italic",       # cross-surface rows — purple (not yours to pull)
-        "tp.header": "#e8a317 bold",         # todo-panel header — bee-yellow, pops
-        "tp.done": "#5faf5f",                # ✓ glyph — green
-        "tp.done.text": "#8a8a8a strike",    # completed text — dim + struck
-        "tp.now": "#e8a317 bold",            # ▶ current item — bee-yellow, always pops
-        "tp.item": "#8a8a8a",                # pending rows / overflow — muted
-    })
+    style = Style.from_dict(_STYLE_DICT)
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)
     # Task 5: registering ("escape", "<digit>") chords makes bare Escape a

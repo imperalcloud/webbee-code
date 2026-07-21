@@ -2529,13 +2529,13 @@ def test_home_active_help_renders_into_the_home_pane(monkeypatch):
                     shadow_factory=lambda c, ws: None))
                 await asyncio.sleep(0.1)          # boot: Home(0) + slot A(1), active=1
 
-                pipe.send_text("\x14")             # Ctrl-T -- jump to Home
+                pipe.send_text("\x1b0")            # Alt+0 -- switch to Home (slot 0)
                 await asyncio.sleep(0.05)
 
                 pipe.send_text("/help\r")
-                await asyncio.sleep(0.15)
                 pane_home = created_panes[0]
-                assert "show this help" in pane_home.dump()   # help text landed in Home's OWN pane
+                # poll (not a fixed sleep): help text landed in Home's OWN pane
+                await _until(lambda: "show this help" in pane_home.dump())
 
                 pipe.send_text("/exit\r")
                 await asyncio.wait_for(task, 5)
@@ -2567,13 +2567,12 @@ def test_home_active_steps_yields_open_a_tab_note(monkeypatch):
                     shadow_factory=lambda c, ws: None))
                 await asyncio.sleep(0.1)
 
-                pipe.send_text("\x14")             # Ctrl-T -- jump to Home
+                pipe.send_text("\x1b0")            # Alt+0 -- switch to Home (slot 0)
                 await asyncio.sleep(0.05)
 
                 pipe.send_text("/steps\r")          # session-specific -- must not crash
-                await asyncio.sleep(0.15)
                 pane_home = created_panes[0]
-                assert "open a session tab first" in pane_home.dump()
+                await _until(lambda: "open a session tab first" in pane_home.dump())
 
                 pipe.send_text("/exit\r")
                 await asyncio.wait_for(task, 5)
@@ -2605,7 +2604,7 @@ def test_home_active_tabs_lists_tabs(monkeypatch):
                     shadow_factory=lambda c, ws: None))
                 await asyncio.sleep(0.1)
 
-                pipe.send_text("\x14")             # Ctrl-T -- jump to Home
+                pipe.send_text("\x1b0")            # Alt+0 -- switch to Home (slot 0)
                 await asyncio.sleep(0.05)
 
                 pipe.send_text("/tabs\r")

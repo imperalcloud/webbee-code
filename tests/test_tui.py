@@ -4322,7 +4322,10 @@ async def _until(pred, timeout=5.0):
         await asyncio.sleep(0.01)
 
 
-def test_ctrl_t_jumps_to_home_from_a_session_tab():
+def test_ctrl_t_opens_a_new_tab_from_a_session_tab():
+    # 0.3.26: Ctrl-T now OPENS A NEW TAB (browser gesture) via the same
+    # `on_new` seam the tab bar's + chip uses — it no longer jumps to Home
+    # (Home is reached by clicking its ◆ chip or Alt+0).
     from prompt_toolkit.application import create_app_session
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
@@ -4341,14 +4344,17 @@ def test_ctrl_t_jumps_to_home_from_a_session_tab():
         slots.active_idx = 1
 
         async def on_line(text, slot=None): ...
+        opened = []
+        async def on_new():
+            opened.append(1)
 
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
                 task = asyncio.create_task(tui.run_session(
-                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                    slots=slots, on_line=on_line, on_cycle=lambda: None, on_new=on_new))
                 await asyncio.sleep(0.05)
-                pipe.send_text("\x14")                    # Ctrl-T
-                await _until(lambda: slots.active_idx == 0)
+                pipe.send_text("\x14")                    # Ctrl-T -- opens a new tab
+                await _until(lambda: opened == [1])
                 pipe.send_text("\x04")                     # single session left -> idle exit
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True
@@ -4429,7 +4435,7 @@ def test_lines_typed_before_the_first_switch_recall_after_home_and_back():
                 pipe.send_text("line one\r")               # typed BEFORE ever switching tabs
                 await asyncio.sleep(0.05)
 
-                pipe.send_text("\x14")                      # Ctrl-T -- jump to Home
+                pipe.send_text("\x1b0")                     # Alt+0 -- switch to Home (slot 0)
                 await _until(lambda: slots.active_idx == 0)
                 pipe.send_text("\x1b1")                      # Alt+1 -- back to the session
                 await _until(lambda: slots.active_idx == 1)
@@ -4667,7 +4673,7 @@ def test_ctrl_d_on_home_is_a_noop_while_a_background_session_turn_is_alive():
                 pipe.send_text("first\r")
                 await _until(lambda: ran == ["first"])            # A is now busy
 
-                pipe.send_text("\x14")                             # Ctrl-T -- jump to Home
+                pipe.send_text("\x1b0")                            # Alt+0 -- switch to Home (slot 0)
                 await _until(lambda: slots.active_idx == 0)
 
                 pipe.send_text("\x04")                              # Ctrl-D on Home -- must NOT exit
@@ -4912,7 +4918,7 @@ def test_switching_tabs_disarms_a_busy_close_confirm():
                 task = asyncio.create_task(tui.run_session(
                     slots=slots, on_line=on_line, on_cycle=lambda: None))
                 await asyncio.sleep(0.05)
-                pipe.send_text("\x14")     # Ctrl-T -- jumps to Home, a genuine switch
+                pipe.send_text("\x1b0")    # Alt+0 -- switch to Home, a genuine switch
                 await asyncio.sleep(0.02)
                 assert session.close_armed is False
                 pipe.send_text("\x04")
@@ -5155,3 +5161,26 @@ def test_ui_hooks_filled_with_switch_and_close_routing_through_the_real_flow():
         assert ok is True
 
     asyncio.run(scenario())
+
+
+def test_tab_new_style_is_bee_yellow():
+    from webbee.tui import _STYLE_DICT
+    assert _STYLE_DICT["tab.new"].startswith("#e8a317")
+
+
+def test_home_style_classes_present():
+    from webbee.tui import _STYLE_DICT
+    for cls in ("home.header", "home.value", "home.item", "home.dim",
+                "home.disabled", "home.focus", "home.hint"):
+        assert cls in _STYLE_DICT
+
+
+def test_ctrl_t_binding_opens_new_tab_not_home():
+    import inspect
+
+    from webbee import tui
+    src = inspect.getsource(tui.run_session)
+    i = src.index('kb.add("c-t")')
+    body = src[i:i + 500]
+    assert "_new_tab_click()" in body
+    assert "_switch_to(0)" not in body

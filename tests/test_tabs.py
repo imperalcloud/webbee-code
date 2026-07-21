@@ -492,3 +492,12 @@ def test_switch_click_with_unarmed_forward_still_fires_switch_as_before():
     alpha_handler = styles[" ● 1·alpha ○ "][2]
     assert _up(alpha_handler) is None
     assert switch_hits == [1]
+
+
+def test_new_chip_uses_tab_new_style_and_fires_on_new():
+    slots = _mk_slots(("alpha", _FakeSink()), active_idx=1)
+    fired = []
+    frags = tab_fragments(slots, on_switch=_noop, on_close=_noop, on_new=lambda: fired.append(1))
+    pad_before, glyph, pad_after = _new_chip_pieces(frags)
+    assert glyph[1] == "+" and glyph[0] == TAB_STYLE_NEW and len(glyph) == 3
+    assert _up(glyph[2]) is None and fired == [1]
