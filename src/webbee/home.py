@@ -88,8 +88,12 @@ def _notify_state_from(state: dict) -> str:
 
 
 def _device_label(s: dict) -> str:
-    """A non-PII human label for a device/session row (never a raw IP)."""
-    for k in ("device", "user_agent", "client", "name", "location"):
+    """A non-PII human label for a device/session row. The `/v1/auth/sessions`
+    payload names the human label `label`/`surface` (the SAME keys
+    render.sessions_table and the `/sessions revoke` path read); the raw IP
+    lives in a separate field we never read here. `label`/`surface` first,
+    then harmless fallbacks, then a neutral default."""
+    for k in ("label", "surface", "device", "name", "client"):
         v = s.get(k)
         if v:
             return str(v)

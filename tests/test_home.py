@@ -160,16 +160,19 @@ def test_fill_home_raising_account_fetcher_still_sets_other_fields():
 def test_fill_home_builds_device_rows_without_pii():
     async def acct(cfg, tp):
         return Account(signed_in=False)
-    listing = [{"device": "MacBook", "current": True},
-               {"user_agent": "webbee-cli", "ip": "1.2.3.4"}]
+    # Real /v1/auth/sessions shape: human label in `label`/`surface`, the raw
+    # IP in a separate `ip_address` field we must NEVER surface.
+    listing = [{"label": "MacBook · terminal", "current": True, "ip_address": "1.2.3.4"},
+               {"surface": "panel"}]
     home = _home_slot()
     slots = SlotManager(); slots.add(home)
     asyncio.run(fill_home(home, cfg=_Cfg(), token_provider=_tok, slots=slots,
                           account_fetcher=acct, sessions_client=_FakeSessions(listing),
                           resources=WorkspaceResources(), version="1.0.0", wallet_fetcher=None))
     labels = [r.label for r in home.pane.data.devices]
-    assert labels == ["MacBook", "webbee-cli"]     # non-PII fields; raw IP never surfaced
+    assert labels == ["MacBook · terminal", "panel"]   # label/surface, the real keys
     assert home.pane.data.devices[0].current is True
+    assert not any("1.2.3.4" in lbl for lbl in labels)   # raw IP never surfaced
 
 
 def test_fill_home_reentrancy_guard():
