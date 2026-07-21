@@ -445,10 +445,17 @@ class HomeView:
             nick = getattr(a, "nickname", "") or ""
             L.append([("class:home.value", f"  @{nick}" if nick else "  (no nickname)")])
             plan = getattr(a, "plan", "") or ""
+            status = getattr(a, "plan_status", "") or ""
             if plan:
-                status = getattr(a, "plan_status", "") or ""
                 tag = f" ({status})" if status and status != "active" else ""
                 L.append([("class:home.dim", f"  {plan} plan{tag}")])
+            renews = getattr(a, "plan_renews", "") or ""
+            if renews:
+                # `plan_renews` is the formatted subscription expires_at: an
+                # auto-renewing (active/trialing) plan RENEWS then, a
+                # cancelled/lapsing one EXPIRES then.
+                verb = "renews" if status in ("active", "trialing", "") else "expires"
+                L.append([("class:home.dim", f"  {verb} {renews}")])
             email = getattr(a, "email", "") or ""
             if email:
                 L.append([("class:home.dim", f"  {_mask_email(email)}")])
@@ -544,7 +551,21 @@ class HomeView:
                        "· Ctrl+T new tab · Alt+N switch")])
             return L
 
-        lines = [[("class:home.header", " ◆ Home ")], [("", "")]]
+        # Header: the Webbee Code ASCII logo (bee-yellow), then a centered
+        # "◆ Home" — restored (it was on the pre-dashboard Home and Valentin
+        # wants it kept). The whole art block is centered by ONE offset (max
+        # line width) so its shape is preserved; degrades to left-aligned when
+        # the terminal is narrower than the art.
+        from webbee.banner_art import WEBBEE_CODE
+        art = WEBBEE_CODE.rstrip("\n").split("\n")
+        art_w = max((len(ln) for ln in art), default=0)
+        art_pad = max(0, (width - art_w) // 2)
+        lines = [[("", "")]]
+        for ln in art:
+            lines.append([("", " " * art_pad), ("class:home.header", ln)] if ln else [("", "")])
+        title_pad = max(0, (width - len("◆ Home")) // 2)
+        lines.append([("", " " * title_pad), ("class:home.header", "◆ Home")])
+        lines.append([("", "")])
         if two_column(width):
             colw = max(20, (width // 2) - 3)
             lines += _side_by_side(you_lines(), wallet_lines(), colw)

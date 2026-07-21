@@ -216,7 +216,7 @@ def test_home_input_creates_slot_switches_and_runs_first_turn():
     created = {}
 
     async def fake_make_session_slot(cfg, tp, ws, mode, *, resources, shared_client,
-                                      agent_factory, intel_factory, shadow_factory, first):
+                                      agent_factory, intel_factory, shadow_factory, first, mode_pinned=False):
         created["ws"] = ws
         created["first"] = first
         slot = _session_slot(workspace=ws, label="new")
@@ -268,7 +268,7 @@ def test_home_input_new_slot_sink_records_echo(monkeypatch):
     slots.add(_home_slot(workspace="/cwd"))
 
     async def fake_make_session_slot(cfg, tp, ws, mode, *, resources, shared_client,
-                                      agent_factory, intel_factory, shadow_factory, first):
+                                      agent_factory, intel_factory, shadow_factory, first, mode_pinned=False):
         s = _session_slot(workspace=ws)
         s.sink = _EchoSink()
         return s
@@ -303,7 +303,7 @@ def test_home_input_dock_path_echoes_exactly_once():
     slots.add(_home_slot(workspace="/cwd"))
 
     async def fake_make_session_slot(cfg, tp, ws, mode, *, resources, shared_client,
-                                      agent_factory, intel_factory, shadow_factory, first):
+                                      agent_factory, intel_factory, shadow_factory, first, mode_pinned=False):
         s = _session_slot(workspace=ws)
         s.sink = _EchoSink()
         return s
@@ -381,7 +381,7 @@ def test_home_input_uses_new_tab_mode_when_provided():
     seen = {}
 
     async def fake_make_session_slot(cfg, tp, ws, mode, *, resources, shared_client,
-                                     agent_factory, intel_factory, shadow_factory, first):
+                                     agent_factory, intel_factory, shadow_factory, first, mode_pinned=False):
         seen["mode"] = mode
         s = _session_slot(workspace=ws)
         class _E:

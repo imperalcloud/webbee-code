@@ -3979,7 +3979,7 @@ def test_home_input_first_turn_task_is_visible_and_esc_cancels_it():
                                    user_echo=lambda t: None)
 
         async def fake_make_session_slot(cfg, tp, ws, mode, *, resources, shared_client,
-                                          agent_factory, intel_factory, shadow_factory, first):
+                                          agent_factory, intel_factory, shadow_factory, first, mode_pinned=False):
             return SessionSlot(kind="session", workspace=ws, label="new",
                                pane=tui.OutputPane(width=80), sink=new_sink, agent=None)
 

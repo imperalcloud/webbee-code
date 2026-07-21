@@ -1881,6 +1881,33 @@ def test_make_session_slot_uses_remembered_mode_over_process_baseline(monkeypatc
     assert captured["mode"] == "plan"   # the agent itself is built with it too
 
 
+def test_make_session_slot_mode_pinned_beats_remembered_mode(monkeypatch):
+    # W5 fix: a new tab opened from Home carries the user's EXPLICIT "new-tab
+    # mode" (mode_pinned=True) which must win over this repo's remembered
+    # mode. Before this, load_mode silently overrode the picked mode —
+    # inconsistently by target repo — so Ctrl+T opened with the wrong mode
+    # while typing on Home happened to keep it. This is the shared chokepoint
+    # both _open_new_tab (Ctrl+T / + / /new) and _home_input (typing) use.
+    import webbee.mode_store as MS
+    monkeypatch.setattr(MS, "load_mode", lambda ws: "plan")
+    captured = {}
+
+    def agent_factory(c, tp, ws, m):
+        captured["mode"] = m
+        return FakeAgent()
+
+    async def _drive():
+        return await _make_session_slot(
+            _mk_cfg(), _noop_token_provider, os.getcwd(), "autopilot",
+            resources=WorkspaceResources(), shared_client=None,
+            agent_factory=agent_factory, intel_factory=lambda cfg, ws: _NoopIntel(),
+            shadow_factory=lambda cfg, ws: None, first=False, mode_pinned=True)
+
+    slot = asyncio.run(_drive())
+    assert slot.mode == "autopilot"        # pinned explicit choice beats remembered "plan"
+    assert captured["mode"] == "autopilot"
+
+
 def test_make_session_slot_falls_back_to_baseline_when_nothing_remembered(monkeypatch):
     import webbee.mode_store as MS
     monkeypatch.setattr(MS, "load_mode", lambda ws: None)

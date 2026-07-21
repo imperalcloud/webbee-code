@@ -465,7 +465,7 @@ async def _isolate_workspace(workspace: str, resources: WorkspaceResources, *,
 async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources: WorkspaceResources,
                              shared_client, agent_factory, intel_factory, shadow_factory,
                              first: bool, account=None, _with_replayed: bool = False,
-                             slot_id: "str | None" = None):
+                             slot_id: "str | None" = None, mode_pinned: bool = False):
     """Builds ONE dock tab's atomic {agent, sink, pane} triple (map §6 —
     created together, a sink must never point at another slot's pane/
     console). `shared_client` isn't consumed here yet — reserved for Task 3's
@@ -533,7 +533,12 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
             return compute_repo_key(find_repo_root(workspace))
         repo_key_task = asyncio.ensure_future(asyncio.to_thread(_repo_key))
 
-    effective_mode = await asyncio.to_thread(load_mode, workspace) or mode
+    # `mode_pinned` = the caller's mode is an EXPLICIT user choice (Home's
+    # "new-tab mode" setting, threaded through _open_new_tab/_home_input) and
+    # MUST win over this repo's remembered mode — otherwise a new tab opened
+    # from Home silently ignores the mode you just picked. Only the boot
+    # first-tab (mode_pinned=False) resumes the per-repo remembered mode.
+    effective_mode = mode if mode_pinned else (await asyncio.to_thread(load_mode, workspace) or mode)
     width, _height = get_size(None)   # pre-app: same fallback tui.run_session's own sizing uses
     pane = tui.OutputPane(width=width)
     sink = RichSink(console=pane.console, on_output=pane.notify)
@@ -585,9 +590,11 @@ async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mod
     """Home's Enter path (Task 6, wired into `tui.run_session` as
     `home_input=`): typing a task on Home opens a session tab in one motion
     — the SAME `_make_session_slot`/switch path the `/new` command uses
-    (always `first=False`, always the process's BASELINE `mode`, per the
-    replay landmine and the autopilot-never-inherited rule both documented
-    on the `new_tab` action above) — then runs the typed text as that NEW
+    (always `first=False`; the `mode` passed in is Home's explicit "new-tab
+    mode" setting and is PINNED — `mode_pinned=True` — so it wins over this
+    repo's remembered mode, exactly like the Ctrl+T / + / `/new` path, and a
+    new tab honors the mode you picked on Home instead of silently resuming a
+    stale per-repo default) — then runs the typed text as that NEW
     slot's own first turn, explicitly against `new_slot` (FIX1: `run_turn` --
     repl's `_run_turn` -- is slot-explicit now, never resolves
     `slots.active()` internally). FIX3: the turn is started through
@@ -616,7 +623,8 @@ async def _home_input(text: str, *, slots: SlotManager, cfg, token_provider, mod
     new_slot = await _make_session_slot(
         cfg, token_provider, ws, mode, resources=resources,
         shared_client=shared_client, agent_factory=agent_factory,
-        intel_factory=intel_factory, shadow_factory=shadow_factory, first=False)
+        intel_factory=intel_factory, shadow_factory=shadow_factory, first=False,
+        mode_pinned=True)
     idx = slots.add(new_slot)
     ui_hooks.get("switch", slots.switch)(idx)
     if spawn_poller is not None:
@@ -1194,7 +1202,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             cfg, token_provider, ws, state.get("new_tab_mode") or mode, resources=resources,
             shared_client=shared_client, agent_factory=agent_factory,
             intel_factory=intel_factory, shadow_factory=shadow_factory,
-            first=False)
+            first=False, mode_pinned=True)
         idx = slots.add(new_slot)
         ui_hooks.get("switch", slots.switch)(idx)
         _spawn_slot_poller(new_slot)
@@ -1256,7 +1264,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     ui_hooks.get("switch", slots.switch)(idx)
 
                 def _home_top_up() -> None:
-                    url = urlopen.open_url(f"{cfg.panel_url}/billing")
+                    url = urlopen.open_url(f"{cfg.panel_url}/ext/billing")
                     home_view.data.notice = f"top up at {url}"
                     home_view.notify()
 

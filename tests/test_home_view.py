@@ -279,3 +279,26 @@ def test_outputpane_compat_surface_delegates_to_output_pane():
     # _say prints into HomeView.console (the output pane) and is dump()-visible
     hv.console.print("hello-from-say")
     assert "hello-from-say" in hv.dump()
+
+
+def test_you_tile_shows_plan_renews_when_active():
+    data = HomeData(account=Account(signed_in=True, nickname="v", plan="pro",
+                                    plan_status="active", plan_renews="Aug 3"))
+    hv, _ = _view(data=data)
+    text = "".join(f[1] for f in hv._fragments())
+    assert "renews Aug 3" in text
+
+
+def test_you_tile_shows_expires_when_not_active():
+    data = HomeData(account=Account(signed_in=True, nickname="v", plan="pro",
+                                    plan_status="canceled", plan_renews="Aug 3"))
+    hv, _ = _view(data=data)
+    text = "".join(f[1] for f in hv._fragments())
+    assert "expires Aug 3" in text
+
+
+def test_home_renders_webbee_code_logo_and_title():
+    hv, _ = _view()
+    text = "".join(f[1] for f in hv._fragments())
+    assert "_____" in text        # a slice of the WEBBEE_CODE ascii banner
+    assert "◆ Home" in text
