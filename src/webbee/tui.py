@@ -752,6 +752,10 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # message the user believes is long gone.
         slot.draft = ""
         slot.draft_cursor = 0
+        if slot.kind == "home" and not text.strip():
+            # Empty Enter on the interactive Home activates the focused item.
+            slot.pane.activate_focused()
+            return
         cp = _sink_attr("consent_pending")
         if cp and cp():
             rc = _sink_attr("resolve_consent")
@@ -799,6 +803,11 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
 
     @kb.add("s-tab")
     def _cycle(event):
+        slot = _a()
+        if slot.kind == "home" and not buf.text:
+            slot.pane.focus_prev()
+            event.app.invalidate()
+            return
         on_cycle()
         event.app.invalidate()
 
@@ -863,15 +872,36 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     @kb.add("up")
     def _step_up(event):
         slot = _a()
+        if slot.kind == "home" and not buf.text:
+            slot.pane.move_focus(-1)
+            return
         _arrow_up_action(event, buf, sel, _nav_count(), _busy_live(), slot.pending, slot.pulled)
 
     @kb.add("down")
     def _step_down(event):
+        slot = _a()
+        if slot.kind == "home" and not buf.text:
+            slot.pane.move_focus(1)
+            return
         _arrow_down_action(event, buf, sel, _nav_count(), _busy_live())
 
     @kb.add("escape")
     def _step_clear(event):
         _escape_action(sel, _a().turn, _busy_live, stop_turn, event, buf=buf)
+
+    _home_nav = Condition(lambda: _a().kind == "home" and not buf.text)
+
+    @kb.add("tab", filter=_home_nav)
+    def _home_focus_next(event):
+        _a().pane.focus_next()
+
+    @kb.add("left", filter=_home_nav)
+    def _home_seg_left(event):
+        _a().pane.seg_left()
+
+    @kb.add("right", filter=_home_nav)
+    def _home_seg_right(event):
+        _a().pane.seg_right()
 
     @kb.add("pageup")
     def _pgup(event):
@@ -1023,6 +1053,35 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         height=_input_height, wrap_lines=True)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
 
+    _hover_on = {"v": None}
+
+    def _sync_hover_mode() -> None:
+        # ?1003 (any-event mouse = hover) ONLY while Home is active; restore
+        # ?1002 (button-event) on leave. Idempotent: writes only on a state
+        # change. Teardown's own ?1003l (configure_mouse_modes._disable) is
+        # the belt-and-braces cleanup on exit.
+        from prompt_toolkit.application import get_app_or_none
+        app = get_app_or_none()
+        if app is None:
+            return
+        want = (_a().kind == "home")
+        if _hover_on["v"] == want:
+            return
+        out = app.output
+        if not hasattr(out, "write_raw"):
+            _hover_on["v"] = want
+            return
+        try:
+            if want:
+                out.write_raw("\x1b[?1003h")
+            else:
+                out.write_raw("\x1b[?1003l")
+                out.write_raw("\x1b[?1002h")
+            out.flush()
+        except Exception:
+            pass
+        _hover_on["v"] = want
+
     def _switch_to(idx: int) -> None:
         # Tab-bar click -> switch tabs. `slots.switch` already guards a
         # no-op (the clicked tab is already active) and a stale idx (the
@@ -1060,6 +1119,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             if on_switch is not None:
                 on_switch(idx)
             get_app().invalidate()
+            _sync_hover_mode()
 
     def _close_flow() -> bool:
         # The REAL close flow (Task 5): delegates to webbee.slots.close_active
@@ -1213,6 +1273,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # param died with the rest of the sink-shaped params.
         while True:
             await asyncio.sleep(0.25)
+            _sync_hover_mode()
             _tick_once(slots, app, _busy_live)
 
     # FIX7c (W4a final review — history seeding): the FIRST active slot's

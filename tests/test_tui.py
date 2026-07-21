@@ -5184,3 +5184,25 @@ def test_ctrl_t_binding_opens_new_tab_not_home():
     body = src[i:i + 500]
     assert "_new_tab_click()" in body
     assert "_switch_to(0)" not in body
+
+
+def test_home_nav_bindings_gated_on_home_and_empty_input():
+    import inspect
+
+    from webbee import tui
+    src = inspect.getsource(tui.run_session)
+    # left/right/tab bound with a Home+empty gate
+    assert 'kb.add("left"' in src and 'kb.add("right"' in src and 'kb.add("tab"' in src
+    assert 'kind == "home"' in src
+    # the Home branch calls the view's focus/segment methods
+    for m in ("activate_focused", "move_focus", "seg_left", "seg_right", "focus_prev"):
+        assert m in src
+
+
+def test_hover_scoping_present_and_home_only():
+    import inspect
+
+    from webbee import tui
+    src = inspect.getsource(tui.run_session)
+    assert "?1003h" in src and "?1003l" in src
+    assert "_sync_hover_mode" in src
