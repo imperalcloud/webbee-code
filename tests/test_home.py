@@ -2,44 +2,53 @@
 tiles, async best-effort fill, is_stale/refill scheduling, and home_input's
 "typing starts a session" flow."""
 import asyncio
-import inspect
-
-from rich.console import Console
 
 from webbee.account import Account
-from webbee.home import (_mask_email, _pick_session_slot, fill_home,
-                         is_stale, render_identity, render_repo_tile,
-                         render_skeleton, render_slots_tile,
-                         render_system_tile)
-from webbee.render import WELCOME_HINT
+from webbee.home import (_mask_email, _notify_state_from, _pick_session_slot,
+                         fill_home, is_stale)
 from webbee.repl import _home_input, _home_target_workspace, _schedule_home_refill
 from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
+from webbee.wallet import Wallet
 
 
 class FakePane:
-    """Stands in for `webbee.tui.OutputPane` — just enough for `fill_home`:
-    a real Rich `Console(record=True)` (so `export_text()` works in
-    assertions) plus a `notify()` counter (proves the pane was told to
-    follow the tail after every repaint)."""
-
-    def __init__(self, width: int = 80):
-        self.console = Console(record=True, width=width)
+    """Stands in for HomeView -- just enough for fill_home: a HomeData holder
+    + a notify() counter."""
+    def __init__(self):
+        from webbee.home_view import HomeData
+        self.data = HomeData()
         self.notified = 0
-
-    def notify(self) -> None:
+    def notify(self):
         self.notified += 1
 
 
-def _home_slot(workspace: str = "/ws") -> SessionSlot:
+def _home_slot(workspace="/ws"):
     return SessionSlot(kind="home", workspace=workspace, label="Home",
                        pane=FakePane(), sink=None, agent=None)
 
 
-def _session_slot(workspace: str = "/ws", label: str = "ws", session_id: str = "") -> SessionSlot:
+def _session_slot(workspace="/ws", label="ws", session_id=""):
     from types import SimpleNamespace
-    agent = SimpleNamespace(session_id=session_id)
     return SessionSlot(kind="session", workspace=workspace, label=label,
-                       pane=FakePane(), sink=None, agent=agent)
+                       pane=FakePane(), sink=None,
+                       agent=SimpleNamespace(session_id=session_id))
+
+
+class _Cfg:
+    api_url = "https://auth.imperal.io"
+    panel_url = "https://panel.imperal.io"
+    intel_enabled = True
+
+
+async def _tok():
+    return "tok"
+
+
+class _FakeSessions:
+    def __init__(self, listing):
+        self._listing = listing
+    async def list_sessions(self, cfg, token_provider):
+        return self._listing
 
 
 # ---- _mask_email ------------------------------------------------------------
@@ -55,93 +64,6 @@ def test_mask_email_no_at():
 def test_mask_email_empty():
     assert _mask_email("") == ""
     assert _mask_email(None) == ""
-
-
-# ---- render_identity ---------------------------------------------------
-
-def test_render_identity_masks_email_and_shows_nickname_plan():
-    console = Console(record=True, width=80)
-    account = Account(signed_in=True, email="valentin@webhostmost.com",
-                      nickname="valentin", plan="pro", plan_status="active")
-    render_identity(console, account)
-    out = console.export_text()
-    assert "@valentin" in out
-    assert "pro plan" in out
-    assert "v•••@w•••" in out
-    assert "valentin@webhostmost.com" not in out   # raw address never printed (PII)
-
-
-def test_render_identity_not_signed_in_renders_placeholder():
-    console = Console(record=True, width=80)
-    render_identity(console, None)
-    out = console.export_text()
-    assert "…" in out
-
-
-# ---- render_skeleton -----------------------------------------------------
-
-def test_render_skeleton_is_sync_and_paints_the_shell():
-    assert not inspect.iscoroutinefunction(render_skeleton)
-    console = Console(record=True, width=80)
-    render_skeleton(console, 80)   # zero awaits -- a plain call, no event loop needed
-    out = console.export_text()
-    for name in ("Identity", "Tabs", "Repo", "System"):
-        assert name in out
-    assert "Home" in out
-    assert "Ctrl+T" in out
-    assert "Alt+N" in out
-
-
-# ---- render_slots_tile / render_repo_tile / render_system_tile -----------
-
-def test_render_slots_tile_shows_open_tabs_and_hint():
-    slots = SlotManager()
-    slots.add(_home_slot())
-    slots.add(_session_slot(label="myrepo"))
-    slots.active_idx = 1
-    console = Console(record=True, width=80)
-    render_slots_tile(console, slots)
-    out = console.export_text()
-    assert "myrepo" in out
-    assert "Ctrl+T" in out
-
-
-def test_render_slots_tile_empty_when_no_sessions():
-    slots = SlotManager()
-    slots.add(_home_slot())
-    console = Console(record=True, width=80)
-    render_slots_tile(console, slots)
-    assert "no tabs open yet" in console.export_text()
-
-
-def test_render_repo_tile_none_profile_is_placeholder():
-    console = Console(record=True, width=80)
-    render_repo_tile(console, None, "-", None)
-    assert "…" in console.export_text()
-
-
-def test_render_repo_tile_with_profile():
-    console = Console(record=True, width=80)
-    profile = {"languages": {"python": 10, "rust": 2}, "file_count": 42}
-    render_repo_tile(console, profile, "main", "cp-1  abc123  now  label")
-    out = console.export_text()
-    assert "main" in out
-    assert "42 files" in out
-    assert "python" in out
-
-
-def test_render_system_tile_no_live_session():
-    console = Console(record=True, width=80)
-    render_system_tile(console, remote_desc=None, update_notice=None)
-    assert "no live session yet" in console.export_text()
-
-
-def test_render_system_tile_with_remote_and_update():
-    console = Console(record=True, width=80)
-    render_system_tile(console, remote_desc="Remote control: ON", update_notice="upgrade available")
-    out = console.export_text()
-    assert "Remote control: ON" in out
-    assert "upgrade available" in out
 
 
 # ---- is_stale --------------------------------------------------------------
@@ -186,78 +108,83 @@ def test_pick_session_slot_none_when_no_sessions():
     assert _pick_session_slot(slots) is None
 
 
+# ---- _notify_state_from -----------------------------------------------------
+
+def test_notify_state_from_maps_mirror():
+    assert _notify_state_from({}) == "off"
+    assert _notify_state_from({"enabled": False}) == "off"
+    assert _notify_state_from({"enabled": True, "mirror": ["telegram"]}) == "tg"
+    assert _notify_state_from({"enabled": True, "mirror": ["panel"]}) == "panel"
+    assert _notify_state_from({"enabled": True, "mirror": ["telegram", "panel"]}) == "both"
+
+
 # ---- fill_home --------------------------------------------------------------
 
-def test_fill_home_raising_account_fetcher_still_renders_other_tiles():
-    async def raising_fetcher(cfg, tp):
-        raise RuntimeError("boom")
-
+def test_fill_home_populates_account_wallet_and_meta():
+    async def acct(cfg, tp):
+        return Account(signed_in=True, nickname="v", plan="pro")
+    async def wal(cfg, tp):
+        return Wallet(balance=100, cap=500, plan="pro", status="active")
     home = _home_slot()
-    slots = SlotManager()
-    slots.add(home)
-    session = _session_slot(label="myrepo")
-    slots.add(session)
+    slots = SlotManager(); slots.add(home); slots.add(_session_slot(label="myrepo"))
     slots.active_idx = 1
-
-    asyncio.run(fill_home(
-        home, cfg=None, token_provider=None, slots=slots,
-        account_fetcher=raising_fetcher, sessions_client=None,
-        resources=WorkspaceResources(), version="1.2.3"))
-
-    out = home.pane.console.export_text()
-    assert "myrepo" in out                 # the Tabs tile survived the identity fetch raising
-    assert "System" in out
-    assert home._last_fill > 0.0           # stamped on the way out regardless of the failure
-    assert home._filling is False          # guard released
-    assert WELCOME_HINT not in out         # never duplicates the session welcome splash
-
-
-async def _fake_account_fetcher(cfg, tp):
-    return Account(signed_in=True, email="v@w.com", nickname="v", plan="pro")
-
-
-def test_fill_home_happy_path_renders_identity_and_guards_reentry():
-    home = _home_slot()
-    slots = SlotManager()
-    slots.add(home)
-
-    asyncio.run(fill_home(
-        home, cfg=None, token_provider=None, slots=slots,
-        account_fetcher=_fake_account_fetcher, sessions_client=None,
-        resources=WorkspaceResources(), version="1.2.3"))
-
-    out = home.pane.console.export_text()
-    assert "@v" in out
-    assert "pro plan" in out
+    asyncio.run(fill_home(home, cfg=_Cfg(), token_provider=_tok, slots=slots,
+                          account_fetcher=acct, sessions_client=_FakeSessions([]),
+                          resources=WorkspaceResources(), version="1.2.3", wallet_fetcher=wal))
+    d = home.pane.data
+    assert d.account.nickname == "v"
+    assert d.wallet.balance == 100
+    assert d.version == "1.2.3"
+    assert d.endpoint == "https://auth.imperal.io"
     assert home.pane.notified > 0
+    assert home._last_fill > 0.0 and home._filling is False
 
 
-def test_fill_home_guards_against_concurrent_overlap():
-    calls = []
-
-    async def counting_fetcher(cfg, tp):
-        calls.append(1)
-        await asyncio.sleep(0)
-        return Account(signed_in=False)
-
+def test_fill_home_raising_account_fetcher_still_sets_other_fields():
+    async def raising(cfg, tp):
+        raise RuntimeError("boom")
+    async def wal(cfg, tp):
+        return Wallet(balance=7)
     home = _home_slot()
-    slots = SlotManager()
-    slots.add(home)
+    slots = SlotManager(); slots.add(home)
+    asyncio.run(fill_home(home, cfg=_Cfg(), token_provider=_tok, slots=slots,
+                          account_fetcher=raising, sessions_client=_FakeSessions([]),
+                          resources=WorkspaceResources(), version="9.9.9", wallet_fetcher=wal))
+    d = home.pane.data
+    assert d.account is None
+    assert d.wallet.balance == 7          # wallet leg survived the account leg raising
+    assert d.version == "9.9.9"
+    assert home._last_fill > 0.0
 
+
+def test_fill_home_builds_device_rows_without_pii():
+    async def acct(cfg, tp):
+        return Account(signed_in=False)
+    listing = [{"device": "MacBook", "current": True},
+               {"user_agent": "webbee-cli", "ip": "1.2.3.4"}]
+    home = _home_slot()
+    slots = SlotManager(); slots.add(home)
+    asyncio.run(fill_home(home, cfg=_Cfg(), token_provider=_tok, slots=slots,
+                          account_fetcher=acct, sessions_client=_FakeSessions(listing),
+                          resources=WorkspaceResources(), version="1.0.0", wallet_fetcher=None))
+    labels = [r.label for r in home.pane.data.devices]
+    assert labels == ["MacBook", "webbee-cli"]     # non-PII fields; raw IP never surfaced
+    assert home.pane.data.devices[0].current is True
+
+
+def test_fill_home_reentrancy_guard():
+    calls = []
+    async def counting(cfg, tp):
+        calls.append(1); await asyncio.sleep(0); return Account(signed_in=False)
+    home = _home_slot(); slots = SlotManager(); slots.add(home)
     async def scenario():
-        # Two overlapping fills started back-to-back: the second must see
-        # `_filling` already True (set synchronously by the first, before
-        # its own first await) and return immediately without fetching.
-        t1 = asyncio.ensure_future(fill_home(
-            home, cfg=None, token_provider=None, slots=slots,
-            account_fetcher=counting_fetcher, sessions_client=None,
-            resources=WorkspaceResources(), version="1.2.3"))
-        t2 = asyncio.ensure_future(fill_home(
-            home, cfg=None, token_provider=None, slots=slots,
-            account_fetcher=counting_fetcher, sessions_client=None,
-            resources=WorkspaceResources(), version="1.2.3"))
+        t1 = asyncio.ensure_future(fill_home(home, cfg=_Cfg(), token_provider=_tok, slots=slots,
+                                             account_fetcher=counting, sessions_client=_FakeSessions([]),
+                                             resources=WorkspaceResources(), version="1", wallet_fetcher=None))
+        t2 = asyncio.ensure_future(fill_home(home, cfg=_Cfg(), token_provider=_tok, slots=slots,
+                                             account_fetcher=counting, sessions_client=_FakeSessions([]),
+                                             resources=WorkspaceResources(), version="1", wallet_fetcher=None))
         await asyncio.gather(t1, t2)
-
     asyncio.run(scenario())
     assert len(calls) == 1
 
