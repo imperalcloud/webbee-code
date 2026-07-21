@@ -1221,6 +1221,20 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         # renderer. Restored the instant the dock exits (the transcript dump
         # below writes to the REAL stdout).
         _errlog = boot._open_dock_stderr_log()
+        # OS-LEVEL redirect of fd 2, not just Python's sys.stderr object:
+        # SUBPROCESSES inherit the real fd 2, so a `contextlib.redirect_stderr`
+        # alone (Python-level) does NOT stop a child's stderr from hitting the
+        # terminal and scrambling the diff-based renderer — a Linux browser's
+        # MESA/GCM logs, a macOS `Python … MallocStackLogging` git-helper, etc.
+        # dup2 sends ALL of it (children + C libs + fd-2 writes) to the same
+        # log; the contextlib redirect below additionally covers Python-level
+        # sys.stderr writers. Fail-soft: on any failure leave fd 2 untouched.
+        _saved_stderr_fd = None
+        try:
+            _saved_stderr_fd = os.dup(2)
+            os.dup2(_errlog.fileno(), 2)
+        except (OSError, ValueError, AttributeError):
+            _saved_stderr_fd = None
         try:
             with contextlib.redirect_stderr(_errlog):
                 from webbee import tui
@@ -1363,6 +1377,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         except Exception:
             ok = False
         finally:
+            # Restore the real fd 2 BEFORE the transcript dump / any later
+            # console output, then close the log.
+            if _saved_stderr_fd is not None:
+                try:
+                    os.dup2(_saved_stderr_fd, 2)
+                    os.close(_saved_stderr_fd)
+                except OSError:
+                    pass
             try:
                 _errlog.close()
             except Exception:
