@@ -676,6 +676,43 @@ def _schedule_home_refill(slots: SlotManager, idx: int, fill_kwargs: dict, *,
     return True
 
 
+def _save_pasted(workspace: str, name: str, data: bytes) -> str:
+    """Save a pasted image into `<workspace>/.webbee/pasted/<name>` (that dir
+    ships a `.gitignore` of `*` so pasted files never pollute the repo or its
+    shadow-git). Returns the saved path, or "" on any failure. Never raises."""
+    try:
+        base = os.path.join(workspace, ".webbee")
+        pdir = os.path.join(base, "pasted")
+        os.makedirs(pdir, exist_ok=True)
+        gi = os.path.join(base, ".gitignore")
+        if not os.path.exists(gi):
+            with open(gi, "w", encoding="utf-8") as f:
+                f.write("*\n")
+        path = os.path.join(pdir, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+    except Exception:
+        return ""
+
+
+def _extract_file_id(resp) -> str:
+    """Pull `file_id` from a file-reader `receive_files` response. Canon: it
+    lives at `data.items[].file_id` (== `.id`), NOT `data.received` (the panel's
+    Round-3 lesson). Handles dict + object shapes; "" if absent."""
+    try:
+        data = resp.get("data") if isinstance(resp, dict) else getattr(resp, "data", None)
+        items = data.get("items") if isinstance(data, dict) else getattr(data, "items", None)
+        if items:
+            it = items[0]
+            if isinstance(it, dict):
+                return str(it.get("file_id") or it.get("id") or "")
+            return str(getattr(it, "file_id", "") or getattr(it, "id", "") or "")
+    except Exception:
+        pass
+    return ""
+
+
 async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None, read_line=input,
                    agent_factory=None, auth=None, account_fetcher=None,
                    sessions_client=None, intel_factory=None, shadow_factory=None) -> None:
@@ -1337,6 +1374,32 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         from prompt_toolkit.application import get_app
                         get_app().exit()
 
+                async def _on_paste(ws: str, name: str, data: bytes) -> str:
+                    # W3 Wave A: save the pasted image into the tab's workspace
+                    # then upload it through the SAME file-reader door the panel
+                    # and Telegram use; return the reference to drop into the
+                    # task. Degrades honestly on 402 / no cloud (local path +
+                    # note). Never raises.
+                    import base64
+                    saved = _save_pasted(ws, name, data)
+                    try:
+                        from imperal_mcp.client import ImperalClient
+                        client = ImperalClient(cfg, token_provider)
+                        b64 = base64.b64encode(data).decode("ascii")
+                        resp = await client.run_tool(
+                            "file-reader", "receive_files",
+                            {"files": [{"name": name, "mime_type": "image/png",
+                                        "data_base64": b64}]})
+                        fid = _extract_file_id(resp)
+                        if fid:
+                            return f"📎 {name} (file_id={fid})"
+                    except Exception:
+                        pass
+                    if saved:
+                        return (f"📎 {name} — saved to {saved}; a file-reader "
+                                "plan is needed to send it to the model")
+                    return f"📎 {name} — could not upload"
+
                 try:
                     ok = await tui.run_session(
                         slots=slots, on_line=_on_line, on_cycle=_cycle,
@@ -1359,6 +1422,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                             spawn_poller=_spawn_slot_poller),
                         on_switch=lambda idx: _schedule_home_refill(slots, idx, home_fill_kwargs),
                         on_new=lambda: _open_new_tab(),
+                        on_paste=_on_paste,
                     )
                 finally:
                     _cancel_background()

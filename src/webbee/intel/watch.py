@@ -11,7 +11,9 @@ def _ignored(path: str) -> bool:
     filter works on Windows too (watchfiles yields backslash paths there --
     unfiltered .git churn re-indexed the repo on every checkpoint)."""
     p = path.replace(os.sep, "/").replace("\\", "/")
-    return "/.git/" in p or "/node_modules/" in p
+    # `.webbee/` = our own per-workspace scratch (pasted images, gitignore) —
+    # never re-index/checkpoint on a paste (W3).
+    return "/.git/" in p or "/node_modules/" in p or "/.webbee/" in p
 
 
 async def watch_workspace(root: str, on_change) -> None:

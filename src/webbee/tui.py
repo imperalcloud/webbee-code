@@ -534,7 +534,7 @@ def _restore_draft(buf, slot) -> None:
 async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
                       home_input=None, cancel_slot=None, ui_hooks=None,
-                      on_switch=None, on_new=None) -> bool:
+                      on_switch=None, on_new=None, on_paste=None) -> bool:
     """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
     CALL TIME (W4a Task 3 — the single most structural change of the
     multisession-tabs wave: no more one session's objects captured once at
@@ -848,6 +848,49 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # repl._open_new_tab). Home stays reachable by clicking its ◆ chip or
         # Alt+1-style switch (footer legend reminds muscle-memory users).
         _new_tab_click()
+
+    @kb.add("c-v")
+    def _paste_key(event):
+        # 0.3.34 (W3 Wave A): Ctrl-V pastes the OS clipboard. An IMAGE is read
+        # OUT-OF-BAND (a terminal's bracketed paste is text-only), then saved +
+        # uploaded via the file-reader door (repl's on_paste) and its reference
+        # dropped into the input; a text clipboard is inserted inline. Normal
+        # text paste (Cmd-V / Ctrl-Shift-V → bracketed paste) is a DIFFERENT
+        # key and is unaffected. Home has no workspace/agent → guide, not crash.
+        import time as _t
+        from webbee.clipboard_read import read_clipboard
+        slot = _a()
+        pane = _pane()
+        if on_paste is None or slot.kind == "home" or not getattr(slot, "workspace", ""):
+            pane.flash_note("📎 open a session tab to paste a file")
+            event.app.invalidate()
+            return
+        item = read_clipboard(_t.strftime("%Y%m%d-%H%M%S", _t.gmtime()))
+        if item is None:
+            pane.flash_note("clipboard is empty")
+            event.app.invalidate()
+            return
+        if item.kind == "text":
+            buf.insert_text(item.data)
+            return
+        pane.flash_note(f"📎 uploading {item.name}…", secs=30.0)
+        event.app.invalidate()
+
+        async def _do_paste():
+            ref = ""
+            try:
+                ref = await on_paste(slot.workspace, item.name, item.data)
+            except Exception:
+                ref = ""
+            if ref:
+                sep = "" if (not buf.text or buf.text.endswith(" ")) else " "
+                buf.insert_text(sep + ref + " ")
+                pane.flash_note(f"📎 {item.name}")
+            else:
+                pane.flash_note("📎 paste failed")
+            event.app.invalidate()
+
+        event.app.create_background_task(_do_paste())
 
     def _alt_digit_handler(d: int):
         def _h(event):

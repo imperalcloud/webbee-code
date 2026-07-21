@@ -2815,3 +2815,29 @@ def test_remote_mode_flip_targets_polled_slot_not_active(monkeypatch):
     confirm_src = inspect.getsource(repl_mod._confirm_autopilot)
     assert "slots.active()" not in confirm_src
     assert "def _confirm_autopilot(slot" in confirm_src
+
+
+def test_extract_file_id_reads_items_path():
+    # Canon: data.items[].file_id (== .id), NOT data.received.
+    from webbee.repl import _extract_file_id
+    assert _extract_file_id({"data": {"items": [{"file_id": "abc", "id": "xyz"}]}}) == "abc"
+    assert _extract_file_id({"data": {"items": [{"id": "xyz"}]}}) == "xyz"
+    assert _extract_file_id({"data": {"items": []}}) == ""
+    assert _extract_file_id({"data": {}}) == ""
+    assert _extract_file_id({}) == ""
+    assert _extract_file_id(None) == ""
+
+
+def test_save_pasted_writes_file_and_gitignore(tmp_path):
+    import os as _os
+    from webbee.repl import _save_pasted
+    p = _save_pasted(str(tmp_path), "pasted-x.png", b"\x89PNG")
+    assert p and _os.path.isfile(p)
+    with open(p, "rb") as f:
+        assert f.read() == b"\x89PNG"
+    assert (tmp_path / ".webbee" / ".gitignore").read_text().strip() == "*"
+
+
+def test_save_pasted_never_raises_on_bad_dir():
+    from webbee.repl import _save_pasted
+    assert _save_pasted("/dev/null/nope", "x.png", b"x") == ""

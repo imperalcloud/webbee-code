@@ -368,6 +368,9 @@ class HomeView:
     def flash(self) -> str:
         return self._out.flash()
 
+    def flash_note(self, msg: str, secs: float = 4.0) -> None:
+        self._out.flash_note(msg, secs)
+
     def scroll(self, delta: int) -> None:
         # Wheel (via the control) and PageUp/PageDown (tui routes here) move the
         # top visible line; clamped so you can't scroll past the ends.

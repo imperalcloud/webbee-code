@@ -335,6 +335,13 @@ class OutputPane:
         import time as _t
         return self.copy_flash if _t.monotonic() < self._flash_until else ""
 
+    def flash_note(self, msg: str, secs: float = 4.0) -> None:
+        """Show a transient toolbar note (paste progress, hints) — same channel
+        as the copy toast, reused so there's one flash mechanism."""
+        import time as _t
+        self.copy_flash = msg
+        self._flash_until = _t.monotonic() + secs
+
     # ---- W2 Task 8: selection capture past the pane's own Window --------
     def forward_mouse(self, ev, clamp: str = "bottom") -> bool:
         """Public seam neighbor windows call FIRST (via `tui._forwarding` /
