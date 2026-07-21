@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.27
+
+Home dashboard polish.
+
+- The Webbee Code logo is back at the top of Home.
+- Home now shows when your plan renews (or expires).
+- "Top up credits" opens the right billing page.
+- The new-tab mode you pick on Home is now honored no matter how you open
+  the tab — typing, the "+" button, and Ctrl+T all agree.
+
 ## 0.3.26
 
 The Home tab is now an interactive dashboard — a little website inside your
