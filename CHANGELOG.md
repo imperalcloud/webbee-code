@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.32
+
+- Fixed the screen getting scrambled by stray output from background helper
+  programs (a git credential helper on macOS, a browser on Linux, and the
+  like). Their output is now fully redirected to a log for the whole session,
+  so nothing but Webbee Code can draw on your terminal.
+
 ## 0.3.31
 
 - Fixed a Linux bug where "Top up credits" / "Read our security" could dump a
