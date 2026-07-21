@@ -259,6 +259,16 @@ def _line_len(frags) -> int:
     return sum(len(f[1]) for f in frags)
 
 
+def _flatten_lines(lines):
+    """Flatten a list of fragment-lines into one fragment list with a newline
+    fragment terminating each line (what a FormattedTextControl consumes)."""
+    out = []
+    for ln in lines:
+        out.extend(ln)
+        out.append(("", "\n"))
+    return out
+
+
 def _pad_line(frags, width: int):
     n = _line_len(frags)
     return list(frags) + ([("", " " * (width - n))] if n < width else [])
@@ -295,6 +305,7 @@ class HomeView:
                  data: "HomeData | None" = None, width: int = 100, out_pane=None):
         from prompt_toolkit.layout.containers import Window
         from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.mouse_events import MouseEventType
         self.slots = slots
         self.actions = actions
         self.data = data if data is not None else HomeData()
@@ -319,7 +330,29 @@ class HomeView:
         self._focus_id: "str | None" = None
         self._hover_id: "str | None" = None
         self._model: "HomeModel | None" = None
-        self.control = FormattedTextControl(self._fragments, focusable=True, show_cursor=False)
+        # Virtualized scroll (mirrors OutputPane): the control is fed ONLY the
+        # visible slice of lines, so it always fits the viewport and prompt_
+        # toolkit never fights an (absent) cursor to reset the scroll — the
+        # reason a plain FormattedTextControl window won't scroll. `_scroll` is
+        # the top visible line; `_view_h_val` is the last render's viewport
+        # height. Wheel adjusts `_scroll` here; PageUp/PageDown route via
+        # `scroll()`; `notify()` jumps to the bottom to reveal new output.
+        self._scroll = 0
+        self._view_h_val = 20
+        view = self
+
+        class _HomeControl(FormattedTextControl):
+            def mouse_handler(self, ev):
+                et = ev.event_type
+                if et == MouseEventType.SCROLL_DOWN:
+                    view.scroll(3)
+                    return None
+                if et == MouseEventType.SCROLL_UP:
+                    view.scroll(-3)
+                    return None
+                return super().mouse_handler(ev)
+
+        self.control = _HomeControl(self._visible_fragments, focusable=True, show_cursor=False)
         self.window = Window(content=self.control, wrap_lines=False, always_hide_cursor=True)
 
     # ---- OutputPane-compatible surface (ticker/layout duck-type) ----------
@@ -336,21 +369,16 @@ class HomeView:
         return self._out.flash()
 
     def scroll(self, delta: int) -> None:
-        # pageup/pagedown (tui routes here). Move the Window's own vertical
-        # scroll, clamped to the scrollable range; render_info is present once
-        # the window has been drawn at least one frame.
-        win = self.window
-        info = getattr(win, "render_info", None)
-        if info is None:
-            return
-        max_scroll = max(0, info.content_height - info.window_height)
-        win.vertical_scroll = min(max_scroll, max(0, win.vertical_scroll + delta))
+        # Wheel (via the control) and PageUp/PageDown (tui routes here) move the
+        # top visible line; clamped so you can't scroll past the ends.
+        lines = self._all_lines()
+        max_off = max(0, len(lines) - max(1, self._view_h_val))
+        self._scroll = max(0, min(self._scroll + delta, max_off))
         self._invalidate()
 
     @property
     def _view_h(self) -> int:
-        info = getattr(self.window, "render_info", None)
-        return info.window_height if info is not None else 20
+        return self._view_h_val
 
     def forward_mouse(self, ev, clamp: str = "bottom") -> bool:
         return False
@@ -360,12 +388,9 @@ class HomeView:
 
     def notify(self) -> None:
         # New captured output landed (a `_say` note / command reply). Reveal
-        # it: jump the scroll to the bottom (PT clamps on the next render) so
-        # the answer is visible, then repaint.
-        try:
-            self.window.vertical_scroll = 10 ** 7
-        except Exception:
-            pass
+        # it: jump to the bottom (clamped on the next render) so the answer is
+        # visible, then repaint.
+        self._scroll = 10 ** 7
         self._invalidate()
 
     def _invalidate(self) -> None:
@@ -434,7 +459,7 @@ class HomeView:
         return _h
 
     # ---- render -----------------------------------------------------------
-    def _fragments(self):
+    def _all_lines(self):
         from webbee.home import _mask_email
         from webbee.render import _fmt_tokens
         m = self._build_model()
@@ -571,21 +596,10 @@ class HomeView:
                        "· Ctrl+T new tab · Alt+N switch")])
             return L
 
-        # Header: the Webbee Code ASCII logo (bee-yellow), then a centered
-        # "◆ Home" — restored (it was on the pre-dashboard Home and Valentin
-        # wants it kept). The whole art block is centered by ONE offset (max
-        # line width) so its shape is preserved; degrades to left-aligned when
-        # the terminal is narrower than the art.
-        from webbee.banner_art import WEBBEE_CODE
-        art = WEBBEE_CODE.rstrip("\n").split("\n")
-        art_w = max((len(ln) for ln in art), default=0)
-        art_pad = max(0, (width - art_w) // 2)
-        lines = [[("", "")]]
-        for ln in art:
-            lines.append([("", " " * art_pad), ("class:home.header", ln)] if ln else [("", "")])
+        # A small centered "◆ Home" title. The Webbee Code logo now opens each
+        # NEW session tab instead (RichSink.banner), so Home itself stays clean.
         title_pad = max(0, (width - len("◆ Home")) // 2)
-        lines.append([("", " " * title_pad), ("class:home.header", "◆ Home")])
-        lines.append([("", "")])
+        lines = [[("", "")], [("", " " * title_pad), ("class:home.header", "◆ Home")], [("", "")]]
         if two_column(width):
             colw = max(20, (width // 2) - 3)
             lines += _side_by_side(you_lines(), wallet_lines(), colw)
@@ -609,9 +623,24 @@ class HomeView:
             lines.append([("", "")])
             lines.append([("class:home.header", " Output ")])
             lines.append(list(to_formatted_text(ANSI(dump.rstrip("\n")))))
+        return lines
 
-        out = []
-        for ln in lines:
-            out.extend(ln)
-            out.append(("", "\n"))
-        return out
+    def _fragments(self):
+        """The FULL dashboard flattened (every line). The build helpers and
+        tests use this; the on-screen control uses `_visible_fragments`."""
+        return _flatten_lines(self._all_lines())
+
+    def _visible_fragments(self):
+        """Only the visible slice `[_scroll : _scroll+view_h]`, flattened — what
+        the control renders. Captures the live viewport height from the last
+        render (`render_info.window_height`) and clamps `_scroll` into range, so
+        the slice always fits and the window never needs (and never fights) a
+        cursor to scroll."""
+        ri = getattr(self.window, "render_info", None)
+        if ri is not None and getattr(ri, "window_height", 0):
+            self._view_h_val = ri.window_height
+        lines = self._all_lines()
+        h = max(1, self._view_h_val)
+        off = max(0, min(self._scroll, max(0, len(lines) - h)))
+        self._scroll = off
+        return _flatten_lines(lines[off:off + h])

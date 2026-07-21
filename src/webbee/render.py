@@ -214,6 +214,19 @@ class RichSink:
         self.console.print()
         self._nudge()
 
+    def banner(self) -> None:
+        """The Webbee Code brand logo, printed at the top of every NEW session
+        tab (0.3.29) so each tab opens with the logo the launch splash has
+        always carried — just the brand block, no identity/privacy (those stay
+        on the one-time boot `welcome`). Align.center = reflow-safe."""
+        self.console.print()
+        self.console.print(Align.center(Text(WEBBEE_CODE, style=f"bold {_BEE}")))
+        self.console.print(Align.center(Text("🐝", style=f"bold {_BEE}")))
+        self.console.print(Align.center(Text("ICNLI AI Cloud OS · Agent", style=f"bold {_ACCENT}")))
+        self.console.print(Align.center(Text("·  i m p e r a l . i o  ·", style="dim")))
+        self.console.print()
+        self._nudge()
+
     # ---- turn lifecycle -------------------------------------------------
     def begin_turn(self) -> None:
         self._tools = 0

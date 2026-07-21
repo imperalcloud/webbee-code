@@ -419,6 +419,11 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
     # one kernel-owned row. Reference share — never a copy.
     sink.local_pending = slot.pending
     replayed = 0
+    if not first:
+        # Every NEW tab opens with the Webbee Code logo (0.3.29) — the brand
+        # block the launch splash carries — since the boot `welcome` (below)
+        # only runs for the first tab.
+        sink.banner()
     if first:
         if account is not None:
             sink.welcome(account, workspace, "terminal")

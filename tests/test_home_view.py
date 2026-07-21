@@ -297,11 +297,30 @@ def test_you_tile_shows_expires_when_not_active():
     assert "expires Aug 3" in text
 
 
-def test_home_renders_webbee_code_logo_and_title():
+def test_home_has_title_but_no_logo():
+    # 0.3.29: the Webbee Code logo moved to each NEW session tab; Home keeps
+    # only a small "◆ Home" title.
     hv, _ = _view()
     text = "".join(f[1] for f in hv._fragments())
-    assert "_____" in text        # a slice of the WEBBEE_CODE ascii banner
     assert "◆ Home" in text
+    assert "_____" not in text     # the ascii logo is no longer on Home
+
+
+def test_home_virtualized_scroll_slices_and_clamps():
+    # Home virtualizes like OutputPane: the control renders only a slice ≤ the
+    # viewport height, and scroll() moves/clamps the top line.
+    hv, _ = _view()
+    hv._view_h_val = 5
+    total = len(hv._all_lines())
+    assert total > 5                                   # taller than a 5-row viewport
+    visible_newlines = sum(1 for f in hv._visible_fragments() if f[1] == "\n")
+    assert visible_newlines <= 5
+    hv.scroll(3)
+    assert hv._scroll == 3
+    hv.scroll(10 ** 6)
+    assert hv._scroll == total - 5                     # clamped to the bottom
+    hv.scroll(-10 ** 6)
+    assert hv._scroll == 0                             # clamped to the top
 
 
 def test_captured_output_renders_inline_and_notify_reveals_it():
@@ -314,4 +333,6 @@ def test_captured_output_renders_inline_and_notify_reveals_it():
     assert "hello-inline-output" in text
     assert "Output" in text
     hv.notify()
-    assert hv.window.vertical_scroll >= 10 ** 6
+    hv._visible_fragments()                         # clamps _scroll into range
+    total = len(hv._all_lines())
+    assert hv._scroll == max(0, total - hv._view_h_val)   # notify jumped to the bottom
