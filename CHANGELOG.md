@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.31
+
+- Fixed a Linux bug where "Top up credits" / "Read our security" could dump a
+  browser's startup logs into the terminal and scramble the screen. The
+  browser now launches fully detached and silent; on a headless/SSH session
+  we simply show the link to copy.
+
 ## 0.3.30
 
 - Removed the stray "◆ Home" title from the top of the Home screen — Home now
