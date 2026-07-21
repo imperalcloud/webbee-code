@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.33
+
+Performance.
+
+- When nothing is happening, the terminal now wakes about once a second
+  instead of four times a second — easier on the CPU and the battery — while
+  staying instant the moment a task runs or you're drag-scrolling.
+- The agent's file search and per-task project snapshot no longer crawl
+  `node_modules`, `vendor`, `dist`, `build`, and friends, so both stay fast on
+  large repositories.
+
 ## 0.3.32
 
 - Fixed the screen getting scrambled by stray output from background helper
