@@ -293,20 +293,24 @@ class HomeView:
 
     def __init__(self, *, slots, actions: "HomeActions",
                  data: "HomeData | None" = None, width: int = 100, out_pane=None):
-        from prompt_toolkit.layout.containers import HSplit, Window
+        from prompt_toolkit.layout.containers import Window
         from prompt_toolkit.layout.controls import FormattedTextControl
         self.slots = slots
         self.actions = actions
         self.data = data if data is not None else HomeData()
-        # An OutputPane below the dashboard is Home's command/output region:
-        # `_say` and slash-command output (e.g. /help, gated-action notes)
-        # print into its captured console so a command run while Home is
-        # active still shows an honest answer, and the dock's OutputPane spy +
-        # ticker (dump/reflow/scroll/flash/edge_tick/forward_mouse) keep
-        # working. The dock builds it via `tui.OutputPane` and passes it
-        # (spy-visible, created first = Home); a bare fallback covers direct
-        # unit use. `self.console` IS that pane's console — it drives both the
-        # command output AND the dashboard's column-width math.
+        # Home is ONE ordinary scrollable Window (NOT dont_extend_height, NOT
+        # an HSplit): when its content is taller than the viewport, prompt_
+        # toolkit's own Window mouse handler scrolls it on the wheel (content
+        # fragment handlers return NotImplemented for SCROLL, so it falls
+        # through to Window._mouse_handler), and pageup/pagedown route here via
+        # `scroll()`. `_say`/slash-command output is rendered INLINE at the
+        # bottom of the SAME scrollable content (see `_fragments`), so it
+        # scrolls with everything and never gets squeezed off a short terminal.
+        # `out_pane` (built via `tui.OutputPane` by the dock, created first =
+        # Home for the spy) stays purely as the CAPTURE backend: `_say` prints
+        # into its console and `dump()` reads it back; its own window is NOT in
+        # the layout. `self.console` IS that pane's console — it drives both the
+        # captured command output AND the dashboard's column-width math.
         if out_pane is None:
             from webbee.output_pane import OutputPane
             out_pane = OutputPane(width=width)
@@ -316,37 +320,53 @@ class HomeView:
         self._hover_id: "str | None" = None
         self._model: "HomeModel | None" = None
         self.control = FormattedTextControl(self._fragments, focusable=True, show_cursor=False)
-        self._dash = Window(content=self.control, wrap_lines=False,
-                            always_hide_cursor=True, dont_extend_height=True)
-        self.window = HSplit([self._dash, out_pane.window])
+        self.window = Window(content=self.control, wrap_lines=False, always_hide_cursor=True)
 
     # ---- OutputPane-compatible surface (ticker/layout duck-type) ----------
-    # All delegate to the composed output pane so the dock's ticker/layout
-    # drive Home's command-output region exactly as they do a session pane.
     def reflow(self, new_width: int) -> None:
+        # Keep the capture console's width in sync (drives the dashboard's
+        # column math) and repaint; the Window re-lays-out at the new size.
         self._out.reflow(new_width)
+        self._invalidate()
 
     def edge_tick(self) -> None:
-        self._out.edge_tick()
+        return None
 
     def flash(self) -> str:
         return self._out.flash()
 
     def scroll(self, delta: int) -> None:
-        self._out.scroll(delta)
+        # pageup/pagedown (tui routes here). Move the Window's own vertical
+        # scroll, clamped to the scrollable range; render_info is present once
+        # the window has been drawn at least one frame.
+        win = self.window
+        info = getattr(win, "render_info", None)
+        if info is None:
+            return
+        max_scroll = max(0, info.content_height - info.window_height)
+        win.vertical_scroll = min(max_scroll, max(0, win.vertical_scroll + delta))
+        self._invalidate()
 
     @property
     def _view_h(self) -> int:
-        return self._out._view_h
+        info = getattr(self.window, "render_info", None)
+        return info.window_height if info is not None else 20
 
     def forward_mouse(self, ev, clamp: str = "bottom") -> bool:
-        return self._out.forward_mouse(ev, clamp)
+        return False
 
     def dump(self) -> str:
         return self._out.dump()
 
     def notify(self) -> None:
-        self._out.notify()
+        # New captured output landed (a `_say` note / command reply). Reveal
+        # it: jump the scroll to the bottom (PT clamps on the next render) so
+        # the answer is visible, then repaint.
+        try:
+            self.window.vertical_scroll = 10 ** 7
+        except Exception:
+            pass
+        self._invalidate()
 
     def _invalidate(self) -> None:
         try:
@@ -578,6 +598,17 @@ class HomeView:
         lines += [[("", "")]] + settings_lines()
         lines += [[("", "")]] + security_lines()
         lines += footer_lines()
+
+        # `_say` / slash-command output, captured in the backend pane, rendered
+        # INLINE at the very bottom of the same scrollable content (ANSI →
+        # fragments, styling preserved). `notify()` jumps the scroll here so a
+        # command's answer is visible; it scrolls with the rest of Home.
+        dump = self._out.dump()
+        if dump.strip():
+            from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+            lines.append([("", "")])
+            lines.append([("class:home.header", " Output ")])
+            lines.append(list(to_formatted_text(ANSI(dump.rstrip("\n")))))
 
         out = []
         for ln in lines:

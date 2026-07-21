@@ -302,3 +302,16 @@ def test_home_renders_webbee_code_logo_and_title():
     text = "".join(f[1] for f in hv._fragments())
     assert "_____" in text        # a slice of the WEBBEE_CODE ascii banner
     assert "◆ Home" in text
+
+
+def test_captured_output_renders_inline_and_notify_reveals_it():
+    # Home is one scrollable window; _say/command output is captured in the
+    # backend pane and rendered INLINE at the bottom, and notify() jumps the
+    # scroll to reveal it.
+    hv, _ = _view()
+    hv.console.print("hello-inline-output")
+    text = "".join(f[1] for f in hv._fragments())
+    assert "hello-inline-output" in text
+    assert "Output" in text
+    hv.notify()
+    assert hv.window.vertical_scroll >= 10 ** 6
