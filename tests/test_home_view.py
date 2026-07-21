@@ -156,3 +156,119 @@ def test_focus_nav_wraps_over_enabled_items():
     assert m.focused().id == "security-docs"
     m.focus_next()                                  # wrap forward to first enabled
     assert m.focused().id == "new-session"
+
+
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+from webbee.home_view import HomeView, _side_by_side, _line_len, _pad_line
+
+
+def _up(handler):
+    ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    return handler(ev)
+
+
+def _view(data=None, slots=None, width=120):
+    actions, log = _rec()
+    if slots is None:
+        slots = _slots_with_one_session()
+    hv = HomeView(slots=slots, actions=actions, data=data or HomeData(), width=width)
+    return hv, log
+
+
+def _frag_with_text(frags, text):
+    for f in frags:
+        if f[1] == text:
+            return f
+    raise AssertionError(f"{text!r} not in fragments")
+
+
+def test_side_by_side_pads_left_column():
+    left = [[("s", "ab")], [("s", "c")]]
+    right = [[("s", "XY")]]
+    rows = _side_by_side(left, right, colw=5, gap=2)
+    assert _line_len(rows[0]) == 5 + 2 + 2      # padded left + gap + right
+    assert _line_len(rows[1]) == 5 + 2 + 0      # right shorter -> empty
+
+
+def test_every_action_item_label_carries_a_handler():
+    data = HomeData(account=Account(signed_in=True, nickname="v", plan="pro"),
+                    wallet=Wallet(balance=100, cap=500), recent=["/one"])
+    hv, _ = _view(data=data)
+    frags = hv._fragments()
+    for label in ("+ New session", "myrepo", "[plan]", "✕", "one",
+                  "Top up credits", "Read our security & privacy →"):
+        f = _frag_with_text(frags, label)
+        assert len(f) == 3 and callable(f[2])   # 3-tuple with a mouse handler
+
+
+def test_focused_item_carries_focus_style():
+    hv, _ = _view()
+    hv._focus_id = "top-up"
+    f = _frag_with_text(hv._fragments(), "Top up credits")
+    assert f[0] == "class:home.focus"
+
+
+def test_hovered_item_carries_focus_style():
+    hv, _ = _view()
+    hv._hover_id = "security-docs"
+    f = _frag_with_text(hv._fragments(), "Read our security & privacy →")
+    assert f[0] == "class:home.focus"
+
+
+def test_click_activates_and_moves_focus():
+    hv, log = _view(data=HomeData(recent=["/one"]))
+    f = _frag_with_text(hv._fragments(), "+ New session")
+    _up(f[2])
+    assert ("new_session",) in log
+    assert hv._focus_id == "new-session"
+
+
+def test_mouse_move_sets_hover():
+    hv, _ = _view()
+    f = _frag_with_text(hv._fragments(), "Top up credits")
+    ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_MOVE,
+                    button=MouseButton.NONE, modifiers=frozenset())
+    f[2](ev)
+    assert hv._hover_id == "top-up"
+
+
+def test_scroll_event_falls_through():
+    hv, _ = _view()
+    f = _frag_with_text(hv._fragments(), "Top up credits")
+    ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
+                    button=MouseButton.NONE, modifiers=frozenset())
+    assert f[2](ev) is NotImplemented
+
+
+def test_narrow_width_stacks_you_and_wallet():
+    data = HomeData(account=Account(signed_in=True, nickname="v"),
+                    wallet=Wallet(balance=5))
+    hv, _ = _view(data=data, width=70)
+    text = "".join(f[1] for f in hv._fragments())
+    # both tile headers present, and (narrow) on different lines
+    lines = text.split("\n")
+    you = [i for i, ln in enumerate(lines) if "You" in ln]
+    wal = [i for i, ln in enumerate(lines) if "Wallet" in ln]
+    assert you and wal and you[0] != wal[0]
+
+
+def test_public_nav_methods_persist_focus_by_id():
+    hv, _ = _view(data=HomeData(recent=["/one"]))
+    hv.focus_next()                     # new-session -> tab-1
+    assert hv._focus_id == "tab-1"
+    hv.focus_prev()
+    assert hv._focus_id == "new-session"
+
+
+def test_outputpane_compat_surface_is_safe():
+    hv, _ = _view()
+    assert hv.flash() == ""
+    hv.edge_tick()                      # no-op, never raises
+    hv.scroll(-5)                       # no-op
+    assert isinstance(hv._view_h, int)
+    assert hv.forward_mouse(object()) is False
+    hv.reflow(90)
+    assert hv.console.width == 90

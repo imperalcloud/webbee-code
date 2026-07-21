@@ -248,3 +248,298 @@ def build_home_model(data: "HomeData", tabs: "list[TabRow]",
         activate=actions.open_security_docs))
 
     return HomeModel(items)
+
+
+# ---- fragment layout helpers (PURE) ----------------------------------------
+
+def _line_len(frags) -> int:
+    return sum(len(f[1]) for f in frags)
+
+
+def _pad_line(frags, width: int):
+    n = _line_len(frags)
+    return list(frags) + ([("", " " * (width - n))] if n < width else [])
+
+
+def _side_by_side(left, right, colw: int, gap: int = 3):
+    """Zip two column line-lists into side-by-side fragment rows. Left column
+    padded to `colw`; missing rows on either side render blank. ASCII-width
+    only (Home avoids double-width glyphs so len()==cells)."""
+    rows = []
+    for i in range(max(len(left), len(right))):
+        l = left[i] if i < len(left) else []
+        r = right[i] if i < len(right) else []
+        rows.append(_pad_line(l, colw) + [("", " " * gap)] + r)
+    return rows
+
+
+def _fit(label: str, max_len: int) -> str:
+    label = label or ""
+    if len(label) <= max_len:
+        return label
+    if max_len <= 1:
+        return label[:1]
+    return label[:max_len - 1] + "…"
+
+
+class HomeView:
+    """Interactive Home. Owns render + interaction; the Home slot's `.pane`.
+    Duck-types the OutputPane surface the dock's ticker/layout touch so
+    `DynamicContainer(lambda: _pane().window)` (tui.py:1142) and `_tick_once`
+    (tui.py:175-197) keep working with Home's pane in place unchanged."""
+
+    def __init__(self, *, slots, actions: "HomeActions",
+                 data: "HomeData | None" = None, width: int = 100):
+        from rich.console import Console
+        from prompt_toolkit.layout.containers import Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        self.slots = slots
+        self.actions = actions
+        self.data = data if data is not None else HomeData()
+        self.console = Console(width=width)      # width tracking for _width_watch + columns
+        self._focus_id: "str | None" = None
+        self._hover_id: "str | None" = None
+        self._model: "HomeModel | None" = None
+        self.control = FormattedTextControl(self._fragments, focusable=True, show_cursor=False)
+        self.window = Window(content=self.control, wrap_lines=False, always_hide_cursor=True)
+
+    # ---- OutputPane-compatible surface (ticker/layout duck-type) ----------
+    def reflow(self, new_width: int) -> None:
+        if new_width and new_width != self.console.width:
+            self.console.width = new_width
+            self._invalidate()
+
+    def edge_tick(self) -> None:
+        return None
+
+    def flash(self) -> str:
+        return ""
+
+    def scroll(self, delta: int) -> None:
+        return None
+
+    @property
+    def _view_h(self) -> int:
+        return 20
+
+    def forward_mouse(self, ev, clamp: str = "bottom") -> bool:
+        return False
+
+    def notify(self) -> None:
+        self._invalidate()
+
+    def _invalidate(self) -> None:
+        try:
+            from prompt_toolkit.application import get_app_or_none
+            app = get_app_or_none()
+            if app is not None:
+                app.invalidate()
+        except Exception:
+            pass
+
+    # ---- model lifecycle --------------------------------------------------
+    def _build_model(self) -> "HomeModel":
+        tabs = tab_rows(self.slots)
+        m = build_home_model(self.data, tabs, self.actions)
+        m.focus_id(self._focus_id)                           # no-op if gone/disabled
+        self._focus_id = m.focused().id if m.focused() is not None else None
+        m.hover_id = self._hover_id
+        self._model = m
+        return m
+
+    def move_focus(self, delta: int) -> None:
+        m = self._build_model(); m.move(delta)
+        self._focus_id = m.focused().id if m.focused() is not None else None
+        self._invalidate()
+
+    def focus_next(self) -> None:
+        self.move_focus(1)
+
+    def focus_prev(self) -> None:
+        self.move_focus(-1)
+
+    def activate_focused(self) -> None:
+        self._build_model().activate()
+        self._invalidate()
+
+    def seg_left(self) -> None:
+        self._build_model().left()
+        self._invalidate()
+
+    def seg_right(self) -> None:
+        self._build_model().right()
+        self._invalidate()
+
+    # ---- mouse ------------------------------------------------------------
+    def _item_handler(self, item: "ActionItem"):
+        def _h(mouse_event):
+            from prompt_toolkit.mouse_events import MouseEventType
+            et = mouse_event.event_type
+            if et == MouseEventType.MOUSE_MOVE:
+                if self._hover_id != item.id:
+                    self._hover_id = item.id
+                    self._invalidate()
+                return None
+            if et == MouseEventType.MOUSE_UP:
+                if not item.enabled:
+                    return None
+                self._focus_id = item.id
+                if item.activate is not None:
+                    item.activate()
+                elif item.right is not None:
+                    item.right()
+                self._invalidate()
+                return None
+            return NotImplemented
+        return _h
+
+    # ---- render -----------------------------------------------------------
+    def _fragments(self):
+        from webbee.home import _mask_email
+        from webbee.render import _fmt_tokens
+        m = self._build_model()
+        by_id = {it.id: it for it in m.items}
+        focused = m.focused()
+        focus_id = focused.id if focused is not None else None
+        hover_id = m.hover_id
+        width = max(20, self.console.width or 80)
+
+        def sfor(item):
+            if item.id == focus_id or item.id == hover_id:
+                return "class:home.focus"
+            if not item.enabled:
+                return "class:home.disabled"
+            return "class:home.item"
+
+        def act(item, text):
+            return (sfor(item), text, self._item_handler(item))
+
+        def hdr(title):
+            return [("class:home.header", f" {title} ")]
+
+        def you_lines():
+            a = self.data.account
+            L = [hdr("You")]
+            if a is None or not getattr(a, "signed_in", False):
+                return L + [[("class:home.dim", "  …")]]
+            nick = getattr(a, "nickname", "") or ""
+            L.append([("class:home.value", f"  @{nick}" if nick else "  (no nickname)")])
+            plan = getattr(a, "plan", "") or ""
+            if plan:
+                status = getattr(a, "plan_status", "") or ""
+                tag = f" ({status})" if status and status != "active" else ""
+                L.append([("class:home.dim", f"  {plan} plan{tag}")])
+            email = getattr(a, "email", "") or ""
+            if email:
+                L.append([("class:home.dim", f"  {_mask_email(email)}")])
+            return L
+
+        def wallet_lines():
+            w = self.data.wallet
+            L = [hdr("Wallet")]
+            if w is None:
+                L.append([("class:home.dim", "  credits —")])
+            else:
+                cap = f" / {_fmt_tokens(w.cap)}" if w.cap else ""
+                L.append([("class:home.value", f"  {_fmt_tokens(w.balance)}{cap} credits")])
+            it = by_id["top-up"]
+            L.append([("class:home.dim", "  "), act(it, "Top up credits")])
+            return L
+
+        def start_lines():
+            it = by_id["new-session"]
+            return [hdr("Start"),
+                    [("class:home.dim", "  "), act(it, "+ New session")],
+                    [("class:home.dim", "  or type a task here to open a tab and start")]]
+
+        def tabs_lines():
+            L = [hdr("Your tabs")]
+            tabs = tab_rows(self.slots)
+            if not tabs:
+                return L + [[("class:home.dim", "  no tabs open yet — type a task to start")]]
+            for t in tabs:
+                sw, md, cl = by_id[f"tab-{t.idx}"], by_id[f"tab-mode-{t.idx}"], by_id[f"tab-close-{t.idx}"]
+                marker = "●" if t.active else "○"
+                L.append([
+                    ("class:home.dim", f"  {marker} {t.idx} "),
+                    act(sw, _fit(t.label or f"tab {t.idx}", 24)),
+                    ("class:home.dim", f"  {t.glyph}  "),
+                    act(md, f"[{md.value}]"),
+                    ("class:home.dim", f"  {_fmt_tokens(t.tokens)} tok · {_fmt_tokens(t.credits)} cr  "),
+                    act(cl, "✕"),
+                ])
+            return L
+
+        def recent_lines():
+            L = [hdr("Recent repos")]
+            if not self.data.recent:
+                return L + [[("class:home.dim", "  —")]]
+            for path in self.data.recent:
+                it = by_id[f"recent:{path}"]
+                name = _fit(path.rstrip("/").rsplit("/", 1)[-1] or path, 28)
+                L.append([("class:home.dim", "  ▸ "), act(it, name)])
+            return L
+
+        def devices_lines():
+            L = [hdr("Your devices")]
+            if not self.data.devices:
+                return L + [[("class:home.dim", "  …")]]
+            for d in self.data.devices:
+                tag = " (this one)" if d.current else ""
+                L.append([("class:home.dim", f"  • {_fit(d.label, 32)}{tag}")])
+            return L
+
+        def settings_lines():
+            L = [hdr("Settings")]
+            ntm, nt = by_id["set-newtab-mode"], by_id["set-notify"]
+            L.append([("class:home.dim", "  new tabs open in  "), act(ntm, f"[{ntm.value}]")])
+            L.append([("class:home.dim", "  notifications     "),
+                      (sfor(nt), f"[{nt.value}]", self._item_handler(nt))])
+            d = self.data
+            intel = d.intel_status or ("on" if d.intel_enabled else "off")
+            L.append([("class:home.dim", f"  code intel {intel} · {d.endpoint} · v{d.version}")])
+            if d.update_notice:
+                L.append([("class:home.dim", f"  {d.update_notice}")])
+            return L
+
+        def security_lines():
+            it = by_id["security-docs"]
+            L = [hdr("Trust & security")]
+            for line in SECURITY_LINES:
+                L.append([("class:home.dim", f"  {line}")])
+            L.append([("class:home.dim", "  "), act(it, "Read our security & privacy →")])
+            return L
+
+        def footer_lines():
+            hint = ""
+            if hover_id and hover_id in by_id:
+                hint = by_id[hover_id].hint
+            elif focused is not None:
+                hint = focused.hint
+            L = [[("", "")], [("class:home.hint", f"  {hint}")]]
+            if self.data.notice:
+                L.append([("class:home.dim", f"  {self.data.notice}")])
+            L.append([("class:home.dim",
+                       "  ↑↓ move · ↵ open · ←→ change "
+                       "· Ctrl+T new tab · Alt+N switch")])
+            return L
+
+        lines = [[("class:home.header", " ◆ Home ")], [("", "")]]
+        if two_column(width):
+            colw = max(20, (width // 2) - 3)
+            lines += _side_by_side(you_lines(), wallet_lines(), colw)
+        else:
+            lines += you_lines() + [[("", "")]] + wallet_lines()
+        lines += [[("", "")]] + start_lines()
+        lines += [[("", "")]] + tabs_lines()
+        lines += [[("", "")]] + recent_lines()
+        lines += [[("", "")]] + devices_lines()
+        lines += [[("", "")]] + settings_lines()
+        lines += [[("", "")]] + security_lines()
+        lines += footer_lines()
+
+        out = []
+        for ln in lines:
+            out.extend(ln)
+            out.append(("", "\n"))
+        return out
