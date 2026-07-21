@@ -289,44 +289,61 @@ class HomeView:
     (tui.py:175-197) keep working with Home's pane in place unchanged."""
 
     def __init__(self, *, slots, actions: "HomeActions",
-                 data: "HomeData | None" = None, width: int = 100):
-        from rich.console import Console
-        from prompt_toolkit.layout.containers import Window
+                 data: "HomeData | None" = None, width: int = 100, out_pane=None):
+        from prompt_toolkit.layout.containers import HSplit, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
         self.slots = slots
         self.actions = actions
         self.data = data if data is not None else HomeData()
-        self.console = Console(width=width)      # width tracking for _width_watch + columns
+        # An OutputPane below the dashboard is Home's command/output region:
+        # `_say` and slash-command output (e.g. /help, gated-action notes)
+        # print into its captured console so a command run while Home is
+        # active still shows an honest answer, and the dock's OutputPane spy +
+        # ticker (dump/reflow/scroll/flash/edge_tick/forward_mouse) keep
+        # working. The dock builds it via `tui.OutputPane` and passes it
+        # (spy-visible, created first = Home); a bare fallback covers direct
+        # unit use. `self.console` IS that pane's console — it drives both the
+        # command output AND the dashboard's column-width math.
+        if out_pane is None:
+            from webbee.output_pane import OutputPane
+            out_pane = OutputPane(width=width)
+        self._out = out_pane
+        self.console = out_pane.console
         self._focus_id: "str | None" = None
         self._hover_id: "str | None" = None
         self._model: "HomeModel | None" = None
         self.control = FormattedTextControl(self._fragments, focusable=True, show_cursor=False)
-        self.window = Window(content=self.control, wrap_lines=False, always_hide_cursor=True)
+        self._dash = Window(content=self.control, wrap_lines=False,
+                            always_hide_cursor=True, dont_extend_height=True)
+        self.window = HSplit([self._dash, out_pane.window])
 
     # ---- OutputPane-compatible surface (ticker/layout duck-type) ----------
+    # All delegate to the composed output pane so the dock's ticker/layout
+    # drive Home's command-output region exactly as they do a session pane.
     def reflow(self, new_width: int) -> None:
-        if new_width and new_width != self.console.width:
-            self.console.width = new_width
-            self._invalidate()
+        self._out.reflow(new_width)
 
     def edge_tick(self) -> None:
-        return None
+        self._out.edge_tick()
 
     def flash(self) -> str:
-        return ""
+        return self._out.flash()
 
     def scroll(self, delta: int) -> None:
-        return None
+        self._out.scroll(delta)
 
     @property
     def _view_h(self) -> int:
-        return 20
+        return self._out._view_h
 
     def forward_mouse(self, ev, clamp: str = "bottom") -> bool:
-        return False
+        return self._out.forward_mouse(ev, clamp)
+
+    def dump(self) -> str:
+        return self._out.dump()
 
     def notify(self) -> None:
-        self._invalidate()
+        self._out.notify()
 
     def _invalidate(self) -> None:
         try:

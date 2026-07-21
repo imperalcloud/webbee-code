@@ -263,12 +263,19 @@ def test_public_nav_methods_persist_focus_by_id():
     assert hv._focus_id == "new-session"
 
 
-def test_outputpane_compat_surface_is_safe():
+def test_outputpane_compat_surface_delegates_to_output_pane():
+    # HomeView duck-types the OutputPane surface the dock ticker/layout touch
+    # by delegating to its composed output pane; none of these ever raise.
     hv, _ = _view()
-    assert hv.flash() == ""
-    hv.edge_tick()                      # no-op, never raises
-    hv.scroll(-5)                       # no-op
+    assert hv.flash() == ""                          # no copy-flash yet
+    hv.edge_tick()                                   # no armed drag -> no-op
+    hv.scroll(-5)                                    # empty buffer -> clamped
     assert isinstance(hv._view_h, int)
-    assert hv.forward_mouse(object()) is False
+    scroll = MouseEvent(position=Point(0, 0), event_type=MouseEventType.SCROLL_UP,
+                        button=MouseButton.NONE, modifiers=frozenset())
+    assert hv.forward_mouse(scroll) is False         # no armed drag -> not consumed
     hv.reflow(90)
-    assert hv.console.width == 90
+    assert hv.console.width == 90                    # width flows through the output pane
+    # _say prints into HomeView.console (the output pane) and is dump()-visible
+    hv.console.print("hello-from-say")
+    assert "hello-from-say" in hv.dump()
