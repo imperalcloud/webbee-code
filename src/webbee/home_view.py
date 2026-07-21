@@ -596,10 +596,9 @@ class HomeView:
                        "· Ctrl+T new tab · Alt+N switch")])
             return L
 
-        # A small centered "◆ Home" title. The Webbee Code logo now opens each
-        # NEW session tab instead (RichSink.banner), so Home itself stays clean.
-        title_pad = max(0, (width - len("◆ Home")) // 2)
-        lines = [[("", "")], [("", " " * title_pad), ("class:home.header", "◆ Home")], [("", "")]]
+        # No center title — the tab bar's ◆ Home chip already names the tab,
+        # and the tiles below are Home's content. Just a leading blank line.
+        lines = [[("", "")]]
         if two_column(width):
             colw = max(20, (width // 2) - 3)
             lines += _side_by_side(you_lines(), wallet_lines(), colw)

@@ -297,13 +297,14 @@ def test_you_tile_shows_expires_when_not_active():
     assert "expires Aug 3" in text
 
 
-def test_home_has_title_but_no_logo():
-    # 0.3.29: the Webbee Code logo moved to each NEW session tab; Home keeps
-    # only a small "◆ Home" title.
+def test_home_has_no_logo_and_no_center_title():
+    # The Webbee Code logo moved to each NEW session tab; the out-of-place
+    # center "◆ Home" title is gone too. Home's content starts with the tiles.
     hv, _ = _view()
     text = "".join(f[1] for f in hv._fragments())
-    assert "◆ Home" in text
-    assert "_____" not in text     # the ascii logo is no longer on Home
+    assert "_____" not in text     # no ascii logo on Home
+    assert "◆ Home" not in text    # no center title (the tab-bar chip still has it)
+    assert "You" in text           # the tiles are the top of Home
 
 
 def test_home_virtualized_scroll_slices_and_clamps():
