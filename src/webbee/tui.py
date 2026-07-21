@@ -211,6 +211,32 @@ def _width_watch(pane, app) -> None:
             pass
 
 
+def _ticker_busy(slots, is_busy) -> bool:
+    """Whether the dock's animation loop must stay at the FAST (0.25s) cadence:
+    a turn is running, a copy-flash toast is live, OR an edge-drag auto-scroll
+    is in flight (`pane._edge_drag` — a drag-select past the viewport edge that
+    `pane.edge_tick()` keeps scrolling every tick). All three need smooth ~4x/s
+    updates; miss the edge-drag one and idle drag-scrolling crawls 4x slower.
+    Otherwise the loop is idle → the caller uses the slow 1.0s cadence."""
+    try:
+        pane = slots.active().pane
+        if bool(pane.flash()) or bool(getattr(pane, "_edge_drag", 0)):
+            return True
+    except Exception:
+        pass
+    return bool(is_busy())
+
+
+def _tick_interval(busy: bool) -> float:
+    """The dock's animation-loop sleep. 0.25s while a turn is running (or a
+    copy-flash is live) so the spinner/elapsed-clock animate smoothly; 1.0s
+    when fully idle, so the loop wakes 1×/s instead of 4×/s (less CPU/battery)
+    with no visible cost — an idle tick only resize-detects + re-syncs hover,
+    both of which tolerate a 1s lag (and a turn's first frame still shows
+    instantly via the submit's own invalidate)."""
+    return 0.25 if busy else 1.0
+
+
 def _tick_once(slots, app, is_busy) -> None:
     """One iteration of run_session's `_ticker` loop, extracted module-level
     so the wiring itself is directly unit-testable (an `async def` infinite
@@ -1272,7 +1298,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # is_busy this ticker feeds it, since the old top-level is_busy
         # param died with the rest of the sink-shaped params.
         while True:
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(_tick_interval(_ticker_busy(slots, _busy_live)))
             _sync_hover_mode()
             _tick_once(slots, app, _busy_live)
 

@@ -49,6 +49,22 @@ def test_grep_skips_git_dir(tmp_path):
     assert r["ok"] and "a.py" in r["content"] and ".git" not in r["content"]
 
 
+def test_grep_prunes_heavy_dirs(tmp_path):
+    # W6: a code grep must never crawl node_modules/vendor/dist/etc. — huge and
+    # never what the user meant. A match in src surfaces; one in node_modules
+    # does not (the walk is pruned, not just filtered).
+    ex = _ex(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("needle\n")
+    nm = tmp_path / "node_modules" / "pkg"
+    nm.mkdir(parents=True)
+    (nm / "index.js").write_text("needle\n")
+    r = ex.run("grep", {"pattern": "needle"})
+    assert r["ok"]
+    assert "a.py" in r["content"]
+    assert "node_modules" not in r["content"]
+
+
 def test_grep_skips_git_dir_windows_style():
     # The os.walk-driven .git skip in _t_grep normalizes dp with os.sep so it
     # also matches on Windows, where os.walk yields backslash paths (an

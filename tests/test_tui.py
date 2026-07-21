@@ -5206,3 +5206,41 @@ def test_hover_scoping_present_and_home_only():
     src = inspect.getsource(tui.run_session)
     assert "?1003h" in src and "?1003l" in src
     assert "_sync_hover_mode" in src
+
+
+def test_tick_interval_fast_when_busy_slow_when_idle():
+    # W6: the animation loop wakes 4x/s only while busy/flash; 1x/s when idle.
+    from webbee.tui import _tick_interval
+    assert _tick_interval(True) == 0.25
+    assert _tick_interval(False) == 1.0
+
+
+def test_ticker_busy_includes_turn_flash_and_edge_drag():
+    # W6 review fix: the fast-cadence predicate must fire for a running turn,
+    # a live copy-flash, AND an in-flight edge-drag auto-scroll (else idle
+    # drag-scrolling crawls 4x slower). A pane lacking _edge_drag (HomeView)
+    # must not crash.
+    from webbee.tui import _ticker_busy
+
+    class _Pane:
+        def __init__(self, flash="", edge=0):
+            self._flash, self._edge_drag = flash, edge
+        def flash(self):
+            return self._flash
+
+    class _Slots:
+        def __init__(self, pane):
+            self._p = pane
+        def active(self):
+            return type("S", (), {"pane": self._p})()
+
+    idle, running = (lambda: False), (lambda: True)
+    assert _ticker_busy(_Slots(_Pane()), idle) is False
+    assert _ticker_busy(_Slots(_Pane()), running) is True
+    assert _ticker_busy(_Slots(_Pane(flash="copied")), idle) is True
+    assert _ticker_busy(_Slots(_Pane(edge=1)), idle) is True
+
+    class _Bare:
+        def flash(self):
+            return ""
+    assert _ticker_busy(_Slots(_Bare()), idle) is False

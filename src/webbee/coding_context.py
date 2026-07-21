@@ -5,6 +5,17 @@ proof-of-done command a marathon carries in that context."""
 import os
 import subprocess
 
+# Heavy dependency/build dirs the file-tree walk and the agent `grep` tool
+# must NEVER descend: they blow up walk time on real repos and (with the tree's
+# 200-file cap) would otherwise fill the snapshot with dependency junk instead
+# of the user's own code. `.git` + all dotdirs are pruned separately by the
+# callers; these are the non-dot offenders. Shared with tools._t_grep.
+WALK_IGNORE_DIRS = frozenset({
+    "node_modules", "vendor", "dist", "build", "target", "__pycache__",
+    ".git", ".venv", "venv", ".next", ".cache", ".tox", ".mypy_cache",
+    ".pytest_cache",
+})
+
 
 def build_coding_context(workspace_root: str, intel=None) -> dict:
     """Snapshot handed to the cloud brain: cwd (realpath), `git status -sb`
@@ -23,7 +34,8 @@ def build_coding_context(workspace_root: str, intel=None) -> dict:
         git = ""
     paths = []
     for dirpath, dirnames, filenames in os.walk(cwd):
-        dirnames[:] = [d for d in dirnames if d != ".git" and not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames
+                       if d not in WALK_IGNORE_DIRS and not d.startswith(".")]
         for fn in filenames:
             paths.append(os.path.relpath(os.path.join(dirpath, fn), cwd))
             if len(paths) >= 200:

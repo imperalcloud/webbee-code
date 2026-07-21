@@ -327,12 +327,17 @@ class LocalToolExecutor:
         return {"ok": proc.returncode == 0, "content": out or f"(exit {proc.returncode})"}
 
     def _t_grep(self, a: dict) -> dict:
+        from webbee.coding_context import WALK_IGNORE_DIRS
         pat = re.compile(a["pattern"])
         base = self.resolve_in_workspace(a.get("path", "."))
         hits = []
-        for dp, _dn, fns in os.walk(base):
+        for dp, dns, fns in os.walk(base):
             if _is_git_dir(dp):
+                dns[:] = []
                 continue
+            # Prune heavy dependency/build dirs (node_modules, vendor, dist,
+            # …) so a grep on a real repo doesn't crawl megabytes of deps.
+            dns[:] = [d for d in dns if d not in WALK_IGNORE_DIRS]
             for fn in fns:
                 fp = os.path.join(dp, fn)
                 try:
