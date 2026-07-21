@@ -465,3 +465,15 @@ def test_disarm_all_is_a_noop_when_nothing_armed():
     mgr = SlotManager()
     mgr.add(_mk_slot(kind="home"))
     disarm_all(mgr)   # must not raise
+
+
+def test_workspace_resources_roots_lists_booted_paths(monkeypatch):
+    import webbee.repo as repo_mod
+    from webbee.slots import WorkspaceResources
+    monkeypatch.setattr(repo_mod, "find_repo_root", lambda ws: ws)
+    monkeypatch.setattr("os.path.realpath", lambda p: p)
+    res = WorkspaceResources()
+    res.put("/a", {"git_branch": "main"})
+    res.put("/b", {"git_branch": "dev"})
+    assert res.roots() == ["/a", "/b"]
+    assert res.bundles() == [{"git_branch": "main"}, {"git_branch": "dev"}]

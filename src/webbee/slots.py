@@ -250,3 +250,11 @@ class WorkspaceResources:
         cancellation walk) must reach every watcher_task through THIS, never
         by poking `_by_root` directly."""
         return list(self._by_root.values())
+
+    def roots(self) -> list[str]:
+        """PUBLIC accessor (W5 Home recent-repos tile) — the realpath of every
+        distinct repo root this process has booted a workspace for, insertion
+        order. `bundles()` returns the per-root VALUE bundles; `roots()`
+        returns their KEYS (the paths), which Home turns into one-click
+        "open a new tab here" actions."""
+        return list(self._by_root.keys())
