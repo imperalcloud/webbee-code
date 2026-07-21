@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.34
+
+Paste images with Ctrl+V. Copy a screenshot (or any image) and press Ctrl+V in
+a session tab — Webbee Code uploads it and drops a reference into your prompt,
+so the next thing you ask can be about that image. Text on the clipboard
+pastes inline. Nothing is sent until you send your message; if image upload
+isn't available the image is saved locally and referenced by path.
+
 ## 0.3.33
 
 Performance.
