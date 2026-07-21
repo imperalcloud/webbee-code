@@ -27,3 +27,13 @@ def _isolate_instance_lock_cache(tmp_path, monkeypatch):
     tests can never see each other's lock as "already held")."""
     import webbee.instance_lock as instance_lock
     monkeypatch.setattr(instance_lock, "_CACHE_DIR", str(tmp_path / "webbee-instance-lock-cache"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_newtab_mode_cache(tmp_path, monkeypatch):
+    """W5: Home's Settings tile persists the new-tab default mode to
+    `~/.cache/webbee/newtab-mode` -- redirect it to a per-test tmp dir, same
+    rationale as `_isolate_mode_cache` above (never touch the developer's
+    real cache; keep every test hermetic)."""
+    import webbee.newtab_mode as newtab_mode
+    monkeypatch.setattr(newtab_mode, "_CACHE_DIR", str(tmp_path / "webbee-newtab-cache"))
