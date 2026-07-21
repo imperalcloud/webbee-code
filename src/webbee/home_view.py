@@ -17,16 +17,19 @@ from webbee.wallet import Wallet
 NOTIFY_OPTIONS = ("off", "panel", "tg", "both")
 MODE_OPTIONS = ("default", "plan", "autopilot")
 
-# Trust/Security tile — public-facing product copy, subject to the ICNLI
-# claims doctrine (Locus of Authority). Every line is a real, verifiable
-# system property. CONFIRM against ~/Nextcloud/MCP-Marketing-Imperal/
-# 07-voice-and-messaging.md + the exact docs URL on docs.imperal.io before
-# ship (Task 11). Default below is concrete and defensible.
-SECURITY_DOCS_URL = "https://docs.imperal.io/en/security/overview/"
+# Trust/Security tile — public-facing product copy, held to the ICNLI claims
+# doctrine (Locus of Authority: anchor on WHO DECIDES, no overclaim, plain
+# words, authority returns to the operator). Confirmed 2026-07-21 against
+# ~/Nextcloud/MCP-Marketing-Imperal/07-voice-and-messaging.md; every line is
+# a real, verifiable property. Line 1 keeps authority with the user (does not
+# claim actions are blocked — Autopilot is the user's own choice); line 2 says
+# "personal details" (PII), NOT "your data" (code IS sent to the model), which
+# matches the claims-audited welcome copy in render.py. Docs URL verified live.
+SECURITY_DOCS_URL = "https://docs.imperal.io/en/guides/audit-and-security/"
 SECURITY_LINES = (
-    "Your private data is masked before the model sees it.",
-    "Every risky or paid action asks you first.",
-    "Encrypted in transit to auth.imperal.io.",
+    "Risky and paid actions ask before they run — you stay in control.",
+    "Personal details are masked before they reach the model.",
+    "Encrypted in transit.",
 )
 
 
