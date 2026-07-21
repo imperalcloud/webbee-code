@@ -9,7 +9,7 @@ from webbee.account import login_device_flow
 from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
 from webbee.slots import (SessionSlot, SlotManager, WorkspaceResources,
-                         auto_label, close_active, sanitize_label)
+                         auto_label, close_active, close_at, sanitize_label)
 from webbee.tui import _MODES, next_mode
 
 
@@ -740,9 +740,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     # process-wide `account` above (best-effort, may re-fetch — Home is
     # filled in the background regardless of whether it ever becomes
     # visible, so it never blocks boot on a second network round-trip).
+    from webbee.wallet import fetch_wallet as _wallet_fetcher
     home_fill_kwargs = dict(cfg=cfg, token_provider=token_provider, slots=slots,
                             account_fetcher=account_fetcher, sessions_client=sessions_client,
-                            resources=resources, version=__version__)
+                            resources=resources, version=__version__,
+                            wallet_fetcher=_wallet_fetcher)
 
     def _resources_for(ws: str) -> dict:
         return resources.get(ws) or {}
@@ -1189,7 +1191,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         active = slots.active()
         ws = os.path.abspath(path) if path else (active.workspace or workspace)
         new_slot = await _make_session_slot(
-            cfg, token_provider, ws, mode, resources=resources,
+            cfg, token_provider, ws, state.get("new_tab_mode") or mode, resources=resources,
             shared_client=shared_client, agent_factory=agent_factory,
             intel_factory=intel_factory, shadow_factory=shadow_factory,
             first=False)
@@ -1212,11 +1214,77 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 from webbee.sizing import get_size
                 width, _height = get_size(None)   # pre-app: same fallback, one code path
 
+                from prompt_toolkit.application import get_app
+                from webbee import newtab_mode, urlopen
+                from webbee import remote as _remote_mod
+                from webbee.home import _pick_session_slot
+                from webbee.home_view import HomeActions, HomeView, SECURITY_DOCS_URL
+
+                state["new_tab_mode"] = newtab_mode.load_newtab_mode() or mode
+
+                def _home_set_notify(arg: str) -> None:
+                    picked = _pick_session_slot(slots)
+                    sid = getattr(getattr(picked, "agent", None), "session_id", "") if picked else ""
+                    if not sid:
+                        return
+                    async def _do():
+                        try:
+                            st = await _remote_mod.set_remote(cfg, token_provider, sid, arg)
+                            home_view.data.notify_state = arg
+                            home_view.data.remote_desc = _remote_mod.describe(st)
+                        except Exception:
+                            pass
+                        home_view.notify()
+                    get_app().create_background_task(_do())
+
+                def _set_new_tab_mode(m: str) -> None:
+                    state["new_tab_mode"] = m
+                    newtab_mode.save_newtab_mode(m)
+                    home_view.data.new_tab_mode = m
+                    home_view.notify()
+
+                def _set_tab_mode(idx: int, m: str) -> None:
+                    if 0 <= idx < len(slots.slots):
+                        set_slot_mode(slots.slots[idx], m)
+                        get_app().invalidate()
+
+                def _home_close_tab(idx: int) -> None:
+                    if close_at(slots, idx, _cancel_slot):
+                        get_app().invalidate()
+
+                def _home_switch(idx: int) -> None:
+                    ui_hooks.get("switch", slots.switch)(idx)
+
+                def _home_top_up() -> None:
+                    url = urlopen.open_url(f"{cfg.panel_url}/billing")
+                    home_view.data.notice = f"top up at {url}"
+                    home_view.notify()
+
+                def _home_security_docs() -> None:
+                    url = urlopen.open_url(SECURITY_DOCS_URL)
+                    home_view.data.notice = f"security & privacy: {url}"
+                    home_view.notify()
+
+                # Home's command/output region — built FIRST via tui.OutputPane
+                # so it is the dock's first OutputPane (the spy's created[0] =
+                # Home) and `_say`/slash output on Home stays visible.
+                home_out = tui.OutputPane(width=width)
+                home_view = HomeView(slots=slots, width=width, out_pane=home_out, actions=HomeActions(
+                    new_session=lambda: get_app().create_background_task(_open_new_tab()),
+                    open_recent=lambda p: get_app().create_background_task(_open_new_tab(p)),
+                    switch_tab=_home_switch,
+                    close_tab=_home_close_tab,
+                    set_tab_mode=_set_tab_mode,
+                    set_notify=_home_set_notify,
+                    set_new_tab_mode=_set_new_tab_mode,
+                    top_up=_home_top_up,
+                    open_security_docs=_home_security_docs,
+                ))
+                home_view.data.new_tab_mode = state["new_tab_mode"]
                 # Home slot at index 0; the first session slot (cwd
                 # workspace) at index 1.
-                home_pane = tui.OutputPane(width=width)
                 home_slot = SessionSlot(kind="home", workspace=workspace, label="Home",
-                                        pane=home_pane, sink=None, agent=None)
+                                        pane=home_view, sink=None, agent=None)
                 slots.add(home_slot)
 
                 session_slot, replayed = await _make_session_slot(
@@ -1256,7 +1324,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                             cfg, token_provider, slot, text, iid, client=shared_client),
                         cancel_slot=_cancel_slot, ui_hooks=ui_hooks,
                         home_input=lambda text: _home_input(
-                            text, slots=slots, cfg=cfg, token_provider=token_provider, mode=mode,
+                            text, slots=slots, cfg=cfg, token_provider=token_provider,
+                            mode=(state.get("new_tab_mode") or mode),
                             resources=resources, shared_client=shared_client, agent_factory=agent_factory,
                             intel_factory=intel_factory, shadow_factory=shadow_factory,
                             workspace=workspace, ui_hooks=ui_hooks, run_turn=_run_turn,

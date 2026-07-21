@@ -372,6 +372,38 @@ def test_schedule_home_refill_schedules_when_stale():
     assert scheduled == [home]
 
 
+def test_home_input_uses_new_tab_mode_when_provided():
+    slots = SlotManager()
+    slots.add(_home_slot(workspace="/cwd"))
+    seen = {}
+
+    async def fake_make_session_slot(cfg, tp, ws, mode, *, resources, shared_client,
+                                     agent_factory, intel_factory, shadow_factory, first):
+        seen["mode"] = mode
+        s = _session_slot(workspace=ws)
+        class _E:
+            echoed = []
+            def user_echo(self, t): self.echoed.append(t)
+        s.sink = _E()
+        return s
+
+    async def fake_run_turn(slot, text):
+        pass
+
+    import webbee.repl as repl_mod
+    orig = repl_mod._make_session_slot
+    repl_mod._make_session_slot = fake_make_session_slot
+    try:
+        asyncio.run(_home_input(
+            "go", slots=slots, cfg=None, token_provider=None, mode="plan",
+            resources=WorkspaceResources(), shared_client=None, agent_factory=None,
+            intel_factory=None, shadow_factory=None, workspace="/cwd",
+            ui_hooks={}, run_turn=fake_run_turn))
+    finally:
+        repl_mod._make_session_slot = orig
+    assert seen["mode"] == "plan"    # _home_input threads the caller-chosen mode through unchanged
+
+
 def test_switching_to_home_when_stale_schedules_exactly_one_refill():
     """The end-to-end contract (flag guard): even if the switch-to-Home
     hook fires twice in a row before the first fill has had a chance to
