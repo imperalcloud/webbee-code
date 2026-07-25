@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.35
+
+Reliability and speed of the terminal itself.
+
+- Code intelligence no longer dies silently at startup. On many repositories it
+  failed while building its index and the terminal simply said "code intel off"
+  with no reason — semantic search and the code graph were quietly unavailable
+  for the whole session. It now builds correctly (and old broken caches are
+  rebuilt automatically).
+- Resizing the window is smooth again: dragging a split no longer re-wraps the
+  text on every intermediate width, so the terminal stops freezing mid-drag.
+- Ctrl+V no longer blocks the terminal while reading the clipboard, so pasting
+  a large image can't lock up the interface.
+- Switching tabs with Shift+TAB is instant again — it no longer runs a `git`
+  command each time (which could stall if git itself hung).
+- Building the project index skips virtualenvs and dependency caches, so a
+  large in-tree environment can no longer crowd out your own source files.
+  On this repository the full pass went from ~31s to ~1s.
+- Fixed a rare case where a remote approval prompt could vanish before you
+  answered it.
+
 ## 0.3.34
 
 Paste images with Ctrl+V. Copy a screenshot (or any image) and press Ctrl+V in
