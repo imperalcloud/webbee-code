@@ -111,6 +111,23 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         # same way /status reads session state); the repl clears the actual
         # deque on action="queue_clear" — the message here already carries
         # the honest drop count.
+        # 0.3.37: drop/edit ONE queued item by its 1-based /queue number --
+        # the KEYBOARD twin of the panel's per-row ✕ and click-to-edit, so
+        # managing a 3-deep queue works on terminals with no mouse reporting
+        # (tmux without mouse on, restrictive SSH clients) too. The repl owns
+        # the actual deque mutation; this layer only validates + routes.
+        if args and args[0].lower() in ("drop", "remove", "rm", "edit"):
+            verb = "queue_drop" if args[0].lower() != "edit" else "queue_edit"
+            if len(args) < 2:
+                return SlashResult(handled=True, action="queue",
+                                   message=f"Usage: /queue {args[0].lower()} <number> "
+                                           f"(see /queue for the numbers).")
+            raw = args[1]
+            if not raw.isdigit() or int(raw) < 1 or int(raw) > len(ctx.queued):
+                return SlashResult(handled=True, action="queue",
+                                   message=(f"No queued item #{raw}. "
+                                            f"Queue holds {len(ctx.queued)}."))
+            return SlashResult(handled=True, action=verb, arg=str(int(raw)))
         if args and args[0].lower() == "clear":
             n = len(ctx.queued)
             return SlashResult(handled=True, action="queue_clear",
@@ -122,7 +139,8 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         lines = "\n".join(f"  {i}. {t}" for i, t in enumerate(ctx.queued, 1))
         return SlashResult(handled=True, action="queue",
                            message=(f"Queued ({len(ctx.queued)}) — runs in order, "
-                                    f"one per finished turn:\n{lines}"))
+                                    f"one per finished turn:\n{lines}\n"
+                                    f"  /queue drop <n> · /queue edit <n> · /queue clear"))
     if cmd == "/steps":
         if args:
             return SlashResult(handled=True, action="step_detail", arg=args[0])

@@ -20,9 +20,10 @@ Application is TTY/headless-smoke verified. Grounded in prompt_toolkit
 import asyncio
 import re
 
-from webbee import sizing
+from webbee import __version__, sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
-from webbee.queue_panel import pull_item, queue_fragments, queue_height
+from webbee.queue_panel import (drop_item, one_line, pull_item, queue_fragments,
+                                 queue_height)
 from webbee.render import _fmt_tokens
 from webbee.home_view import session_totals
 from webbee.slots import close_active, close_at, disarm_all, is_turn_alive
@@ -74,10 +75,13 @@ _STYLE_DICT = {
     "tb.mode.default": "#00afd7",        # default — cyan
     "tb.mode.plan": "#af87ff",           # plan — purple
     "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
+    "tb.version": "#5f5f5f",             # 0.3.37 bottom-right version badge — quietest thing on screen
     "qp.header": "#e8a317 bold",         # queue-panel header — bee-yellow, pops
     "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
     "qp.last": "#e8a317",                # newest row — the one ↑ pulls
     "qp.remote": "#af87ff italic",       # cross-surface rows — purple (not yours to pull)
+    "qp.drop": "#d75f5f",                # per-row ✕ remove button (0.3.37) — red, deliberate
+    "tb.live": "#5fd75f",                # live-session indicator (0.3.37) — green = a workflow is Running
     "tp.header": "#e8a317 bold",         # todo-panel header — bee-yellow, pops
     "tp.done": "#5faf5f",                # ✓ glyph — green
     "tp.done.text": "#8a8a8a strike",    # completed text — dim + struck
@@ -205,7 +209,7 @@ def next_mode(mode: str) -> str:
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False, queued: int = 0,
-                  reconnecting: int = 0, width: int = 0) -> list:
+                  reconnecting: int = 0, width: int = 0, live: str = "") -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
     text (per-segment styled). Four states: consent (awaiting a reply),
     reconnecting (the stream transport is down mid-turn — honest, not a fake
@@ -240,6 +244,13 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
              (f"class:tb.mode.{mode}", mode),
              ("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
              *q]
+    # 0.3.37: the PERSISTENT live-session indicator (active_sessions.
+    # session_indicator). Empty string = nothing running = say nothing, so an
+    # ordinary idle dock gains no permanent noise; when a Temporal workflow IS
+    # running the terminal now says so continuously instead of once in a boot
+    # note that scrolls away.
+    if live:
+        frags.append(("class:tb.live", f"   ·   {live}"))
     # 0.3.36: the hints are DISCOVERABILITY, the spend figures are DATA -- so
     # the hints are what gets dropped when the terminal is too narrow to hold
     # everything, never the numbers (an 80-column window used to cut the line
@@ -253,6 +264,46 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     elif used + len(short) <= width:
         frags.append(("class:tb.dim", short))
     return frags
+
+
+def version_badge_text(version: str) -> str:
+    """PURE. The exact bottom-right badge string. ONE source of truth shared by
+    `pin_version_right` (which draws it) and `_toolbar` (which reserves its
+    columns before the hint text is fitted) -- so the two can never disagree
+    about how much room the badge needs."""
+    return f" v{version} "
+
+
+def pin_version_right(frags: list, version: str, width: int) -> list:
+    """PURE. Pin ``v<version>`` flush to the RIGHT EDGE of the toolbar row.
+
+    The toolbar is the LAST child of run_session's root HSplit, so its right
+    edge is the bottom-right corner of the WHOLE window (0.3.37 — the badge
+    used to sit inline in the idle text, which meant it moved, and vanished
+    the moment a turn started).
+
+    Applied ONCE over the already-built fragments in ``_toolbar()``, so every
+    state (idle / busy / consent / reconnecting / copy-flash / step-nav /
+    Home) carries it with no per-branch duplication.
+
+    Contract:
+      * ``width <= 0`` (headless / unknown terminal) -> returned UNCHANGED:
+        padding to an unknown width would wrap the row and shove the input
+        box upward.
+      * The badge is dropped when the row cannot hold it plus at least one
+        column of real content. The status line is DATA, the version is
+        decoration -- decoration never truncates data.
+      * Padding is exact (``width - used - len(badge)``) so the badge lands
+        flush right with no trailing column, and can never wrap to row two.
+    """
+    if not width or width <= 0:
+        return frags
+    badge = version_badge_text(version)
+    used = sum(len(t) for _, t in frags)
+    pad = width - used - len(badge)
+    if pad < 1:
+        return frags
+    return list(frags) + [("class:tb.dim", " " * pad), ("class:tb.version", badge)]
 
 
 def _width_watch(pane, app) -> None:
@@ -621,7 +672,8 @@ def _restore_draft(buf, slot) -> None:
 async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
                       home_input=None, cancel_slot=None, ui_hooks=None,
-                      on_switch=None, on_new=None, on_paste=None) -> bool:
+                      on_switch=None, on_new=None, on_paste=None,
+                      live=None) -> bool:
     """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
     CALL TIME (W4a Task 3 — the single most structural change of the
     multisession-tabs wave: no more one session's objects captured once at
@@ -1108,6 +1160,21 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         pane = _pane()
         pane.scroll(max(1, pane._view_h) - 2)
 
+    def _toolbar_fit_width() -> int:
+        """Columns available to the toolbar's own text: the true terminal width
+        MINUS the space the bottom-right version badge will occupy (0.3.37).
+
+        Without this reservation the hint text would fit itself to the FULL
+        width and `pin_version_right` would then find no room left, so the
+        badge would blink out exactly on the narrow terminals where a fixed
+        anchor matters most. Reserving first makes the badge deterministic:
+        the hints degrade (they already do, by design), the badge stays put.
+        0 (unknown/headless) is passed through untouched."""
+        w = sizing.get_size(get_app_or_none())[0]
+        if not w or w <= 0:
+            return 0
+        return max(1, w - len(version_badge_text(__version__)))
+
     def _toolbar():
         pane = _pane()
         f = pane.flash()
@@ -1125,7 +1192,8 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                                       tools=st["tools"], consent=st["consent"],
                                       queued=len(slot.pending) + len(_sink_attr("remote_pending", [])),
                                       reconnecting=st.get("reconnecting", 0),
-                                      width=sizing.get_size(get_app_or_none())[0])
+                                      width=_toolbar_fit_width(),
+                                      live=str((live or {}).get("text") or ""))
             else:
                 # Home has no sink of its OWN, but it is the dock's summary
                 # page: show the SESSION TOTAL across every open tab (0.3.36)
@@ -1134,7 +1202,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                 tk, cr = session_totals(slots)
                 frags = [("class:tb.dim", "  ◆ home"),
                          ("class:tb.dim", f"   ·   {_fmt_tokens(tk)} tok · {_fmt_tokens(cr)} credits this session")]
-                _w = sizing.get_size(get_app_or_none())[0]
+                _w = _toolbar_fit_width()
                 _hint = "   ·   type a task to start · Alt+№ switch"
                 if not _w or sum(len(t) for _, t in frags) + len(_hint) <= _w:
                     frags.append(("class:tb.dim", _hint))
@@ -1144,6 +1212,12 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # pane selection is armed still completes the copy instead of
         # sticking. `build_toolbar` itself stays untouched/2-tuple (its own
         # unit tests unpack `for _, seg in frags`).
+        # 0.3.37: the version badge is pinned to the row's right edge HERE --
+        # one call, AFTER every state branch above has built its fragments, so
+        # idle/busy/consent/reconnecting/copy-flash/step-nav/Home all show it
+        # in the same fixed spot: the bottom-right corner of the window.
+        frags = pin_version_right(frags, __version__,
+                                  sizing.get_size(get_app_or_none())[0])
         fwd = _forwarding(None, pane)
         return [(style, text, fwd) for style, text in frags]
 
@@ -1180,6 +1254,21 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             slot.pulled["text"], slot.pulled["iid"] = str(item), getattr(item, "iid", "")
             get_app().invalidate()
 
+    def _drop_at(index: int) -> None:
+        """Mouse remove (a row's ✕ handler, queue_panel._drop_handler): delete
+        the CLICKED queued item outright (0.3.37). Unlike `_pull_at` the input
+        buffer is untouched — removing the 1st of 3 queued lines must not
+        hijack whatever you are currently typing. A note lands in the
+        transcript so the removal is visible in scrollback, not just as a row
+        that silently vanished."""
+        slot = _a()
+        item = drop_item(slot.pending, index)
+        if item is not None:
+            note = getattr(slot.sink, "note", None)
+            if note is not None:
+                note(f"removed from queue: {one_line(str(item), 60)}")
+            get_app().invalidate()
+
     def _panel_size(floor: int):
         """(cols, item-row cap) shared by a panel's fragment builder AND its
         ConditionalContainer height lambda — ONE size read so the rendered
@@ -1214,7 +1303,8 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                                remote=_sink_attr("remote_pending", []),
                                collapsed=slot.qp_ui["collapsed"],
                                toggle=_toggle_queue, max_items=cap,
-                               forward=_pane().forward_mouse)
+                               forward=_pane().forward_mouse,
+                               drop=_drop_at)
 
     # The LIVE pending-queue panel — pinned BETWEEN the output pane and the
     # input box; zero rows (hidden) while the queue is empty, so the empty
@@ -1378,7 +1468,13 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                 target.close_armed = True
                 note = getattr(target.sink, "note", None)
                 if note is not None:
-                    note("tab is busy — click ✕ again to close (the server-side run keeps going)")
+                    # 0.3.37: name the KEYBOARD paths too. Mouse reporting is
+                    # the one thing that is NOT universal (tmux/screen without
+                    # mouse on, some SSH clients, restrictive terminals), so
+                    # the confirm note doubles as the discovery point for the
+                    # two paths that work everywhere: Ctrl-W and /close.
+                    note("tab is busy — click ✕ again, or press Ctrl-W / type "
+                         "/close, to close it (the server-side run keeps going)")
                 get_app().invalidate()
                 return False
         if close_at(slots, idx, cancel_slot):
@@ -1410,6 +1506,11 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
     if ui_hooks is not None:
         ui_hooks["switch"] = _switch_to
         ui_hooks["close"] = _close_flow
+        # 0.3.37: `/queue edit <n>` needs the LIVE input buffer, which only the
+        # dock owns. Exposing the same `_pull_at` the panel's click-to-edit
+        # uses means the command path and the mouse path are literally one
+        # implementation -- no second buffer-handling code to drift.
+        ui_hooks["pull_queued"] = _pull_at
         # FIX3: the Home-spawned first turn seam — repl's `_home_input` uses
         # this so the NEW slot's turn is started through the SAME path a
         # normal Enter-idle submit uses (`slot.turn["task"]` actually gets

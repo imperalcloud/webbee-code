@@ -174,7 +174,7 @@ def _slot_ctx(slot: SessionSlot, *, logged_in: bool, slots=None) -> CommandConte
 # number the Home toolbar and dashboard show) instead of Home's own zeros.
 _HOME_GATED_ACTIONS = frozenset({
     "steps", "step_detail", "checkpoints", "rollback", "notify", "mode",
-    "queue", "queue_clear", "rename",
+    "queue", "queue_clear", "queue_drop", "queue_edit", "rename",
 })
 
 _HOME_GATE_NOTE = "open a session tab first — Ctrl+T or type a task"
@@ -437,6 +437,116 @@ def _resolve_agent_factory(agent_factory, bundle: dict):
     return lambda c, tp, ws, m: AgentSession(c, tp, ws, m, intel=bundle["intel"], shadow=bundle["shadow"])
 
 
+async def restore_tabs(workspace: str, slots, make_slot, *, sessions_fn=None,
+                       note=None, spawn_poller=None, limit: int = 0) -> int:
+    """Reopen the tabs remembered from the last run (0.3.37).
+
+    Closing the terminal used to be silently destructive: three tabs of live
+    work became one empty tab, and the still-Running Temporal workflows behind
+    them were reachable only by remembering what you had been doing. Now the
+    layout is remembered (`tab_store`), reconciled against what Temporal
+    actually still has Running (`active_sessions.plan_tab_restore`) and rebuilt
+    through the SAME `_make_session_slot` factory `/new` uses -- so a restored
+    tab is a completely ordinary tab, not a special second kind.
+
+    The FIRST session tab already exists when this runs (the boot builds it),
+    so the first remembered record is skipped: it is that tab. Each further
+    record becomes a real tab, labelled as it was, and told honestly whether it
+    re-attached to a live run or restored state only.
+
+    Best-effort by construction: a missing layout file, a gateway that cannot
+    list sessions, or a single tab that fails to build all degrade to "fewer
+    tabs restored", never to a failed boot. Returns how many tabs it opened.
+    """
+    from webbee.active_sessions import plan_tab_restore
+    from webbee.tab_store import load_tabs
+    opened = 0
+    try:
+        saved = load_tabs(workspace)
+    except Exception:
+        return 0
+    if len(saved) <= 1:
+        return 0            # nothing beyond the tab the boot already made
+    try:
+        sessions = await sessions_fn() if sessions_fn is not None else []
+    except Exception:
+        sessions = []       # no listing -> every tab restores state-only
+    plan = plan_tab_restore(saved, sessions)
+    live_n = 0
+    for rec in plan[1:]:
+        if limit and opened >= limit:
+            break
+        try:
+            slot = await make_slot(rec)
+        except Exception:
+            continue        # one bad tab must not cost the whole layout
+        if slot is None:
+            continue
+        label = str(rec.get("label") or "")
+        if label:
+            slot.label = label
+            slot.label_pinned = True
+        draft = str(rec.get("draft") or "")
+        if draft:
+            slot.draft = draft
+            slot.draft_cursor = len(draft)
+        slots.add(slot)
+        if spawn_poller is not None:
+            try:
+                spawn_poller(slot)
+            except Exception:
+                pass
+        opened += 1
+        if rec.get("attach"):
+            live_n += 1
+    if note is not None and opened:
+        try:
+            if live_n:
+                note(f"restored {opened} tab(s) — {live_n} still running server-side")
+            else:
+                note(f"restored {opened} tab(s) — their earlier runs have finished")
+        except Exception:
+            pass
+    return opened
+
+
+def snapshot_tabs(slots) -> list:
+    """Build the persistable tab layout from the LIVE slots (0.3.37).
+
+    SESSION tabs only -- Home is a fixture the dock always builds itself, so
+    persisting it would duplicate it on restore. The re-attach handle is the
+    agent's own `session_id` (the gateway id it streamed under); a tab that
+    never ran anything has none and restores as state-only. Reads defensively
+    (getattr with defaults) so a half-built slot during shutdown can never
+    turn saving the layout into a crash on exit.
+    """
+    from webbee.tab_store import tab_record
+    out = []
+    for slot in list(getattr(slots, "slots", []) or []):
+        if getattr(slot, "kind", "") == "home":
+            continue
+        agent = getattr(slot, "agent", None)
+        out.append(tab_record(
+            session_id=str(getattr(agent, "session_id", "") or ""),
+            label=str(getattr(slot, "label", "") or ""),
+            mode=str(getattr(slot, "mode", "default") or "default"),
+            workspace=str(getattr(slot, "workspace", "") or ""),
+            draft=str(getattr(slot, "draft", "") or ""),
+        ))
+    return out
+
+
+def _save_tab_layout(workspace: str, slots) -> None:
+    """Persist the tab layout, best-effort (0.3.37). Called on the way out of
+    the dock: losing the memory is a far smaller problem than failing to exit
+    cleanly, so EVERY error is swallowed -- same posture as mode_store."""
+    try:
+        from webbee.tab_store import save_tabs
+        save_tabs(workspace, snapshot_tabs(slots))
+    except Exception:
+        pass
+
+
 async def _note_reattach(cfg, token_provider, workspace, sink) -> None:
     """Boot reattach notice (T6.3, coding-remote flow perfection): best-
     effort, entirely swallowed on any failure -- same division of labor as
@@ -459,6 +569,44 @@ async def _note_reattach(cfg, token_provider, workspace, sink) -> None:
             sink.note(line)
     except Exception:
         pass
+
+
+async def _live_session_watch(cfg, token_provider, workspace, live: dict,
+                              invalidate=None, interval: float = 30.0,
+                              sessions_fn=None, sleep=None) -> None:
+    """Keep the toolbar's PERSISTENT live-session indicator honest (0.3.37).
+
+    The boot note fires once and scrolls away; this refreshes the indicator on
+    a slow cadence (default 30s -- it answers "is a workflow running", which
+    does not need per-second polling) so an accidental exit + reopen, or a
+    session that ends while you watch, is always reflected.
+
+    Writes ONLY into `live["text"]`, which `tui`'s toolbar reads every redraw:
+    no new UI ownership, no second source of truth. Fail-soft like every other
+    background poller here -- ANY error just leaves the previous value and
+    tries again next tick, and a gateway without the route means the indicator
+    stays empty (today's behaviour). `sessions_fn`/`sleep` are test seams.
+    """
+    from webbee.active_sessions import fetch_active_sessions, session_indicator
+    from webbee.repo import compute_repo_key, find_repo_root
+    _sleep = sleep or asyncio.sleep
+    fetch = sessions_fn or (lambda: fetch_active_sessions(cfg, token_provider))
+    try:
+        repo_key = await asyncio.to_thread(
+            lambda: compute_repo_key(find_repo_root(workspace)))
+    except Exception:
+        repo_key = ""
+    while True:
+        try:
+            sessions = await fetch()
+            text = session_indicator(sessions, repo_key)
+            if text != live.get("text"):
+                live["text"] = text
+                if invalidate is not None:
+                    invalidate()
+        except Exception:
+            pass
+        await _sleep(interval)
 
 
 async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: WorkspaceResources,
@@ -1080,6 +1228,33 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 # count follows on the sink's redraw below. (Home never
                 # reaches here -- "queue_clear" is in _HOME_GATED_ACTIONS.)
                 slot.pending.clear()
+            if res.action in ("queue_drop", "queue_edit"):
+                # 0.3.37 keyboard queue management. dispatch already validated
+                # the number against the SAME snapshot, but re-check here: the
+                # running turn can drain an item between the command and this
+                # line, and a stale index must never delete the wrong message.
+                idx = int(res.arg) - 1
+                if not (0 <= idx < len(slot.pending)):
+                    _say(slot, "that queued item just ran — nothing removed.")
+                    return "continue"
+                if res.action == "queue_drop":
+                    from webbee.queue_panel import drop_item as _drop_item
+                    item = _drop_item(slot.pending, idx)
+                    _say(slot, f"removed from queue: {item}")
+                else:
+                    # edit = move it OUT of the queue and INTO the input, so it
+                    # can never both sit in the queue AND still fire (the exact
+                    # bug ↑ had). Reuses the dock's own `_pull_at` -- the SAME
+                    # code the panel's click-to-edit runs -- so the live buffer
+                    # is filled correctly and `pulled` carries the steer_iid
+                    # for dedup. No dock (headless/tests) = honest no-op note.
+                    pull_fn = ui_hooks.get("pull_queued")
+                    if pull_fn is None:
+                        _say(slot, "editing a queued item needs the interactive dock.")
+                        return "continue"
+                    pull_fn(idx)
+                    _say(slot, "queued item moved into the input — edit it and press Enter.")
+                return "continue"
             if res.action == "clear":
                 # FIX4: works fully on Home too -- clears Home's OWN pane
                 # (there are no session counters to reset there, so only the
@@ -1260,6 +1435,19 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         agent = slots.active().agent
         if agent is not None:
             await agent.stop()
+
+    def _invalidate_dock() -> None:
+        """Ask the dock to redraw (0.3.37 live-session indicator). Fail-soft:
+        before the Application exists -- or in the headless fallback loop that
+        has no dock at all -- there is simply nothing to invalidate, and a
+        background poller must never die over a missing UI."""
+        try:
+            from prompt_toolkit.application.current import get_app_or_none
+            app = get_app_or_none()
+            if app is not None:
+                app.invalidate()
+        except Exception:
+            pass
 
     def _cancel_background() -> None:
         # Task 7: the actual walk moved to the module-level, directly-tested
@@ -1464,6 +1652,36 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 # is very likely already done (or well under way) by the
                 # time anyone actually switches to it.
                 home_slot.bg_tasks.append(asyncio.ensure_future(home.fill_home(home_slot, **home_fill_kwargs)))
+                # 0.3.37: keep the toolbar's live-session indicator fresh. Parked
+                # in Home's bg_tasks so the EXISTING teardown
+                # (_cancel_all_background) cancels it -- no new lifecycle to get
+                # wrong, and Home outlives every session tab.
+                # 0.3.37: reopen the tabs remembered from the last run, through
+                # the SAME factory /new uses. Awaited (not fire-and-forget) so
+                # the tab bar is already complete on the first frame instead of
+                # visibly popping in; every failure mode degrades to fewer tabs.
+                try:
+                    await restore_tabs(
+                        workspace, slots,
+                        lambda rec: _make_session_slot(
+                            cfg, token_provider,
+                            str(rec.get("workspace") or workspace),
+                            str(rec.get("mode") or mode), resources=resources,
+                            shared_client=shared_client, agent_factory=agent_factory,
+                            intel_factory=intel_factory, shadow_factory=shadow_factory,
+                            first=False, account=account),
+                        sessions_fn=lambda: __import__(
+                            "webbee.active_sessions", fromlist=["x"]
+                        ).fetch_active_sessions(cfg, token_provider),
+                        note=session_slot.sink.note if session_slot.sink else None,
+                        spawn_poller=_spawn_slot_poller)
+                except Exception:
+                    pass
+
+                _live_state: dict = {"text": ""}
+                home_slot.bg_tasks.append(asyncio.ensure_future(
+                    _live_session_watch(cfg, token_provider, workspace, _live_state,
+                                        invalidate=_invalidate_dock)))
 
                 async def _on_line(text: str, slot: SessionSlot) -> None:
                     if await _handle(text, slot) == "exit":
@@ -1519,8 +1737,15 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         on_switch=lambda idx: _schedule_home_refill(slots, idx, home_fill_kwargs),
                         on_new=lambda: _open_new_tab(),
                         on_paste=_on_paste,
+                        live=_live_state,
                     )
                 finally:
+                    # 0.3.37: remember the tab layout BEFORE teardown, while the
+                    # slots (and their agents' session ids) are still intact.
+                    # In `finally` so an accidental exit, Ctrl-D and a crash all
+                    # remember equally -- the whole point is that closing the
+                    # terminal stops being destructive.
+                    _save_tab_layout(workspace, slots)
                     _cancel_background()
                     # Part C: release the per-repo instance lock (if this
                     # process actually acquired one -- None on a secondary
@@ -1593,6 +1818,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             if await _handle(line, slots.active()) == "exit":
                 return
     finally:
+        _save_tab_layout(workspace, slots)   # 0.3.37, see the dock path above
         _cancel_background()
         if shared_client is not None:
             try:

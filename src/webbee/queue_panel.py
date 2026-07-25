@@ -68,6 +68,43 @@ def pull_item(pending, buf, index: int):
     return item
 
 
+def drop_item(pending, index: int):
+    """The ONE queue-REMOVE implementation (0.3.37) — serves the per-row ✕ in
+    the panel. Deletes pending[index] WITHOUT touching the input buffer, so
+    removing item #1 of 3 no longer forces you to pull it into the input just
+    to get rid of it (before this, the only exit from the queue was
+    `pull_item`, which is edit-the-line, hijacks the buffer and — bound to ↑ —
+    only ever reached the NEWEST row).
+
+    Guards mirror `pull_item`: a stale index (the queue drained between render
+    and click) is ignored rather than raising or eating the wrong row. Returns
+    the removed item, or None when nothing was removed.
+    """
+    if not (0 <= index < len(pending)):
+        return None
+    item = pending[index]
+    del pending[index]
+    return item
+
+
+def _drop_handler(drop, index: int, forward=None):
+    """One row's ✕ mouse handler: MOUSE_UP removes THAT queued item via
+    `drop(index)`. Same event discipline as `_item_handler` (MOUSE_UP only,
+    `forward` gets first refusal so a drag released here is not mistaken for
+    a click) — the difference is purely WHICH action fires, so a ✕ click can
+    never be confused with the row-body click that pulls for editing.
+    """
+    def _h(mouse_event):
+        from prompt_toolkit.mouse_events import MouseEventType
+        if forward is not None and forward(mouse_event):
+            return None
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            drop(index)
+            return None
+        return NotImplemented
+    return _h
+
+
 def _item_handler(pull, index: int, forward=None):
     """One row's mouse handler: MOUSE_UP (a click, not a drag/press) pulls
     THAT queued item into the input via `pull(index)`; every other event
@@ -109,7 +146,7 @@ def _toggle_handler(toggle, forward=None):
 
 def queue_fragments(pending, pull=None, width: int = 0, remote=None,
                      collapsed=False, toggle=None, max_items=QP_MAX_ITEMS,
-                     forward=None):
+                     forward=None, drop=None):
     """PURE builder: the panel as prompt_toolkit formatted text, re-invoked
     every redraw (same live mechanics as the toolbar) so every queue
     add/edit/drain shows at once. Layout, top→bottom = drain order (FIFO —
@@ -159,7 +196,9 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
     if collapsed:
         return frags
     if n:
-        frags.append(("class:qp.item", " · ↑ edit last · click to edit"))
+        hint = (" · ↑ edit last · click to edit · ✕ remove" if drop is not None
+                else " · ↑ edit last · click to edit")
+        frags.append(("class:qp.item", hint))
     rstart = max(0, len(rem) - max_items)
     if rstart:
         frags.append(("class:qp.remote", f"\n   … +{rstart} more"))
@@ -177,9 +216,17 @@ def queue_fragments(pending, pull=None, width: int = 0, remote=None,
         frags.append(("class:qp.item", f"\n   … +{start} more"))
     for i in range(start, n):
         style = "class:qp.last" if i == n - 1 else "class:qp.item"
-        row = "\n   " + one_line(items[i], width - 4 if width > 0 else 0)
+        # 0.3.37: reserve the ✕ column so the row text truncates BEFORE the
+        # button rather than shoving it off-screen on a narrow terminal.
+        avail = (width - 4 - (2 if drop is not None else 0)) if width > 0 else 0
+        row = "\n   " + one_line(items[i], avail)
         if pull is None:
             frags.append((style, row))
         else:
             frags.append((style, row, _item_handler(pull, i, forward)))
+        if drop is not None:
+            # Its OWN fragment + OWN handler: clicking ✕ removes the item,
+            # clicking the row body still pulls it for editing. Two adjacent
+            # targets, zero ambiguity.
+            frags.append(("class:qp.drop", " ✕", _drop_handler(drop, i, forward)))
     return frags

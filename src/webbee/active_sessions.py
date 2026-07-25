@@ -39,6 +39,85 @@ async def fetch_active_sessions(cfg, token_provider, *, client=None) -> list[dic
         return []
 
 
+def live_session_ids(sessions: list[dict]) -> set:
+    """PURE. The set of session ids the gateway currently reports as RUNNING.
+    One helper so the tab-restore reconciliation and the status indicator read
+    liveness from the SAME shape (0.3.37)."""
+    return {str(s.get("session_id") or "") for s in (sessions or [])
+            if str(s.get("session_id") or "")}
+
+
+def session_indicator(sessions: list[dict], repo_key: str) -> str:
+    """PURE. The PERSISTENT live-session indicator for the toolbar (0.3.37).
+
+    Before this, a running Temporal workflow was mentioned exactly once, in a
+    boot note that scrolled away -- so after an accidental exit and reopen the
+    terminal silently re-attached with nothing on screen ever confirming that
+    it had seen a running session, or that one existed at all.
+
+    Returns a SHORT string for the status line, or "" when there is nothing
+    to say (no running sessions at all -- silence is correct then, the dock
+    must not grow permanent noise):
+      * this repo has a live session      -> "● live"
+      * ...and it is parked on an approval -> "● live · needs approval"
+      * only OTHER repos have live ones    -> "○ 2 elsewhere"
+    Honest by construction: it reports what the gateway's Temporal listing
+    actually says, never a guess.
+    """
+    suffix = f"-r{repo_key}"
+    own, own_parked, others = False, False, 0
+    for s in (sessions or []):
+        sid = str(s.get("session_id") or "")
+        if not sid:
+            continue
+        if sid.endswith(suffix):
+            own = True
+            if s.get("pending_consent"):
+                own_parked = True
+        else:
+            others += 1
+    if own:
+        return "● live · needs approval" if own_parked else "● live"
+    if others:
+        return f"○ {others} elsewhere"
+    return ""
+
+
+def plan_tab_restore(saved: list, sessions: list[dict]) -> list:
+    """PURE. Reconcile the REMEMBERED tab layout (tab_store.load_tabs) against
+    the sessions Temporal reports as Running, and decide per tab what reopening
+    it means (0.3.37).
+
+    Each returned dict is the saved record plus:
+      * `attach`: True  -> its workflow is STILL RUNNING; the tab must re-attach
+                           and pick the live run up where it left off.
+        `attach`: False -> nothing is running under that id any more; restore
+                           the tab's state (label/mode/draft) only.
+      * `pending_consent`: carried through from the live listing so a restored
+        tab can immediately show it is parked on an approval.
+
+    A saved tab with no session_id is legal (a tab you never sent anything in)
+    and simply restores as state-only. Never raises; unknown/extra keys on the
+    saved record are ignored rather than trusted.
+    """
+    live = {}
+    for s in (sessions or []):
+        sid = str(s.get("session_id") or "")
+        if sid:
+            live[sid] = s
+    out = []
+    for rec in (saved or []):
+        if not isinstance(rec, dict):
+            continue
+        sid = str(rec.get("session_id") or "")
+        s = live.get(sid)
+        item = dict(rec)
+        item["attach"] = bool(sid and s is not None)
+        item["pending_consent"] = bool((s or {}).get("pending_consent"))
+        out.append(item)
+    return out
+
+
 def boot_reattach_notice(sessions: list[dict], repo_key: str) -> list[str]:
     """Decide what, if anything, to tell the user about their OTHER running
     sessions once THIS terminal's own boot replay has finished. `sessions`

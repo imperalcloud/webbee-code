@@ -5161,7 +5161,8 @@ def test_ui_hooks_filled_with_switch_and_close_routing_through_the_real_flow():
                 task = asyncio.create_task(tui.run_session(
                     slots=slots, on_line=on_line, on_cycle=lambda: None, ui_hooks=ui_hooks))
                 await asyncio.sleep(0.05)
-                assert set(ui_hooks) == {"switch", "close", "start_turn_in", "start_attach_in"}
+                assert set(ui_hooks) == {"switch", "close", "start_turn_in", "start_attach_in",
+                                         "pull_queued"}
                 assert ui_hooks["close"]() is False          # Home guarded -- no-op
                 assert len(slots.slots) == 2
 
