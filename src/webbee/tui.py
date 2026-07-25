@@ -294,7 +294,11 @@ def pin_version_right(frags: list, version: str, width: int) -> list:
         column of real content. The status line is DATA, the version is
         decoration -- decoration never truncates data.
       * Padding is exact (``width - used - len(badge)``) so the badge lands
-        flush right with no trailing column, and can never wrap to row two.
+        hard against the right edge and can never wrap to row two. The badge
+        itself (``version_badge_text``) carries ONE trailing space, so the
+        text stops one column short of the final cell: that mirrors the
+        toolbar's own left indent, and deliberately avoids writing into the
+        very last cell, which some terminals treat as an auto-wrap trigger.
     """
     if not width or width <= 0:
         return frags
