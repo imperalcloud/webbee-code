@@ -200,6 +200,12 @@ def set_slot_mode(slot: SessionSlot, mode: str) -> None:
     save_mode(slot.workspace, mode)
 
 
+# Strong refs for in-flight autopilot confirms (see _on_mode). A module-level
+# set is safe here: entries are removed by their own done-callback, and it is
+# never read as state -- purely GC ballast.
+_CONFIRM_TASKS: set = set()
+
+
 def _on_mode(slot: SessionSlot, mode: str, surface: str) -> None:
     """Remote coding-mode request (TG/panel → gateway one-shot req_mode →
     the pending-steer poll). AUTOPILOT SAFE ASYMMETRY (Valentin-chosen): a
@@ -225,7 +231,19 @@ def _on_mode(slot: SessionSlot, mode: str, surface: str) -> None:
         set_slot_mode(slot, mode)
         _say(slot, f"mode → {mode} [{surface}]")
         return
-    asyncio.ensure_future(_confirm_autopilot(slot, surface))
+    # Keep a STRONG reference until the confirm finishes: asyncio only holds a
+    # weak one, so a bare ensure_future() can be garbage-collected mid-await
+    # and the autopilot prompt would vanish silently, leaving the user's remote
+    # upgrade request unanswered with no trace in the transcript.
+    #
+    # Deliberately NOT slot.bg_tasks: everything parked there is cancelled by
+    # the slot-close/exit teardown, and this confirm must be allowed to COMPLETE
+    # (the local yes/no is the security gate for the whole upgrade -- see
+    # _confirm_autopilot). The task removes itself via the done callback, so the
+    # set cannot grow without bound.
+    _t = asyncio.ensure_future(_confirm_autopilot(slot, surface))
+    _CONFIRM_TASKS.add(_t)
+    _t.add_done_callback(_CONFIRM_TASKS.discard)
 
 
 async def _confirm_autopilot(slot: SessionSlot, surface: str) -> None:

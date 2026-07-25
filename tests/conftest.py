@@ -37,3 +37,21 @@ def _isolate_newtab_mode_cache(tmp_path, monkeypatch):
     real cache; keep every test hermetic)."""
     import webbee.newtab_mode as newtab_mode
     monkeypatch.setattr(newtab_mode, "_CACHE_DIR", str(tmp_path / "webbee-newtab-cache"))
+
+
+@pytest.fixture(autouse=True)
+def _reset_mode_store_repo_key_cache():
+    """2026-07-25: `mode_store._KEY_CACHE` memoises repo_key per workspace so
+    Shift-TAB stops paying for a `git remote get-url` on every mode switch
+    (~13ms -> ~0.2ms). It is process-global by design -- a workspace's git
+    remote cannot change under a running dock -- but in a TEST process it
+    would outlive the test that filled it, so a later test that patches
+    `compute_repo_key` for the SAME workspace path would silently read the
+    earlier test's key. Today every test uses a `tmp_path`-unique workspace,
+    so nothing collides; clearing it around each test makes that hold BY
+    CONSTRUCTION instead of by luck.
+    """
+    import webbee.mode_store as mode_store
+    mode_store._KEY_CACHE.clear()
+    yield
+    mode_store._KEY_CACHE.clear()

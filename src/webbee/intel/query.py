@@ -69,7 +69,15 @@ def _lexical_search(svc, q, kind, path_glob, items_by_id: dict) -> list[str]:
 
 
 def _chunk_item(svc, cid: str, score: float) -> dict | None:
-    """Map an embed-chunk id ('<path>#<start>-<end>') back to a search item.
+    """Map an embed-chunk id back to a search item.
+
+    Id shape is '<path>#<start>-<end>:<kind>:<symbol>' (chunker._mk). The
+    ':<kind>:<symbol>' tail was added 2026-07-25 to make ids unique -- see
+    chunker._mk -- so the line range is only the part BEFORE the first ':'.
+    Ids written by an older cache have no tail at all, hence the partition
+    (not a required split): both shapes parse, and a schema bump means the
+    old ones are normally gone anyway.
+
     Title/kind = the enclosing symbol's when the graph has one covering the
     chunk's line range, else the bare '<path>:<start>' / 'chunk' fallback --
     a hardcoded kind="chunk" would make every vector hit invisible to a
@@ -77,6 +85,7 @@ def _chunk_item(svc, cid: str, score: float) -> dict | None:
     if "#" not in cid or "-" not in cid.rpartition("#")[2]:
         return None
     path, _, rng = cid.rpartition("#")
+    rng = rng.partition(":")[0]          # drop the ':<kind>:<symbol>' tail
     start_s, end_s = rng.split("-", 1)
     try:
         start, end = int(start_s), int(end_s)

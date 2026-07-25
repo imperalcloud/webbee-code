@@ -65,6 +65,7 @@ class OutputPane:
         self._follow = True                # stick to the tail unless the user scrolled up
         self._sel = None                   # (abs_start, abs_end) during a drag → live highlight
         self._edge_drag = 0                # +1/-1 while dragging at the bottom/top edge, else 0
+        self._resize_pending = 0           # width seen but not yet reflowed (tui._width_watch debounce)
         self._edge_ticks = 0                # consecutive edge_tick()s since the last drag MOUSE_MOVE
         self._plain_cache = (0, [""])      # (write-pos, ANSI-stripped lines) for select/highlight
         self.copy_flash = ""               # transient toolbar note after a copy

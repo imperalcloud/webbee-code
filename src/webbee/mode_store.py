@@ -28,9 +28,33 @@ from webbee.repo import compute_repo_key, find_repo_root
 _CACHE_DIR = os.path.expanduser("~/.cache/webbee")   # test seam: monkeypatch this name
 
 
+# repo_key is derived from `git remote get-url origin` (compute_repo_key,
+# timeout=5) -- measured ~11ms per call on a warm local repo, worst case the
+# full 5s on a repo whose git call hangs. It is also INVARIANT for the life of
+# the process: a workspace's git remote does not change under a running dock.
+# Every OTHER caller already keeps that subprocess off the event loop via
+# asyncio.to_thread (repl.py's boot paths), but save_mode is reached
+# SYNCHRONOUSLY from the Shift-TAB key binding (tui `_cycle` ->
+# repl.set_slot_mode -> save_mode), i.e. straight on the event loop, where it
+# froze the dock on every single mode switch.
+#
+# Memoising per workspace fixes that for every switch after the first: the
+# repeat cost is a dict lookup. The first call in a process still pays, which
+# is acceptable because boot's own load_mode already warms this cache off-loop
+# before any key can be pressed.
+_KEY_CACHE: dict[str, str] = {}
+
+
+def _repo_key_for(workspace: str) -> str:
+    key = _KEY_CACHE.get(workspace)
+    if key is None:
+        key = compute_repo_key(find_repo_root(workspace))
+        _KEY_CACHE[workspace] = key
+    return key
+
+
 def _path_for(workspace: str) -> str:
-    repo_key = compute_repo_key(find_repo_root(workspace))
-    return os.path.join(_CACHE_DIR, f"mode-{repo_key}")
+    return os.path.join(_CACHE_DIR, f"mode-{_repo_key_for(workspace)}")
 
 
 def load_mode(workspace: str) -> "str | None":

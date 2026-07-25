@@ -18,7 +18,12 @@ from webbee.intel.models import ProjectIndex, FileIndex, Symbol
 # extra) can still import this whole module (index.json save/load, the
 # graph plane) with no numpy on the system at all.
 
-SCHEMA_VERSION = 2
+# 3 (2026-07-25): chunk ids gained a ":{kind}" suffix (chunker._mk) to fix a
+# collision that silently disabled code intel. Every cached `ids` list from
+# schema 2 holds the OLD id format, so both the index and the vector cache
+# must be treated as a clean miss and rebuilt -- bumping the version is what
+# makes load()/load_vectors() do exactly that.
+SCHEMA_VERSION = 3
 
 
 def _path(cache_dir: str, repo_key: str) -> str:

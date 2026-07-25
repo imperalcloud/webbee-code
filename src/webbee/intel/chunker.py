@@ -27,8 +27,31 @@ def _hash(text: str) -> str:
 
 
 def _mk(path: str, symbol: str, kind: str, s: int, e: int, lines: list[str]) -> Chunk:
+    """Build one chunk. The id MUST be unique across everything chunk_index
+    yields, because it is the primary key in BOTH VectorStore._pos and
+    IntelService._chunk_hashes.
+
+    path+line-span alone is NOT unique: a symbol longer than
+    _CHUNK_MAX_LINES is split by `_windows` into windows that step by
+    (_WINDOW_LINES - _WINDOW_OVERLAP), and such a window can land on exactly
+    the span of a trailing nested symbol -- e.g. a class spanning 1..61 has
+    its last window at 51..61, and a method spanning 51..61 then produced the
+    SAME id ("path#51-61"). Two consequences, both silent:
+      * VectorStore.add took its "id already known" branch and wrote
+        _mat[pos] while _mat was still the empty (0, dim) array -> IndexError
+        -> boot.start_intel swallowed it -> code intel OFF for the session;
+      * _chunk_hashes collapsed both chunks onto one hash entry, so an
+        incremental re-embed could skip a genuinely changed chunk.
+    `kind` alone is not enough either: an outer symbol and a long nested one
+    can BOTH be windowed (kind="chunk" for each) and a window of each can
+    cover the same span -- observed on real dependency code, e.g. jinja2's
+    `Environment` vs its `__init__` both yielding "environment.py#294-353".
+    So the id carries `kind` AND `symbol`, which is what actually
+    distinguishes them. The id stays deterministic across runs -- stability
+    matters because apply_changes diffs chunk ids to decide what to re-embed.
+    """
     text = "\n".join(lines[s - 1:e])
-    return Chunk(id=f"{path}#{s}-{e}", symbol=symbol, kind=kind, path=path,
+    return Chunk(id=f"{path}#{s}-{e}:{kind}:{symbol}", symbol=symbol, kind=kind, path=path,
                  start_line=s, end_line=e, text=text, content_hash=_hash(text))
 
 

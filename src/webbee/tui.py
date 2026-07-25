@@ -201,26 +201,54 @@ def _width_watch(pane, app) -> None:
     SIGWINCH by itself, but the RICH side (console width) must be told to
     re-wrap — this is the bridge. Two int compares when nothing changed.
     Swallows any reflow error — the ticker is the dock's only animation
-    loop (spinner + queue drains ride on it too) and must never die."""
+    loop (spinner + queue drains ride on it too) and must never die.
+
+    DEBOUNCED (2026-07-25): `pane.reflow` re-renders the whole retained ring,
+    which is linear in records (~29µs each — ~116ms at the 4000-record cap)
+    and runs ON the event loop, so the dock is frozen for its whole duration.
+    Reflowing on the FIRST tick that sees a new width meant a slow drag-resize
+    paid that cost once per intermediate width the ticker happened to sample
+    (measured: 5 samples ≈ 535ms of cumulative freeze) — and every one of
+    those reflows was thrown away by the next sample anyway.
+
+    So a changed width is only REMEMBERED on the tick that first sees it; the
+    reflow fires on the next tick that reads the SAME width, i.e. once the
+    user stops dragging. `_resize_pending` lives on the pane (not module
+    state) so each tab debounces its own resize independently, and
+    `_ticker_busy` treats a pending resize as busy so the settle happens at
+    the fast 0.25s cadence instead of the 1.0s idle one."""
     from webbee.sizing import get_size
     cols, _rows = get_size(app)
-    if cols and cols != pane.console.width:
+    if not cols:
+        return
+    pending = getattr(pane, "_resize_pending", 0)
+    if cols != pane.console.width:
+        if cols != pending:
+            pane._resize_pending = cols     # still moving — settle next tick
+            return
+        pane._resize_pending = 0
         try:
             pane.reflow(cols)
         except Exception:
             pass
+    elif pending:
+        pane._resize_pending = 0            # snapped back to the current width
 
 
 def _ticker_busy(slots, is_busy) -> bool:
     """Whether the dock's animation loop must stay at the FAST (0.25s) cadence:
-    a turn is running, a copy-flash toast is live, OR an edge-drag auto-scroll
-    is in flight (`pane._edge_drag` — a drag-select past the viewport edge that
-    `pane.edge_tick()` keeps scrolling every tick). All three need smooth ~4x/s
-    updates; miss the edge-drag one and idle drag-scrolling crawls 4x slower.
-    Otherwise the loop is idle → the caller uses the slow 1.0s cadence."""
+    a turn is running, a copy-flash toast is live, an edge-drag auto-scroll is
+    in flight (`pane._edge_drag` — a drag-select past the viewport edge that
+    `pane.edge_tick()` keeps scrolling every tick), OR a debounced resize is
+    waiting to settle (`pane._resize_pending`, see `_width_watch`). All of them
+    need smooth ~4x/s updates; miss the edge-drag one and idle drag-scrolling
+    crawls 4x slower, miss the resize one and a re-wrap after a drag lands up
+    to a full second late. Otherwise the loop is idle → the caller uses the
+    slow 1.0s cadence."""
     try:
         pane = slots.active().pane
-        if bool(pane.flash()) or bool(getattr(pane, "_edge_drag", 0)):
+        if (bool(pane.flash()) or bool(getattr(pane, "_edge_drag", 0))
+                or bool(getattr(pane, "_resize_pending", 0))):
             return True
     except Exception:
         pass
@@ -865,18 +893,31 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             pane.flash_note("📎 open a session tab to paste a file")
             event.app.invalidate()
             return
-        item = read_clipboard(_t.strftime("%Y%m%d-%H%M%S", _t.gmtime()))
-        if item is None:
-            pane.flash_note("clipboard is empty")
-            event.app.invalidate()
-            return
-        if item.kind == "text":
-            buf.insert_text(item.data)
-            return
-        pane.flash_note(f"📎 uploading {item.name}…", secs=30.0)
-        event.app.invalidate()
+        # read_clipboard() shells out to the platform clipboard tool
+        # (osascript+pbpaste on macOS, xclip/wl-paste on Linux) with a 2s
+        # timeout EACH. Measured on this host: 83.7ms for a plain-text
+        # clipboard (73.5 osascript + 10.1 pbpaste), and up to ~4s if both
+        # timeouts are hit. Running that inline froze the whole dock -- no
+        # repaint, no spinner, no keystrokes -- for the duration, because a
+        # key binding runs ON the event loop. So it moves to a worker thread;
+        # `slot`/`pane` are already captured synchronously above (same
+        # discipline as _run_turn), so the paste lands on the tab that was
+        # active when the key was pressed even if the user switches tabs
+        # mid-read.
+        stamp = _t.strftime("%Y%m%d-%H%M%S", _t.gmtime())
 
         async def _do_paste():
+            item = await asyncio.to_thread(read_clipboard, stamp)
+            if item is None:
+                pane.flash_note("clipboard is empty")
+                event.app.invalidate()
+                return
+            if item.kind == "text":
+                buf.insert_text(item.data)
+                event.app.invalidate()
+                return
+            pane.flash_note(f"📎 uploading {item.name}…", secs=30.0)
+            event.app.invalidate()
             ref = ""
             try:
                 ref = await on_paste(slot.workspace, item.name, item.data)

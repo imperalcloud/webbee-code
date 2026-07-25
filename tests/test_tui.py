@@ -1467,12 +1467,18 @@ def test_ticker_width_watch_triggers_reflow(monkeypatch):
 
     monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
     pane = _Pane(100)
+    # DEBOUNCED 2026-07-25: the tick that first SEES a new width only records
+    # it; the reflow fires on the next tick that reads the SAME width (i.e.
+    # once a drag-resize has settled). See tui._width_watch.
     _width_watch(pane, object())
-    assert pane.calls == [72]
+    assert pane.calls == []            # tick 1: width remembered, not applied
+    _width_watch(pane, object())
+    assert pane.calls == [72]          # tick 2: settled -> reflow
 
     same = _Pane(72)
     _width_watch(same, object())
-    assert same.calls == []
+    _width_watch(same, object())
+    assert same.calls == []            # unchanged width never reflows
 
 
 def test_ticker_width_watch_swallows_reflow_error(monkeypatch):
@@ -1517,11 +1523,19 @@ def test_tick_once_fires_width_watch_edge_tick_and_invalidate(monkeypatch):
             calls["invalidate"] += 1
 
     monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
-    _tick_once(mk_slots(pane=_Pane()), _App(), lambda: True)
+    slots = mk_slots(pane=_Pane())
+    app = _App()
+    _tick_once(slots, app, lambda: True)
+    # tick 1 records the width (debounce, see tui._width_watch); everything
+    # else on the tick still runs.
+    assert calls["reflow"] == []
+    assert calls["edge_tick"] == 1
+    assert calls["invalidate"] == 1
 
-    assert calls["reflow"] == [72]     # _width_watch fired (resize bridge)
-    assert calls["edge_tick"] == 1     # pane.edge_tick() fired
-    assert calls["invalidate"] == 1    # is_busy() True -> app.invalidate() fired
+    _tick_once(slots, app, lambda: True)
+    assert calls["reflow"] == [72]     # _width_watch fired once settled
+    assert calls["edge_tick"] == 2     # pane.edge_tick() fires every tick
+    assert calls["invalidate"] == 2    # is_busy() True -> app.invalidate()
 
 
 def test_tick_once_swallows_edge_tick_error(monkeypatch):
@@ -1580,14 +1594,18 @@ def test_tick_once_drives_the_active_slots_pane_after_a_switch(monkeypatch):
 
     monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
     app = _App()
+    # two ticks per pane: the resize debounce applies the reflow on the
+    # second tick that sees the same width (tui._width_watch).
     _tick_once(slots, app, lambda: False)
-    assert pane_a.reflow_calls == [72] and pane_a.edge_ticks == 1
+    _tick_once(slots, app, lambda: False)
+    assert pane_a.reflow_calls == [72] and pane_a.edge_ticks == 2
     assert pane_b.reflow_calls == [] and pane_b.edge_ticks == 0   # B untouched while A active
 
     slots.active_idx = 1                                          # switch to B
     _tick_once(slots, app, lambda: False)
-    assert pane_b.reflow_calls == [72] and pane_b.edge_ticks == 1  # NOW B is driven
-    assert pane_a.reflow_calls == [72] and pane_a.edge_ticks == 1  # A untouched further
+    _tick_once(slots, app, lambda: False)
+    assert pane_b.reflow_calls == [72] and pane_b.edge_ticks == 2  # NOW B is driven
+    assert pane_a.reflow_calls == [72] and pane_a.edge_ticks == 2  # A untouched further
 
 
 # ── W2 Task 5: input_rows — the pure estimator behind _input_height ─────────

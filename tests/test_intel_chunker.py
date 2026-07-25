@@ -17,7 +17,9 @@ def _idx(tmp_path):
 def test_symbol_boundary_chunk(tmp_path):
     chunks = chunker.chunk_index(str(tmp_path), _idx(tmp_path))
     alpha = next(c for c in chunks if c.symbol == "alpha")
-    assert alpha.id == "a.py#3-4" and alpha.kind == "function"
+    # id gained a ':<kind>:<symbol>' tail 2026-07-25 (chunker._mk) so that a
+    # class window and a nested symbol covering the same span stay distinct.
+    assert alpha.id == "a.py#3-4:function:alpha" and alpha.kind == "function"
     assert "return x + 1" in alpha.text
     assert len(alpha.content_hash) == 64
 
