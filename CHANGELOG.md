@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.37
+
+Your tabs come back, the queue does what you tell it, and the version sits
+where you asked for it.
+
+- **Closing the terminal no longer throws your work away.** Three tabs of live
+  work used to become one empty tab on the next start. Your layout is
+  remembered per repo and restored on boot — and it is reconciled against what
+  is *actually* still running, so a tab that really ended comes back as a
+  labelled tab rather than a dead one pretending to be alive. An accidental
+  exit, Ctrl-D and a crash all remember equally. Autopilot is deliberately
+  never remembered: a mode that acts on its own has to be turned on each time.
+- **A queue you can actually manage.** Every queued line now has its own **✕**,
+  so you can remove *any* item — previously the only way out was ↑, which
+  hijacked your input and could only ever reach the newest row, leaving item 1
+  of 3 stuck. `/queue drop N` and `/queue edit N` do the same from the keyboard
+  when your terminal reports no mouse. Editing an item *removes* it from the
+  queue as it moves into your input, so a line can never both sit in the queue
+  and still fire.
+- **Version badge, bottom-right of the window.** Pinned to the corner of the
+  whole window rather than floating inside the toolbar's content. On a narrow
+  terminal the badge is dropped instead of truncating real information.
+- **A live-session indicator that keeps telling you the truth.** The old boot
+  note fired once and scrolled away. The toolbar now shows "● live",
+  "● live · needs approval" or "○ N elsewhere", refreshed every 30 seconds from
+  what the server actually reports — and it stays empty when nothing is
+  running, so an idle dock gains no permanent noise.
+- **✕, Ctrl+W and `/close` all really do close a tab** — they always shared one
+  teardown path; what was missing was saying so, and the busy-close note now
+  names all three ways out.
+- Fixed two latent crashes that would only have fired on a click (a queue panel
+  and a row renderer were each used without being imported).
+
 ## 0.3.36
 
 Write on more than one line, and see what a session actually costs.
