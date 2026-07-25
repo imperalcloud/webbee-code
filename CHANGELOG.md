@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.36
+
+Write on more than one line, and see what a session actually costs.
+
+- **New line inside your prompt.** Press **Alt+Enter** — or **Shift+Enter** on
+  a modern terminal, or **Ctrl+J** anywhere at all — to add a line without
+  sending. Enter still sends, exactly as before. Three chords because no single
+  one is available in every terminal: whichever your setup supports, one of
+  them works. Continuation lines are marked with a dim ┊ gutter, so a
+  half-written message never looks like something already sent. Pasting
+  multi-line text now keeps its line breaks instead of firing off each line.
+- **Spend is visible from every tab.** The status line at the bottom shows the
+  tokens and credits used in this session, in every tab. Home — which has no
+  session of its own — shows the running TOTAL across all your open tabs, both
+  in its status line and in the Wallet tile ("spent this session").
+- **Version and freshness, bottom right of Home.** Your Webbee version sits in
+  the bottom-right corner. It says "up to date" only when we actually managed
+  to check; when we could not reach the release server it shows the plain
+  version rather than a reassurance we cannot back up. A newer release is
+  called out in bee-yellow with the version to upgrade to.
+- **`/login` now works on Home.** Previously `/login`, `/logout`, `/sessions`,
+  `/logout-others` and `/cost` only worked in a session tab, which made no
+  sense — they act on your account, not on a session. They all work on Home
+  now, and Home shows a "Sign in to Imperal" button when you are signed out
+  instead of a blank space. `/cost` on Home reports the whole session's total.
+- `/help` lists the keyboard shortcuts, including the new-line chords.
+
 ## 0.3.35
 
 Reliability and speed of the terminal itself.

@@ -181,13 +181,17 @@ async def fill_home(slot, *, cfg, token_provider, slots, account_fetcher,
         try:
             from pathlib import Path
 
-            from webbee.update import check_for_update, default_fetch
+            from webbee.update import check_update_status, default_fetch
             cache = Path(os.path.expanduser("~/.cache/webbee/update.json"))
-            data.update_notice = await asyncio.to_thread(
-                check_for_update, version, cache_path=cache, now=time.time(),
-                fetch=default_fetch) or ""
+            # 0.3.36: the (notice, checked) variant -- Home's version badge
+            # only claims "up to date" when the check actually resolved a
+            # latest version; offline shows the bare version, no false claim.
+            data.update_notice, data.update_checked = await asyncio.to_thread(
+                check_update_status, version, cache_path=cache, now=time.time(),
+                fetch=default_fetch)
         except Exception:
             data.update_notice = ""
+            data.update_checked = False
         _repaint()
     finally:
         slot._last_fill = time.monotonic()

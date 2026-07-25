@@ -64,6 +64,9 @@ class HomeData:
     endpoint: str = ""
     version: str = ""
     update_notice: str = ""
+    # 0.3.36: did the freshness check actually COMPLETE? False = we could not
+    # reach PyPI (offline/timeout), so the footer must not claim "up to date".
+    update_checked: bool = False
     notice: str = ""             # transient one-line note (top-up/security URL)
 
 
@@ -90,6 +93,11 @@ class HomeActions:
     set_new_tab_mode: "Callable[[str], None]"
     top_up: "Callable[[], None]"
     open_security_docs: "Callable[[], None]"
+    # 0.3.36 -- signing in is now possible FROM Home (/login was un-gated), so
+    # the dashboard offers it as a real action instead of leaving a bare "…"
+    # where the account should be. Optional: None -> the item is not offered
+    # (every pre-0.3.36 caller/test keeps working unchanged).
+    sign_in: "Callable[[], None] | None" = None
 
 
 class HomeModel:
@@ -159,9 +167,62 @@ def _cycle(options, current: str, delta: int) -> str:
     return options[(i + delta) % len(options)]
 
 
+def version_badge(version: str, update_notice: str = "", checked: bool = True) -> "tuple[str, str]":
+    """(text, style_class) for Home's bottom-right version badge (0.3.36).
+
+    THREE honest states, never a fake reassurance:
+      * a newer release is known   -> "v0.3.35 → 0.3.36 available" (accent)
+      * checked, nothing newer     -> "v0.3.36 · up to date"       (dim)
+      * not checked (offline/first run, `checked=False`) -> "v0.3.36"
+        with NO freshness claim at all -- we do not say "up to date" when we
+        could not reach PyPI.
+
+    `update_notice` is `update.check_for_update`'s own sentence; the newer
+    version is parsed out of it for the compact badge and the full upgrade
+    command stays in the Settings tile, so the footer never wraps.
+    """
+    v = (version or "").strip()
+    vtxt = f"v{v}" if v else "v?"
+    notice = (update_notice or "").strip()
+    if notice:
+        latest = ""
+        for tok in notice.replace("—", " ").split():
+            if tok.startswith("v") and tok[1:2].isdigit():
+                latest = tok[1:]
+        return ((f"{vtxt} → {latest} available" if latest else f"{vtxt} · update available"),
+                "class:home.update")
+    if checked:
+        return (f"{vtxt} · up to date", "class:home.fresh")
+    return (vtxt, "class:home.dim")
+
+
 def two_column(width: int, threshold: int = 100) -> bool:
     """Wide terminal -> You + Wallet render side-by-side; narrow -> stacked."""
     return width >= threshold
+
+
+def session_totals(slots) -> "tuple[int, int]":
+    """(tokens, credits) summed across EVERY open session tab (0.3.36).
+
+    Home has no sink of its own, so "what has this session cost me?" can only
+    be answered by adding up the live per-tab counters. Pure + total: any slot
+    whose sink is missing or whose status() misbehaves contributes 0 rather
+    than breaking the toolbar, and Home's own sink-less slot is skipped
+    naturally (no sink -> no numbers). Reuses tab_rows so the numbers on Home
+    and in the toolbar can never disagree.
+    """
+    tokens = credits = 0
+    try:
+        rows = tab_rows(slots)
+    except Exception:
+        return (0, 0)
+    for r in rows:
+        try:
+            tokens += int(r.tokens or 0)
+            credits += int(r.credits or 0)
+        except (TypeError, ValueError):
+            pass
+    return (tokens, credits)
 
 
 def tab_rows(slots) -> "list[TabRow]":
@@ -196,6 +257,16 @@ def build_home_model(data: "HomeData", tabs: "list[TabRow]",
     per live session (spec §5). New-tab mode / top-up / security are always
     enabled (they need no live session)."""
     items: "list[ActionItem]" = []
+
+    # Signed out? Then signing in is THE next step -- offer it first, before
+    # anything that would just fail without an account (0.3.36).
+    acct = getattr(data, "account", None)
+    signed_in = bool(getattr(acct, "signed_in", False)) if acct is not None else False
+    if not signed_in and actions.sign_in is not None:
+        items.append(ActionItem(
+            id="sign-in", label="→ Sign in to Imperal",
+            hint="sign in with your browser (same as typing /login)",
+            activate=actions.sign_in))
 
     items.append(ActionItem(
         id="new-session", label="+ New session",
@@ -489,6 +560,13 @@ class HomeView:
             a = self.data.account
             L = [hdr("You")]
             if a is None or not getattr(a, "signed_in", False):
+                # Not signed in (or not fetched yet): say so plainly and offer
+                # the fix right here (0.3.36) instead of an opaque "…".
+                if "sign-in" in by_id:
+                    it = by_id["sign-in"]
+                    return L + [[("class:home.dim", "  not signed in")],
+                                [("class:home.dim", "  "), act(it, "→ Sign in to Imperal")],
+                                [("class:home.dim", "  or type /login")]]
                 return L + [[("class:home.dim", "  …")]]
             nick = getattr(a, "nickname", "") or ""
             L.append([("class:home.value", f"  @{nick}" if nick else "  (no nickname)")])
@@ -516,7 +594,16 @@ class HomeView:
                 L.append([("class:home.dim", "  credits —")])
             else:
                 cap = f" / {_fmt_tokens(w.cap)}" if w.cap else ""
-                L.append([("class:home.value", f"  {_fmt_tokens(w.balance)}{cap} credits")])
+                L.append([("class:home.value", f"  {_fmt_tokens(w.balance)}{cap} credits"),
+                          ("class:home.dim", "  left")])
+            # This session's TOTAL spend across every open tab (0.3.36) --
+            # Home is the summary page, so the figure belongs here and not
+            # only in each tab's own toolbar. Same `session_totals` the
+            # toolbar uses, so the two can never disagree.
+            stk, scr = session_totals(self.slots)
+            L.append([("class:home.dim", "  spent this session  "),
+                      ("class:home.spend", f"{_fmt_tokens(scr)} credits"),
+                      ("class:home.dim", f"  ({_fmt_tokens(stk)} tokens)")])
             it = by_id["top-up"]
             L.append([("class:home.dim", "  "), act(it, "Top up credits")])
             return L
@@ -594,9 +681,22 @@ class HomeView:
             L = [[("", "")], [("class:home.hint", f"  {hint}")]]
             if self.data.notice:
                 L.append([("class:home.dim", f"  {self.data.notice}")])
-            L.append([("class:home.dim",
-                       "  ↑↓ move · ↵ open · ←→ change "
-                       "· Ctrl+T new tab · Alt+N switch")])
+            # Key legend on the LEFT, version badge hard-right on the SAME row
+            # (0.3.36) -- the bottom-right corner of Home, as asked. When the
+            # window is too narrow to hold both, the badge drops to its own
+            # right-aligned row instead of being truncated.
+            keys = ("  ↑↓ move · ↵ open · ←→ change "
+                    "· Alt+↵ newline · Ctrl+T new tab · Alt+N switch")
+            btxt, bstyle = version_badge(self.data.version, self.data.update_notice,
+                                         checked=self.data.update_checked)
+            pad = width - len(keys) - len(btxt) - 2
+            if pad >= 1:
+                L.append([("class:home.dim", keys), ("", " " * pad),
+                          (bstyle, btxt), ("", "  ")])
+            else:
+                L.append([("class:home.dim", keys)])
+                rpad = max(0, width - len(btxt) - 2)
+                L.append([("", " " * rpad), (bstyle, btxt), ("", "  ")])
             return L
 
         # No center title — the tab bar's ◆ Home chip already names the tab,

@@ -126,36 +126,98 @@ def _gate_busy(sink, turn_ref: dict) -> bool:
     return bool(cp and cp())
 
 
-def _slot_ctx(slot: SessionSlot, *, logged_in: bool) -> CommandContext:
+def _slot_ctx(slot: SessionSlot, *, logged_in: bool, slots=None) -> CommandContext:
     """Pure extraction of the ACTIVE slot's fields into a CommandContext
     (W4a boot split, map §6): `state["mode"]`/`state["git_branch"]` are gone
     -- mode/git_branch/the type-ahead queue now live on the slot. Module-level
     so a test can drive slot-switching directly (build a SlotManager, flip
-    active_idx, assert the fields follow) without running the whole REPL."""
+    active_idx, assert the fields follow) without running the whole REPL.
+
+    0.3.36: `slots=` is optional and only matters for a SINK-LESS slot (Home).
+    Home has no counters of its own, so `/cost` and `/status` used to report a
+    flat 0 there; given the SlotManager they instead report the SESSION TOTAL
+    across every open tab -- the same pair the Home toolbar/dashboard show, so
+    the three can never disagree. Omitted (every existing caller/test) -> the
+    previous per-slot behaviour, byte for byte."""
     sink = slot.sink
+    tokens = getattr(sink, "session_tokens", 0)
+    credits = getattr(sink, "session_credits", 0)
+    if sink is None and slots is not None:
+        try:
+            from webbee.home_view import session_totals
+            tokens, credits = session_totals(slots)
+        except Exception:
+            tokens, credits = 0, 0
     return CommandContext(mode=slot.mode, workspace=slot.workspace, version=__version__,
                           surface="terminal", logged_in=logged_in,
-                          session_tokens=getattr(sink, "session_tokens", 0),
-                          session_credits=getattr(sink, "session_credits", 0),
+                          session_tokens=tokens,
+                          session_credits=credits,
                           git_branch=slot.git_branch, queued=tuple(slot.pending))
 
 
 # FIX4 (W4a final review — Home None-sink command crashes): actions that are
 # genuinely SESSION-scoped (an agent's steps, a workspace's checkpoints, this
-# session's spend/queue, account operations kept off the dashboard for
-# consistency) — dispatched while Home is active, they reply with ONE
+# session's queue/mode) — dispatched while Home is active, they reply with ONE
 # consistent "open a tab" note instead of either crashing on `_sink.note`
 # (sink is None) or quietly doing session-shaped work against Home's own
 # placeholder fields. `/clear`/`/tabs`/`/tab N`/`/new`/`/close`/`/help`/
 # `/exit` are deliberately NOT in this set — those are tab-bar/global actions
 # and must keep working on Home (map §FIX4).
+#
+# 0.3.36 — ACCOUNT-scoped commands were un-gated: `/login`, `/logout`,
+# `/sessions`, `/sessions revoke`, `/logout-others` and `/cost` act on the
+# ACCOUNT or DEVICE, not on any one session, so requiring a session tab first
+# was an artificial block (reported live: "/login only works in a new tab").
+# They are safe on Home because `_say` already tolerates a None sink and the
+# two handlers that used `_sink` directly now go through `_say`/`_sink_or_say`.
+# `/cost` on Home reports the SESSION TOTAL across every open tab (the same
+# number the Home toolbar and dashboard show) instead of Home's own zeros.
 _HOME_GATED_ACTIONS = frozenset({
     "steps", "step_detail", "checkpoints", "rollback", "notify", "mode",
-    "cost", "queue", "queue_clear", "login", "logout", "sessions",
-    "sessions_revoke", "logout_others", "rename",
+    "queue", "queue_clear", "rename",
 })
 
 _HOME_GATE_NOTE = "open a session tab first — Ctrl+T or type a task"
+
+
+class _SaySink:
+    """Minimal sink-shaped adapter over `_say` for the Home slot (0.3.36).
+
+    A few account-scoped handlers hand "the sink" to shared code that only
+    ever calls `.note(...)` on it -- `login_device_flow`'s fallback prompt is
+    the live example. On Home `slot.sink is None`, so passing it straight
+    through raised AttributeError (which is exactly why /login used to be
+    gated to session tabs). This shim routes those notes into Home's own
+    pane via `_say`, so the device code and URL are actually readable.
+    """
+
+    __slots__ = ("_slot",)
+
+    def __init__(self, slot: SessionSlot) -> None:
+        self._slot = slot
+
+    def note(self, msg: str) -> None:
+        _say(self._slot, str(msg))
+
+    def login_prompt(self, user_code: str, uri: str) -> None:
+        _say(self._slot, f"Open {uri} and enter code: {user_code}")
+
+
+def _format_sessions_plain(rows) -> str:
+    """Active sessions as plain text -- Home's stand-in for the sink's rich
+    table (0.3.36). Same fields, same order, no Rich table dependency; PII
+    stays as the server sent it (the sink's table shows the same columns)."""
+    rows = list(rows or [])
+    if not rows:
+        return "Active sessions: (none)"
+    out = ["Active sessions:"]
+    for i, s in enumerate(rows, 1):
+        label = str(s.get("label") or s.get("surface") or "?")
+        seen = str(s.get("last_seen_at") or "")[:16].replace("T", " ")
+        here = "  ← this device" if s.get("current") else ""
+        out.append(f"  {i}. {label}" + (f" · {seen}" if seen else "") + here)
+    out.append("Revoke one with /sessions revoke <#>")
+    return "\n".join(out)
 
 
 def _say(slot: SessionSlot, msg: str) -> None:
@@ -833,7 +895,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         'continue'."""
         if not line.strip():
             return "continue"
-        res = dispatch(line, _slot_ctx(slot, logged_in=state["logged_in"]))
+        res = dispatch(line, _slot_ctx(slot, logged_in=state["logged_in"], slots=slots))
         if res.handled:
             _sink = slot.sink
             if res.exit:
@@ -850,7 +912,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 return "continue"
             if res.action == "login":
                 # Device-code flow (RFC 8628) — rendering + polling in webbee.account.
-                email = await login_device_flow(cfg, auth, _sink)
+                # 0.3.36: on Home `_sink` is None and login_device_flow's
+                # prompt path calls `.note(...)` -- `_SaySink` puts the device
+                # code + URL into Home's own pane instead of crashing.
+                email = await login_device_flow(
+                    cfg, auth, _sink if _sink is not None else _SaySink(slot))
                 state["logged_in"] = True
                 _say(slot, f"Signed in as {email}.")
                 return "continue"
@@ -862,7 +928,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             if res.action == "sessions":
                 rows = await sessions_client.list_sessions(cfg, token_provider)
                 state["sessions"] = rows
-                _sink.sessions_table(rows)
+                if _sink is not None:
+                    _sink.sessions_table(rows)
+                else:
+                    _say(slot, _format_sessions_plain(rows))   # Home: no rich table
                 return "continue"
             if res.action == "sessions_revoke":
                 rows = state.get("sessions") or []
@@ -1347,6 +1416,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     home_view.data.notice = f"security & privacy: {url}"
                     home_view.notify()
 
+                def _home_sign_in() -> None:
+                    # 0.3.36: /login is no longer gated on Home, so the
+                    # dashboard's "Sign in" item just runs the SAME command
+                    # path (device-code flow, output via `_SaySink` into
+                    # Home's own pane) as typing /login here would.
+                    get_app().create_background_task(
+                        _handle("/login", slots.slots[0] if slots.slots else slots.active()))
+
                 # Home's command/output region — built FIRST via tui.OutputPane
                 # so it is the dock's first OutputPane (the spy's created[0] =
                 # Home) and `_say`/slash output on Home stays visible.
@@ -1361,6 +1438,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     set_new_tab_mode=_set_new_tab_mode,
                     top_up=_home_top_up,
                     open_security_docs=_home_security_docs,
+                    sign_in=_home_sign_in,
                 ))
                 home_view.data.new_tab_mode = state["new_tab_mode"]
                 # Home slot at index 0; the first session slot (cwd

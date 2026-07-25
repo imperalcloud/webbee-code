@@ -23,7 +23,12 @@ _HELP = """Commands:
   /sessions revoke <#>   revoke a session by its number
   /logout-others     sign out every session except this one
   /notify [tg|panel|both|off]   mirror this session to Telegram/panel & steer it back
-  /exit  (=/quit)    quit"""
+  /exit  (=/quit)    quit
+
+Keys:
+  Alt+↵ (or Shift+↵, or Ctrl+J)   new line in the prompt — Enter still sends
+  Shift+TAB          switch mode        Ctrl+T   new tab
+  Alt+№              switch to tab №    Ctrl+W   close tab"""
 
 
 @dataclass(frozen=True)

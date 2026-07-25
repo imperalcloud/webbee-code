@@ -24,6 +24,7 @@ from webbee import sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import pull_item, queue_fragments, queue_height
 from webbee.render import _fmt_tokens
+from webbee.home_view import session_totals
 from webbee.slots import close_active, close_at, disarm_all, is_turn_alive
 from webbee.tabs import tab_fragments
 from webbee.todo_panel import todo_fragments, todo_height
@@ -90,6 +91,10 @@ _STYLE_DICT = {
     "home.disabled": "#5f5f5f",
     "home.focus": "bg:#e8a317 #1c1c1c bold",
     "home.hint": "#00afd7",
+    "home.update": "#e8a317 bold",       # a newer release exists — bee-yellow, pops
+    "home.fresh": "#5faf5f",             # verified up to date — calm green
+    "home.spend": "#ffffff bold",        # session spend total — reads as a figure
+    "input.cont": "#5f5f5f",             # multi-line prompt continuation gutter
 }
 
 
@@ -132,6 +137,48 @@ def configure_mouse_modes(output) -> None:
     output.disable_mouse_support = _disable
 
 
+def enable_csi_u_newline() -> bool:
+    """Teach prompt_toolkit's vt100 parser the CSI-u encodings of Shift+Enter.
+
+    prompt_toolkit 3.0.52 has NO ShiftEnter key: in a legacy terminal
+    Shift+Enter is byte-identical to Enter (CR), so it CANNOT be bound.
+    Modern terminals (kitty/foot/WezTerm/Ghostty, xterm with modifyOtherKeys,
+    iTerm2 with CSI-u) instead emit `ESC [13;<mod>u`. Registering those
+    sequences as (Escape, ControlM) makes them arrive as the SAME two-key
+    sequence Alt+Enter already produces, so ONE key binding -- ("escape",
+    "enter") -- serves both chords and nothing else in the app changes.
+
+    Registration is additive and idempotent: existing sequences are never
+    overwritten, so no other key can regress. Returns True when the table
+    now contains the codes (best effort -- never raises, an old/patched
+    prompt_toolkit just means Alt+Enter and Ctrl+J remain the way in).
+    """
+    try:
+        from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+        from prompt_toolkit.keys import Keys
+    except Exception:
+        return False
+    combo = (Keys.Escape, Keys.ControlM)
+    # 13 = Enter's unicode codepoint (CR) in the CSI-u scheme; modifier code
+    # 2 = Shift, 4 = Alt(Meta), 6 = Ctrl+Shift, 8 = Ctrl+Alt+Shift.
+    for mod in (2, 4, 6, 8):
+        seq = f"\x1b[13;{mod}u"
+        try:
+            ANSI_SEQUENCES.setdefault(seq, combo)
+        except Exception:
+            return False
+    try:
+        # The parser memoises prefix lookups built from ANSI_SEQUENCES; drop
+        # the cache so sequences registered after import are actually seen.
+        from prompt_toolkit.input import vt100_parser as _vp
+        for _obj in vars(_vp).values():
+            if hasattr(_obj, "cache_clear"):
+                _obj.cache_clear()
+    except Exception:
+        pass
+    return True
+
+
 def input_rows(text: str, cols: int, cap: int) -> int:
     """PURE row-wrap estimator behind `_input_height` (module-level so tests
     drive it directly with an injected size, mirroring repl._gate_busy).
@@ -158,7 +205,7 @@ def next_mode(mode: str) -> str:
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False, queued: int = 0,
-                  reconnecting: int = 0) -> list:
+                  reconnecting: int = 0, width: int = 0) -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
     text (per-segment styled). Four states: consent (awaiting a reply),
     reconnecting (the stream transport is down mid-turn — honest, not a fake
@@ -189,11 +236,23 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         frags += q
         frags.append(("class:tb.dim", "   ·   Esc/Ctrl-C to stop"))
         return frags
-    return [("class:tb.dim", "  mode: "),
-            (f"class:tb.mode.{mode}", mode),
-            ("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits"),
-            *q,
-            ("class:tb.dim", "   ·   Shift + TAB: switch mode")]
+    frags = [("class:tb.dim", "  mode: "),
+             (f"class:tb.mode.{mode}", mode),
+             ("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
+             *q]
+    # 0.3.36: the hints are DISCOVERABILITY, the spend figures are DATA -- so
+    # the hints are what gets dropped when the terminal is too narrow to hold
+    # everything, never the numbers (an 80-column window used to cut the line
+    # mid-word). `width=0` (unknown/headless) keeps the full line, which is
+    # also what every pre-0.3.36 caller and test sees.
+    used = sum(len(t) for _, t in frags)
+    full = "   ·   Alt+↵ newline · Shift + TAB: switch mode"
+    short = "   ·   Alt+↵ newline"
+    if not width or used + len(full) <= width:
+        frags.append(("class:tb.dim", full))
+    elif used + len(short) <= width:
+        frags.append(("class:tb.dim", short))
+    return frags
 
 
 def _width_watch(pane, app) -> None:
@@ -764,6 +823,11 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         finally:
             _finish_natural_turn(slot, done)
 
+    # Shift+Enter (CSI-u) must be known to the parser BEFORE any key is read,
+    # so the ("escape","enter") binding below can match it. Best effort: a
+    # False return just means Alt+Enter / Ctrl+J remain the newline chords.
+    enable_csi_u_newline()
+
     kb = KeyBindings()
 
     def _busy_live() -> bool:
@@ -854,6 +918,27 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                         inject=None if inject is None else _launch_inject
                         ) in ("queued", "injected"):
             event.app.invalidate()             # panel + toolbar show the new depth
+
+    # ---- newline INSIDE the prompt (0.3.36) -------------------------------
+    # Enter still SENDS (muscle memory is sacred); these insert a literal
+    # newline so one prompt can be many lines. THREE chords, because no
+    # single one is portable across every terminal/OS/SSH client:
+    #   * Alt+Enter   -> ("escape", "enter"). Universal: every terminal sends
+    #     ESC as the Alt prefix. Same two-key shape as the Alt+N tab
+    #     switches already bound above.
+    #   * Shift+Enter -> ALSO ("escape", "enter"), because enable_csi_u_newline()
+    #     registers the CSI-u codes modern terminals emit for it. This is the
+    #     chord most people try first, so it works wherever the terminal can
+    #     express it -- and degrades to Alt+Enter/Ctrl+J where it cannot.
+    #   * Ctrl+J      -> a raw LF (0x0a) that EVERY terminal, tmux/screen and
+    #     ssh client can send, on every OS: the guaranteed fallback.
+    # Buffer(multiline=False) stores embedded "\n" fine and input_rows()
+    # already counts them, so the input box grows by itself.
+    def _insert_newline(event):
+        event.current_buffer.insert_text("\n")
+
+    kb.add("escape", "enter")(_insert_newline)   # Alt+Enter (+ Shift+Enter via CSI-u)
+    kb.add("c-j")(_insert_newline)               # raw LF -- universal fallback
 
     @kb.add("s-tab")
     def _cycle(event):
@@ -1039,11 +1124,20 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                                       current=st["current"], elapsed=st["elapsed"],
                                       tools=st["tools"], consent=st["consent"],
                                       queued=len(slot.pending) + len(_sink_attr("remote_pending", [])),
-                                      reconnecting=st.get("reconnecting", 0))
+                                      reconnecting=st.get("reconnecting", 0),
+                                      width=sizing.get_size(get_app_or_none())[0])
             else:
-                # Home has no sink -- an idle toolbar of its own, no tokens/
-                # credits/mode to show (there's no session yet).
-                frags = [("class:tb.dim", "  ◆ home · type to start a session · Alt+№ switch")]
+                # Home has no sink of its OWN, but it is the dock's summary
+                # page: show the SESSION TOTAL across every open tab (0.3.36)
+                # so spend is visible from every tab, Home included -- the
+                # per-tab numbers live in each sink, Home adds them up.
+                tk, cr = session_totals(slots)
+                frags = [("class:tb.dim", "  ◆ home"),
+                         ("class:tb.dim", f"   ·   {_fmt_tokens(tk)} tok · {_fmt_tokens(cr)} credits this session")]
+                _w = sizing.get_size(get_app_or_none())[0]
+                _hint = "   ·   type a task to start · Alt+№ switch"
+                if not _w or sum(len(t) for _, t in frags) + len(_hint) <= _w:
+                    frags.append(("class:tb.dim", _hint))
         # W2 Task 8: the toolbar has no mouse handling of its own, so
         # `_forwarding(None, pane)` is wrapped onto every fragment purely for
         # drag-forwarding — a release that lands on the toolbar row while a
@@ -1158,9 +1252,19 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(_sink_attr("current_todos", []))))
 
+    def _line_prefix(line_no, wrap_count):
+        # 0.3.36: with multi-line prompts, line 2+ gets a dim continuation
+        # gutter so it reads as ONE message still being composed, never as
+        # something already sent. Line 1 keeps the coloured `❯ ` that
+        # BeforeInput draws (returning "" leaves it untouched). Aligned to
+        # the same 2 columns as `❯ `, so text never shifts as it wraps.
+        if line_no == 0 and not wrap_count:
+            return ""
+        return [("class:input.cont", "\u250a ")]
+
     input_win = Window(
         BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)]),
-        height=_input_height, wrap_lines=True)
+        height=_input_height, wrap_lines=True, get_line_prefix=_line_prefix)
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
 
     _hover_on = {"v": None}
