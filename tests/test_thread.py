@@ -639,3 +639,103 @@ def test_inject_to_session_reuses_given_client_forwards_body(monkeypatch):
     assert seen["path"] == "/v1/agent/sessions/s1/inject"
     assert seen["json"] == {"text": "fly this in", "steer_iid": "iid-1"}
     assert seen["headers"] == {"Authorization": "Bearer tok"}
+
+
+# ── T-3 (0.3.38): the withdraw POST — inject's counterpart ────────────────────
+# drop_from_session is the ONLY way a kernel-owned queued line stops being so.
+# Same discipline as inject_to_session above: honest boolean, non-swallowing,
+# reuses a given client. Removal is BY steer_iid — text is never a key.
+
+def test_drop_from_session_posts_right_path_bearer_and_body(monkeypatch):
+    from webbee.thread import drop_from_session
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": True, "steer_iid": "iid-1"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): seen["base_url"] = kw.get("base_url")
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, json=None, headers=None):
+            seen["path"] = path; seen["json"] = json; seen["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    ok = asyncio.run(drop_from_session(_Cfg(), _tp, "marathon-user-1-rab12cd34ef56",
+                                       "iid-1"))
+    assert ok is True
+    assert seen["base_url"] == "http://x"
+    assert seen["path"] == "/v1/agent/sessions/marathon-user-1-rab12cd34ef56/drop"
+    # BY IID ONLY -- the body never carries text.
+    assert seen["json"] == {"steer_iid": "iid-1"}
+    assert seen["headers"] == {"Authorization": "Bearer tok"}
+
+
+def test_drop_from_session_gateway_refusal_returns_false(monkeypatch):
+    # {ok: false} = no live session took it, or the task already drained into
+    # the running turn. The caller must NOT pretend the withdraw landed.
+    from webbee.thread import drop_from_session
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": False, "error": "no live session"}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, json=None, headers=None): return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    assert asyncio.run(drop_from_session(_Cfg(), _tp, "s1", "i")) is False
+
+
+def test_drop_from_session_raises_on_http_error_non_swallowing(monkeypatch):
+    from webbee.thread import drop_from_session
+
+    class _Resp:
+        def raise_for_status(self): raise httpx.HTTPStatusError("401", request=None, response=None)
+        def json(self): return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, path, json=None, headers=None): return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    try:
+        asyncio.run(drop_from_session(_Cfg(), _tp, "s1", "i"))
+        raised = False
+    except httpx.HTTPStatusError:
+        raised = True
+    assert raised    # the caller owns the fallback, exactly like inject
+
+
+def test_drop_from_session_reuses_given_client(monkeypatch):
+    from webbee.thread import drop_from_session
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"ok": True}
+
+    class FakeClient:
+        async def request(self, method, path, json=None, headers=None):
+            seen["method"] = method
+            seen["path"] = path
+            seen["json"] = json
+            return _Resp()
+
+    def _no_new_client(*a, **kw):
+        raise AssertionError("must not construct a new AsyncClient when one is given")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _no_new_client)
+    ok = asyncio.run(drop_from_session(_Cfg(), _tp, "s1", "iid-9",
+                                       client=FakeClient()))
+    assert ok is True
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/v1/agent/sessions/s1/drop"
+    assert seen["json"] == {"steer_iid": "iid-9"}

@@ -134,6 +134,25 @@ async def inject_to_session(cfg, token_provider, session_id: str, text: str,
     return bool((r.json() or {}).get("ok"))
 
 
+async def drop_from_session(cfg, token_provider, session_id: str,
+                            steer_iid: str, *, client=None) -> bool:
+    """Withdraw a still-queued task the user pulled back (T-3, 0.3.38): POST
+    `/v1/agent/sessions/{id}/drop`, body `{steer_iid}` -- the exact counterpart
+    of `inject_to_session` above. Once a line is kernel-owned this is the ONLY
+    way it stops being so; until this endpoint existed a queued remote row
+    always fired, which is why pulling it back "didn\'t really take it out of
+    the queue". Returns True only when the gateway accepted it ({ok: true});
+    False means no live session took the signal, or the task had already
+    drained into the running turn -- the caller must NOT pretend it was
+    withdrawn. Non-swallowing like its siblings. The row removal itself rides
+    the kernel\'s own task_dequeued frame (one source of truth), never a local
+    guess."""
+    token = await token_provider()
+    r = await _request(cfg, client, "POST", f"/v1/agent/sessions/{session_id}/drop",
+                       token=token, json={"steer_iid": steer_iid})
+    return bool((r.json() or {}).get("ok"))
+
+
 def truncate_for_display(text, limit: int = _DISPLAY_LIMIT) -> str:
     """Cap one replayed message's text so a single huge assistant reply can't
     flood the boot screen -- foreign_turn renders one line per message."""
