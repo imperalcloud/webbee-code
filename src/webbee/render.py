@@ -167,6 +167,13 @@ class RichSink:
         self._pending = ("", "")
         self._consent = None            # asyncio.Future while awaiting a reply
         self._consent_summary = ""
+        # webbee-code-click-to-expand-v1: maps a printed record index (pane's
+        # RecordingConsole ring position, 0-based) -> 1-based step number for
+        # THIS turn, so a mouse click on a tool_result line can look its own
+        # step back up without any new wire protocol -- begin_turn resets both
+        # every turn, exactly like self.steps itself resets in session.py.
+        self._step_index = 0
+        self._step_records: dict = {}
         # Cross-surface items already queued in the RUNNING kernel session
         # (full-queue-layer K1: task_queued/task_dequeued frames). The dock's
         # queue panel reads THIS list object every redraw — mutate in place
@@ -271,6 +278,11 @@ class RichSink:
         self._reconnect_since = None
         self._turn_failed = False
         self._parked = False
+        # webbee-code-click-to-expand-v1: fresh per-turn -- step numbering
+        # (and thus which printed record maps to which step) restarts with
+        # every turn, exactly like self.steps itself does in session.py.
+        self._step_index = 0
+        self._step_records = {}
         self.console.print()   # breathing room between the user's message and the response
         self._nudge()
 
@@ -580,7 +592,22 @@ class RichSink:
             (_clean(summary)[:trunc(w, 0.35, 50)], "dim"),
         ))
         self._pending = ("", "")
+        # webbee-code-click-to-expand-v1: tag the record JUST printed as
+        # "step N" (1-based, matching /steps' own numbering) -- record_count()
+        # already reflects this print (Rich prints synchronously), so the
+        # index this line landed at is exactly len(pane_records) - 1.
+        self._step_index += 1
+        rc = getattr(self.console, "record_count", None)
+        if callable(rc):
+            self._step_records[rc() - 1] = self._step_index
         self._nudge()
+
+    def step_for_record(self, record_idx: int) -> "int | None":
+        """webbee-code-click-to-expand-v1: 1-based step number that produced
+        `record_idx` (a pane RecordingConsole ring position), or None if that
+        record isn't a tool_result line (e.g. a progress/thinking/banner
+        line -- nothing to expand there, same as clicking blank space)."""
+        return self._step_records.get(record_idx)
 
     async def ask_consent(self, app_id: str, tool: str, args: dict) -> str:
         """Ask for consent and return the user's RAW reply (trimmed only) —

@@ -960,3 +960,55 @@ def test_tool_diff_caps_very_long_diffs_without_crashing():
     out = s.console.export_text()
     assert "line 0" in out
     assert "truncated" in out.lower()
+
+
+# --------------------------------------------------------------------------
+# webbee-code-click-to-expand-v1: `/steps N` (and Up/Down + Enter) already
+# let you expand any step of the last turn -- a mouse click on the printed
+# tool_result line itself is the natural next step. RichSink tags the exact
+# printed RECORD as "step N" the instant it prints the line, so a later
+# click can resolve record -> step with no new wire protocol at all.
+# --------------------------------------------------------------------------
+def test_step_for_record_maps_the_printed_line_to_its_step_number():
+    from webbee.output_pane import OutputPane
+    pane = OutputPane(width=80)
+    s = RichSink(console=pane.console, live_enabled=False,
+                input_fn=lambda p: "", clock=lambda: 0.0, on_output=pane.notify)
+    s.begin_turn()
+    s.tool_start("bash", {"command": "ls"})
+    s.tool_result("bash", True, "done")           # step 1 -> some record index
+    s.tool_start("read_file", {"path": "a.py"})
+    s.tool_result("read_file", True, "42 lines")  # step 2 -> a later record index
+
+    # Whatever record each line landed at, step_for_record must resolve it
+    # back to the RIGHT step -- never the other one, never None.
+    recs = s._step_records
+    assert len(recs) == 2
+    ordered = sorted(recs.items())                # [(rec_idx, step_no), ...]
+    assert ordered[0][1] == 1
+    assert ordered[1][1] == 2
+    for rec_idx, step_no in recs.items():
+        assert s.step_for_record(rec_idx) == step_no
+
+
+def test_step_for_record_is_none_for_a_non_step_line():
+    s = _sink()
+    s.begin_turn()
+    s.tool_start("bash", {"command": "ls"})
+    s.tool_result("bash", True, "done")
+    assert s.step_for_record(999) is None          # nothing ever printed there
+
+
+def test_step_records_reset_on_a_new_turn():
+    from webbee.output_pane import OutputPane
+    pane = OutputPane(width=80)
+    s = RichSink(console=pane.console, live_enabled=False,
+                input_fn=lambda p: "", clock=lambda: 0.0, on_output=pane.notify)
+    s.begin_turn()
+    s.tool_start("bash", {"command": "ls"})
+    s.tool_result("bash", True, "done")
+    assert len(s._step_records) == 1
+    s.end_turn("ok")
+    s.begin_turn()                                 # a fresh turn, fresh numbering
+    assert s._step_records == {}
+    assert s._step_index == 0

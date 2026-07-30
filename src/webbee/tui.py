@@ -223,7 +223,8 @@ def next_tier(tier: str) -> str:
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False, queued: int = 0,
-                  reconnecting: int = 0, width: int = 0, live: str = "") -> list:
+                  reconnecting: int = 0, width: int = 0, live: str = "",
+                  tier: str = "") -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
     text (per-segment styled). Four states: consent (awaiting a reply),
     reconnecting (the stream transport is down mid-turn — honest, not a fake
@@ -249,14 +250,27 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         frags = [("class:tb.spin", f"  {spin} "), ("class:tb.working", "working")]
         if current:
             frags += [("class:tb.dim", " · "), ("class:tb.action", current)]
+        # webbee-code-model-tier-toolbar-v1: keep the tier visible mid-turn too
+        # (a short "· smart" tag, NOT the full "model: " label used at idle --
+        # busy is already the densest row, this is the cheapest legible form).
+        if tier:
+            frags += [("class:tb.dim", " · "), ("class:tb.mode.default", tier)]
         frags.append(("class:tb.dim",
                       f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"))
         frags += q
         frags.append(("class:tb.dim", "   ·   Esc/Ctrl-C to stop"))
         return frags
     frags = [("class:tb.dim", "  mode: "),
-             (f"class:tb.mode.{mode}", mode),
-             ("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
+             (f"class:tb.mode.{mode}", mode)]
+    # webbee-code-model-tier-toolbar-v1: the tier was only ever visible via
+    # `/model` (no arg) or right after a Ctrl+B cycle flash -- ask once, then
+    # forget, exactly the visibility gap the mode segment right next to it
+    # never had. "" (unset -> server admin default) stays silent rather than
+    # claim a tier name nobody chose (I-DIAGNOSIS-GROUNDED spirit: never
+    # invent a value the user didn't pick and the server didn't confirm).
+    if tier:
+        frags += [("class:tb.dim", " · model: "), ("class:tb.mode.default", tier)]
+    frags += [("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
              *q]
     # 0.3.37: the PERSISTENT live-session indicator (active_sessions.
     # session_indicator). Empty string = nothing running = say nothing, so an
@@ -846,6 +860,8 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
             p.on_middle_paste = _middle_paste
         if getattr(p, "on_right_paste", None) is None:
             p.on_right_paste = _right_paste
+        if getattr(p, "on_line_click", None) is None:
+            p.on_line_click = _line_click
         return p
 
     def _sink_attr(name, default=None):
@@ -1174,6 +1190,40 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
 
         get_app().create_background_task(_do_right_paste())
 
+    def _line_click(abs_line: int) -> None:
+        """webbee-code-click-to-expand-v1: a PLAIN click on a transcript line
+        (see selection.py's `on_line_click` hook) asks \"what happened here?\"
+        without touching the keyboard at all -- the exact same reveal /steps
+        N (and Up/Down + Enter) already show, just one gesture shorter. A
+        click resolves to a RECORD via the pane's own reflow-anchoring math
+        (`_record_at_line`, already used for reflow + scroll-anchoring), then
+        to a step number via the sink's `step_for_record` (set right after
+        each tool_result print, see render.py) -- so a click on a banner,
+        a progress line, or blank space (no step there) is a harmless no-op,
+        never an error. Busy mid-turn is ALSO a no-op (steps_nav reflects the
+        LAST finished turn only -- clicking during a live one would expand
+        stale data), same gate Enter's own steps_nav path already uses.
+        Compact by construction: dispatches through steps_nav[\"expand\"],
+        the SAME `/steps N` -> step_detail bordered panel Enter already
+        shows -- never a new UI surface, never full-screen, nothing to
+        keep in sync twice."""
+        if not steps_nav or _busy_live():
+            return
+        slot = _a()
+        sink = slot.sink
+        step_fn = getattr(sink, "step_for_record", None) if sink is not None else None
+        if step_fn is None:
+            return
+        pane = _pane()
+        record_idx = pane._record_at_line(abs_line)
+        step_no = step_fn(record_idx)
+        if not step_no:
+            return
+        event = get_app_or_none()
+        if event is None:
+            return
+        event.create_background_task(steps_nav["expand"](step_no - 1, slot))
+
     @kb.add("c-v")
     def _paste_key(event):
         # 0.3.34 (W3 Wave A): Ctrl-V pastes the OS clipboard. An IMAGE is read
@@ -1367,7 +1417,8 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
                                       queued=len(slot.pending) + len(_sink_attr("remote_pending", [])),
                                       reconnecting=st.get("reconnecting", 0),
                                       width=_toolbar_fit_width(),
-                                      live=str((live or {}).get("text") or ""))
+                                      live=str((live or {}).get("text") or ""),
+                                      tier=getattr(slot, "model_tier", "") or "")
             else:
                 # Home has no sink of its OWN, but it is the dock's summary
                 # page: show the SESSION TOTAL across every open tab (0.3.36)

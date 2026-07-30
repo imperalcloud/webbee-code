@@ -111,6 +111,16 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                 up_abs = (ev.position.y + pane._offset, ev.position.x)
                 if down_abs is not None and down_abs != up_abs:
                     pane._copy_selection(down_abs, up_abs)
+                elif down_abs is not None:
+                    # webbee-code-click-to-expand-v1: a PLAIN click (press and
+                    # release at the SAME absolute cell -- no drag, nothing to
+                    # copy) on a transcript line asks "what happened here?" --
+                    # same one-hook/getattr-guarded shape as on_middle_paste/
+                    # on_right_paste above, so a pane with no hook wired
+                    # (tests, no dock) stays a harmless no-op.
+                    hook = getattr(pane, "on_line_click", None)
+                    if hook is not None:
+                        hook(down_abs[0])
                 pane._sel = None
                 pane._invalidate()                 # clear the highlight (colours restored)
                 return None

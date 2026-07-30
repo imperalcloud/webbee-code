@@ -49,6 +49,14 @@ class OutputPane:
                 pane_records.clear()
                 pane._reset_buffer()                # StringIO + caches reset (Task 3 builds on it)
 
+            def record_count(self) -> int:
+                """webbee-code-click-to-expand-v1: how many print records exist so
+                far -- RichSink.tool_result reads this RIGHT AFTER printing a step's
+                line to tag that exact record as \"step N\", so a later mouse click
+                on that line can look the step back up (see render.py's
+                `_STEP_RECORDS` / tui.py's click handler)."""
+                return len(pane_records)
+
         self._records = pane_records
         self._record_lines: list = []      # per-record NEW-line count, prefix-summable (reflow.py)
         self._ring_base_lines = 0          # buffer content lines BEFORE ring record 0 (deque

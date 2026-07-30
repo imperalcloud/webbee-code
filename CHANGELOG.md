@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.41
+
+The model tier is always visible now (not just via `/model`), and clicking a
+tool line in the transcript expands it right there -- no keyboard needed.
+
+- **The active model tier is now shown right in the toolbar**, next to
+  `mode:`, both idle and mid-turn -- it used to be visible only by running
+  `/model` with no argument or catching the flash right after a Ctrl+B
+  cycle. Silent (nothing shown) when no tier has been chosen, so it never
+  claims a value you didn't pick.
+- **Click any finished tool line (bash, write_file, read_file, ...) in the
+  transcript to expand it** -- the exact same compact, bordered detail card
+  `/steps N` (or Up/Down + Enter) already gave you, one gesture shorter.
+  Clicking a banner, a progress line, or blank space is a harmless no-op --
+  nothing to expand there. Busy mid-turn is also a no-op (there's no
+  finished-turn detail to show yet). This reuses the existing `/steps`
+  machinery end to end -- it is not a new UI surface, never covers the
+  screen, and nothing needed to be kept in sync twice.
+- Right-click paste (from 0.3.39) is confirmed working end-to-end on the
+  underlying mouse-report protocol; if it doesn't react in your terminal,
+  check that terminal's own mouse-reporting setting -- some terminal
+  emulators (notably macOS Terminal.app) never forward a right-click to the
+  program running inside them at all, by design, regardless of what an app
+  requests.
+
 ## 0.3.40
 
 The bottom-right version badge is now real everywhere, and Home stopped

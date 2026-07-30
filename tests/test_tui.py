@@ -5273,3 +5273,113 @@ def test_ticker_busy_includes_turn_flash_and_edge_drag():
         def flash(self):
             return ""
     assert _ticker_busy(_Slots(_Bare()), idle) is False
+
+
+# --------------------------------------------------------------------------
+# webbee-code-model-tier-toolbar-v1: the chosen model tier was only ever
+# visible via `/model` (no arg) or a Ctrl+B cycle flash -- now it sits right
+# next to `mode:` in the idle toolbar (always visible, not on-demand), and as
+# a short tag mid-turn too.
+# --------------------------------------------------------------------------
+def test_idle_toolbar_shows_the_model_tier_when_set():
+    t = _txt(build_toolbar("default", 0, 0.0, tier="supersmart"))
+    assert "model: supersmart" in t
+
+
+def test_idle_toolbar_says_nothing_about_tier_when_unset():
+    t = _txt(build_toolbar("default", 0, 0.0, tier=""))
+    assert "model:" not in t
+
+
+def test_busy_toolbar_shows_a_short_tier_tag():
+    t = _txt(build_toolbar("default", 0, 0.0, busy=True, elapsed=1.0, tier="ultrasmart"))
+    assert "ultrasmart" in t
+
+
+def test_busy_toolbar_says_nothing_about_tier_when_unset():
+    t = _txt(build_toolbar("default", 0, 0.0, busy=True, elapsed=1.0, tier=""))
+    assert "ultrasmart" not in t and "supersmart" not in t and "smart" not in t
+
+
+# --------------------------------------------------------------------------
+# webbee-code-click-to-expand-v1: a plain mouse click on a printed tool_result
+# line expands that step's detail card -- the SAME reveal /steps N (and
+# Up/Down + Enter) already give, one gesture shorter, never a new surface.
+# --------------------------------------------------------------------------
+def test_clicking_a_tool_result_line_expands_its_step():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.render import RichSink
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        sink = RichSink(console=pane.console, live_enabled=False,
+                       input_fn=lambda p: "", clock=lambda: 0.0, on_output=pane.notify)
+        sink.begin_turn()
+        sink.tool_start("bash", {"command": "ls"})
+        sink.tool_result("bash", True, "done")     # this is step 1
+        sink.end_turn("ok")
+
+        slots = mk_slots(pane=pane, sink=sink)
+        expanded = []
+
+        async def _expand(idx, slot):
+            expanded.append(idx)
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    steps_nav={"expand": _expand, "count": lambda: 1}))
+                await asyncio.sleep(0.05)
+                # begin_turn prints a leading blank line (breathing room)
+                # before the tool_result line itself -- so the step's line is
+                # absolute line 1, not 0, in a freshly-booted pane at offset 0.
+                pane.on_line_click(1)
+                await asyncio.sleep(0.02)
+                assert expanded == [0]              # step 1 -> steps_nav index 0
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+def test_clicking_a_non_step_line_is_a_harmless_noop():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        slots = mk_slots(pane=pane, sink=_idle_sink())
+        expanded = []
+
+        async def _expand(idx, slot):
+            expanded.append(idx)
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None,
+                    steps_nav={"expand": _expand, "count": lambda: 0}))
+                await asyncio.sleep(0.05)
+                pane.on_line_click(0)                # nothing was ever printed/tagged here
+                await asyncio.sleep(0.02)
+                assert expanded == []
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
