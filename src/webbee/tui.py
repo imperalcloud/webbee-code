@@ -31,6 +31,7 @@ from webbee.tabs import tab_fragments
 from webbee.todo_panel import todo_fragments, todo_height
 
 _MODES = ("default", "plan", "autopilot")
+_TIERS = ("smart", "supersmart", "ultrasmart")
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # braille frames — animated while a turn runs
 
 # Leaked SGR mouse-report fragments ("<35;6;42M" / "35;6;42M"): under a
@@ -76,6 +77,8 @@ _STYLE_DICT = {
     "tb.mode.plan": "#af87ff",           # plan — purple
     "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
     "tb.version": "#5f5f5f",             # 0.3.37 bottom-right version badge — quietest thing on screen
+    "tb.fresh": "#5faf5f",               # 0.3.40 — badge: verified up to date (mirrors home.fresh)
+    "tb.update": "#e8a317 bold",         # 0.3.40 — badge: a newer release exists (mirrors home.update)
     "qp.header": "#e8a317 bold",         # queue-panel header — bee-yellow, pops
     "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
     "qp.last": "#e8a317",                # newest row — the one ↑ pulls
@@ -206,6 +209,17 @@ def next_mode(mode: str) -> str:
         return _MODES[0]
 
 
+def next_tier(tier: str) -> str:
+    """PURE. Cycles smart -> supersmart -> ultrasmart -> smart. An unset/""
+    tier (server admin default, never chosen) or any unrecognised value
+    starts the cycle at the first tier, same fallback discipline as
+    next_mode above."""
+    try:
+        return _TIERS[(_TIERS.index(tier) + 1) % len(_TIERS)]
+    except ValueError:
+        return _TIERS[0]
+
+
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False, queued: int = 0,
@@ -274,8 +288,9 @@ def version_badge_text(version: str) -> str:
     return f" v{version} "
 
 
-def pin_version_right(frags: list, version: str, width: int) -> list:
-    """PURE. Pin ``v<version>`` flush to the RIGHT EDGE of the toolbar row.
+def pin_version_right(frags: list, version: str, width: int, *,
+                      notice: str = "", checked: "bool | None" = None) -> list:
+    """PURE. Pin the version badge flush to the RIGHT EDGE of the toolbar row.
 
     The toolbar is the LAST child of run_session's root HSplit, so its right
     edge is the bottom-right corner of the WHOLE window (0.3.37 — the badge
@@ -284,30 +299,53 @@ def pin_version_right(frags: list, version: str, width: int) -> list:
 
     Applied ONCE over the already-built fragments in ``_toolbar()``, so every
     state (idle / busy / consent / reconnecting / copy-flash / step-nav /
-    Home) carries it with no per-branch duplication.
+    Home) carries it with no per-branch duplication — and, since 0.3.40, on
+    EVERY tab (not just Home): ``checked``/``notice`` come from ONE
+    process-wide PyPI check run at boot (`update.check_update_status`,
+    24h-cached), threaded in as `update_state` all the way from `run_repl`.
 
-    Contract:
+    Three honest states, exactly `home_view.version_badge`'s own three (the
+    SAME verdict, SAME three colours, now shown in the one place every tab
+    can always see — Home's own in-content copies are gone, this replaces
+    them):
+      * ``checked is None``  -- the background check hasn't resolved yet
+        (still in flight, or this call site never wired one in): the quiet
+        old plain ``v<version>`` in the dim `tb.version` class -- NO claim
+        about freshness either way.
+      * ``checked is True``  -- resolved: `home_view.version_badge`'s own
+        text/style ("v0.3.39 · up to date" dim-green, or "v0.3.38 →
+        0.3.39 available" bee-yellow) reused verbatim -- one source of
+        truth for the wording AND the colour, never a second copy drifting.
+      * ``checked is False`` -- we tried and could not reach PyPI (offline):
+        same bare ``v<version>``, no false reassurance.
+
+    Contract (unchanged from 0.3.37):
       * ``width <= 0`` (headless / unknown terminal) -> returned UNCHANGED:
         padding to an unknown width would wrap the row and shove the input
         box upward.
       * The badge is dropped when the row cannot hold it plus at least one
         column of real content. The status line is DATA, the version is
-        decoration -- decoration never truncates data.
+        decoration -- decoration never truncates data. A long "update
+        available" badge that doesn't fit degrades to being dropped
+        entirely, same as before -- never a truncated, confusing partial.
       * Padding is exact (``width - used - len(badge)``) so the badge lands
-        hard against the right edge and can never wrap to row two. The badge
-        itself (``version_badge_text``) carries ONE trailing space, so the
-        text stops one column short of the final cell: that mirrors the
-        toolbar's own left indent, and deliberately avoids writing into the
-        very last cell, which some terminals treat as an auto-wrap trigger.
+        hard against the right edge and can never wrap to row two.
     """
     if not width or width <= 0:
         return frags
-    badge = version_badge_text(version)
+    if checked is None:
+        text, style = version_badge_text(version).strip(), "tb.version"
+    else:
+        from webbee.home_view import version_badge
+        raw, cls = version_badge(version, notice, checked=checked)
+        text, style = raw, ("tb.fresh" if cls == "class:home.fresh" else
+                            "tb.update" if cls == "class:home.update" else "tb.version")
+    badge = f" {text} "
     used = sum(len(t) for _, t in frags)
     pad = width - used - len(badge)
     if pad < 1:
         return frags
-    return list(frags) + [("class:tb.dim", " " * pad), ("class:tb.version", badge)]
+    return list(frags) + [("class:tb.dim", " " * pad), (f"class:{style}", badge)]
 
 
 def _width_watch(pane, app) -> None:
@@ -422,6 +460,28 @@ def _forwarding(handler, pane):
         if handler is None:
             return NotImplemented
         return handler(ev)
+    return _h
+
+
+def _badge_click(pane, notice: str, forward):
+    """0.3.40: the bottom-right version badge is now a real click target, not
+    just decoration -- when a newer release is known (`notice` non-empty,
+    the exact upgrade sentence `update.check_update_status` produced), a
+    MOUSE_UP on the badge flashes it into the toolbar via `pane.flash_note`
+    (the SAME transient-note mechanism copy-on-select already uses, so it
+    reads as one consistent visual language rather than a second kind of
+    popup). `forward` (the toolbar's own drag-forwarding wrapper) still gets
+    first refusal, exactly like every other toolbar fragment -- a drag that
+    happens to release on the badge must complete the copy, never fire the
+    click instead."""
+    def _h(ev):
+        if forward(ev):
+            return None
+        from prompt_toolkit.mouse_events import MouseEventType
+        if ev.event_type == MouseEventType.MOUSE_UP:
+            pane.flash_note(notice, secs=6.0)
+            return None
+        return NotImplemented
     return _h
 
 
@@ -673,11 +733,11 @@ def _restore_draft(buf, slot) -> None:
     buf.cursor_position = min(slot.draft_cursor, len(buf.text))
 
 
-async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
+async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
                       home_input=None, cancel_slot=None, ui_hooks=None,
                       on_switch=None, on_new=None, on_paste=None,
-                      live=None) -> bool:
+                      live=None, update_state=None) -> bool:
     """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
     CALL TIME (W4a Task 3 — the single most structural change of the
     multisession-tabs wave: no more one session's objects captured once at
@@ -784,6 +844,8 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # call sites (repl.py x2, home_view.py) for one optional callback.
         if getattr(p, "on_middle_paste", None) is None:
             p.on_middle_paste = _middle_paste
+        if getattr(p, "on_right_paste", None) is None:
+            p.on_right_paste = _right_paste
         return p
 
     def _sink_attr(name, default=None):
@@ -1013,6 +1075,19 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         on_cycle()
         event.app.invalidate()
 
+    @kb.add("c-b", filter=Condition(lambda: on_tier_cycle is not None and _a().kind != "home"))
+    def _tier_cycle(event):
+        # webbee-code-model-tier-slash-command-v1: Ctrl+B cycles the coding
+        # brain tier (smart -> supersmart -> ultrasmart -> smart), the exact
+        # keyboard-symmetric sibling of Shift+TAB's mode cycle above. NOT
+        # Ctrl+M: that's the same raw byte (\r, CR) as Enter on most
+        # terminals lacking CSI-u/Kitty-protocol support -- binding it would
+        # silently break message-send on the majority of real terminals.
+        # Gated off Home (no repo, nothing to persist a tier choice against)
+        # exactly like /model itself is gated (_HOME_GATED_ACTIONS).
+        on_tier_cycle()
+        event.app.invalidate()
+
     @kb.add("c-c")
     def _interrupt(event):
         _interrupt_action(_a().turn, _busy_live, stop_turn, event)
@@ -1052,6 +1127,52 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
             get_app().invalidate()
 
         get_app().create_background_task(_do_middle_paste())
+
+    def _right_paste() -> None:
+        # webbee-code-mouse-right-click-paste-v1: the OTHER common terminal
+        # paste convention -- right-click reads the regular OS CLIPBOARD
+        # (text OR image), the exact same source + upload door as Ctrl+V
+        # (_paste_key below), just triggered by a mouse hook instead of a
+        # key binding. Kept as its own tiny function (not a call into
+        # _paste_key, which needs a real `event` with `.app`) so the two
+        # entry points stay independently readable; the guts are a
+        # deliberate mirror of _do_paste below -- same clipboard read, same
+        # upload door, same flash-note vocabulary.
+        import time as _t
+        from webbee.clipboard_read import read_clipboard
+        slot = _a()
+        pane = _pane()
+        if on_paste is None or slot.kind == "home" or not getattr(slot, "workspace", ""):
+            pane.flash_note("📎 open a session tab to paste a file")
+            return
+        stamp = _t.strftime("%Y%m%d-%H%M%S", _t.gmtime())
+
+        async def _do_right_paste():
+            item = await asyncio.to_thread(read_clipboard, stamp)
+            if item is None:
+                pane.flash_note("clipboard is empty")
+                get_app().invalidate()
+                return
+            if item.kind == "text":
+                buf.insert_text(item.data)
+                get_app().invalidate()
+                return
+            pane.flash_note(f"📎 uploading {item.name}…", secs=30.0)
+            get_app().invalidate()
+            ref = ""
+            try:
+                ref = await on_paste(slot.workspace, item.name, item.data)
+            except Exception:
+                ref = ""
+            if ref:
+                sep = "" if (not buf.text or buf.text.endswith(" ")) else " "
+                buf.insert_text(sep + ref + " ")
+                pane.flash_note(f"📎 {item.name}")
+            else:
+                pane.flash_note("📎 paste failed")
+            get_app().invalidate()
+
+        get_app().create_background_task(_do_right_paste())
 
     @kb.add("c-v")
     def _paste_key(event):
@@ -1199,6 +1320,20 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         pane = _pane()
         pane.scroll(max(1, pane._view_h) - 2)
 
+    def _current_badge_text() -> str:
+        """The exact text `pin_version_right` will draw right now, so the
+        width reservation below always matches (0.3.40: the badge is no
+        longer a fixed-length " v<version> " — an "update available" state
+        is longer, and must reserve accordingly, or it would get dropped for
+        not fitting a reservation sized for the SHORTER plain form)."""
+        us = update_state or {}
+        checked = us.get("checked")
+        if checked is None:
+            return version_badge_text(__version__)
+        from webbee.home_view import version_badge
+        text, _cls = version_badge(__version__, us.get("notice", ""), checked=checked)
+        return f" {text} "
+
     def _toolbar_fit_width() -> int:
         """Columns available to the toolbar's own text: the true terminal width
         MINUS the space the bottom-right version badge will occupy (0.3.37).
@@ -1212,7 +1347,7 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         w = sizing.get_size(get_app_or_none())[0]
         if not w or w <= 0:
             return 0
-        return max(1, w - len(version_badge_text(__version__)))
+        return max(1, w - len(_current_badge_text()))
 
     def _toolbar():
         pane = _pane()
@@ -1255,10 +1390,27 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # one call, AFTER every state branch above has built its fragments, so
         # idle/busy/consent/reconnecting/copy-flash/step-nav/Home all show it
         # in the same fixed spot: the bottom-right corner of the window.
+        # 0.3.40: real, live-checked (not just displayed) + INTERACTIVE — a
+        # click on the badge flashes the upgrade command into the toolbar
+        # (via the pane's own copy-flash mechanism, reusing the exact same
+        # visual language a successful copy already uses) instead of the
+        # user having to go read the CHANGELOG to find it.
+        us = update_state or {}
+        pre_len = len(frags)
         frags = pin_version_right(frags, __version__,
-                                  sizing.get_size(get_app_or_none())[0])
+                                  sizing.get_size(get_app_or_none())[0],
+                                  notice=us.get("notice", ""),
+                                  checked=us.get("checked"))
         fwd = _forwarding(None, pane)
-        return [(style, text, fwd) for style, text in frags]
+        badge_appended = len(frags) > pre_len   # pin_version_right may drop it (no room)
+        out = []
+        for i, (style, text) in enumerate(frags):
+            is_badge = badge_appended and i == len(frags) - 1
+            if is_badge and us.get("notice"):
+                out.append((style, text, _badge_click(pane, us["notice"], fwd)))
+            else:
+                out.append((style, text, fwd))
+        return out
 
     # Dynamic height: EXACTLY the rows the wrapped input needs (1→cap), so the
     # box grows as you type and shrinks back — never a fixed huge block. Enter

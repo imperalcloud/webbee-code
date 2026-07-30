@@ -69,3 +69,84 @@ def test_badge_text_is_single_source_of_truth():
     assert version_badge_text("9.9.9") == " v9.9.9 "
     out = pin_version_right([("class:tb.dim", "x")], "9.9.9", 40)
     assert out[-1][1] == version_badge_text("9.9.9")
+
+
+# --------------------------------------------------------------------------
+# 0.3.40 — the badge is now LIVE-CHECKED (checked/notice) on every tab, and
+# a click on it flashes the upgrade hint. These mirror home_view.version_badge
+# exactly (same wording/colour), just drawn in the toolbar's corner instead.
+# --------------------------------------------------------------------------
+def test_unchecked_state_is_the_old_bare_badge():
+    """checked=None (the default, and the pre-0.3.40 behaviour): no freshness
+    claim at all -- same plain `v<version>` in the quiet tb.version class."""
+    out = pin_version_right([("class:tb.dim", "x")], "0.3.40", 40)
+    assert out[-1] == ("class:tb.version", " v0.3.40 ")
+
+
+def test_checked_up_to_date_uses_the_fresh_style():
+    out = pin_version_right([("class:tb.dim", "x")], "0.3.40", 40,
+                            notice="", checked=True)
+    assert out[-1][0] == "class:tb.fresh"
+    assert out[-1][1] == " v0.3.40 · up to date "
+
+
+def test_checked_update_available_uses_the_update_style():
+    out = pin_version_right([("class:tb.dim", "x")], "0.3.39", 60,
+                            notice="🐝 webbee v0.3.40 available — upgrade: pipx upgrade webbee",
+                            checked=True)
+    assert out[-1][0] == "class:tb.update"
+    assert out[-1][1] == " v0.3.39 → 0.3.40 available "
+
+
+def test_checked_false_offline_is_the_bare_badge_no_false_claim():
+    out = pin_version_right([("class:tb.dim", "x")], "0.3.40", 40,
+                            notice="", checked=False)
+    assert out[-1] == ("class:tb.version", " v0.3.40 ")
+
+
+def test_badge_click_flashes_the_notice_on_mouse_up():
+    from webbee.tui import _badge_click
+    from prompt_toolkit.mouse_events import MouseEvent, MouseEventType, MouseButton
+
+    class _FakePane:
+        def __init__(self):
+            self.flashed = None
+
+        def flash_note(self, msg, secs=4.0):
+            self.flashed = (msg, secs)
+
+    pane = _FakePane()
+    handler = _badge_click(pane, "upgrade: pipx upgrade webbee", forward=lambda ev: False)
+    ev = MouseEvent(position=None, event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(ev) is None
+    assert pane.flashed == ("upgrade: pipx upgrade webbee", 6.0)
+
+
+def test_badge_click_yields_to_a_forwarded_drag():
+    """A drag-release forwarded from the output pane wins -- the click never
+    fires (mirrors _forwarding's own contract, just for the badge fragment)."""
+    from webbee.tui import _badge_click
+    from prompt_toolkit.mouse_events import MouseEvent, MouseEventType, MouseButton
+
+    calls = []
+
+    class _FakePane:
+        def flash_note(self, msg, secs=4.0):
+            calls.append(msg)
+
+    handler = _badge_click(_FakePane(), "some notice", forward=lambda ev: True)
+    ev = MouseEvent(position=None, event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(ev) is None
+    assert calls == []
+
+
+def test_badge_click_ignores_non_click_events():
+    from webbee.tui import _badge_click
+    from prompt_toolkit.mouse_events import MouseEvent, MouseEventType, MouseButton
+
+    handler = _badge_click(object(), "notice", forward=lambda ev: False)
+    ev = MouseEvent(position=None, event_type=MouseEventType.MOUSE_DOWN,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(ev) is NotImplemented

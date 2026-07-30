@@ -1,3 +1,4 @@
+import difflib
 import os
 import re
 import subprocess
@@ -13,6 +14,31 @@ _WRITE_TIER = {"write_file", "edit_file", "multi_edit", "bash"}
 # the on-disk file is newer than the agent's last read (external edit under
 # the agent). Never blocks the work -- the brain just learns to re-read.
 _STALE_NOTE = "\n⚠ file changed on disk since you last read it — re-read to be safe"
+
+# Every successful write_file/edit_file/multi_edit computes a unified diff
+# (0.3.40, I-STREAM-STEP-DIFF): cheap (difflib on two already-in-memory
+# strings, no subprocess, no extra disk I/O beyond the write that already
+# happened) and capped so a rewritten 50k-line file can never blow up a
+# frame or the terminal -- the point is "what changed", not "the whole file
+# again". A binary/undecodable file (caught by the caller's own try/except)
+# never reaches this -- no diff is produced rather than a garbled one.
+_DIFF_CAP = 4000
+
+
+def _unified_diff(rel: str, before: str, after: str) -> str:
+    """PURE. before == after -> "" (a no-op edit shows no diff, not an empty
+    one). Otherwise a standard unified diff (3 lines of context, like `git
+    diff`), truncated at `_DIFF_CAP` chars with an honest marker -- never
+    silently dropped, never large enough to flood the transcript."""
+    if before == after:
+        return ""
+    lines = list(difflib.unified_diff(
+        before.splitlines(keepends=True), after.splitlines(keepends=True),
+        fromfile=rel, tofile=rel, n=3))
+    out = "".join(lines)
+    if len(out) > _DIFF_CAP:
+        out = out[:_DIFF_CAP] + f"\n… (diff truncated at {_DIFF_CAP} chars)\n"
+    return out
 
 
 def _relative_time(ts: float, now: float | None = None) -> str:
@@ -199,11 +225,22 @@ class LocalToolExecutor:
         rel = self._rel(a)
         p = self.resolve_in_workspace(rel)
         stale = self._stale_note(p)
+        before = ""
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                before = f.read()
+        except OSError:
+            pass          # new file -- diff against "" (a pure addition)
+        after = a.get("content", a.get("contents", ""))
         os.makedirs(os.path.dirname(p) or self.root, exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
-            f.write(a.get("content", a.get("contents", "")))
+            f.write(after)
         self._note_own_write(p)
-        return {"ok": True, "content": f"wrote {rel}" + stale}
+        out = {"ok": True, "content": f"wrote {rel}" + stale}
+        diff = _unified_diff(rel, before, after)
+        if diff:
+            out["diff"] = diff
+        return out
 
     def _t_edit_file(self, a: dict) -> dict:
         rel = self._rel(a)
@@ -225,11 +262,16 @@ class LocalToolExecutor:
             return {"ok": False, "content":
                     f"old string occurs {n} times; add surrounding context to make it "
                     f"unique, or pass replace_all=true to replace every occurrence"}
+        after = text.replace(old, new) if replace_all else text.replace(old, new, 1)
         with open(p, "w", encoding="utf-8") as f:
-            f.write(text.replace(old, new) if replace_all else text.replace(old, new, 1))
+            f.write(after)
         self._note_own_write(p)
         note = f" ({n} occurrences)" if replace_all and n > 1 else ""
-        return {"ok": True, "content": f"edited {rel}{note}" + stale}
+        out = {"ok": True, "content": f"edited {rel}{note}" + stale}
+        diff = _unified_diff(rel, text, after)
+        if diff:
+            out["diff"] = diff
+        return out
 
     def _t_multi_edit(self, a: dict) -> dict:
         edits = a.get("edits")
@@ -276,10 +318,17 @@ class LocalToolExecutor:
                     "multi_edit applied NOTHING -- fix these and retry:\n" + "\n".join(problems)}
         # Apply sequentially, re-reading so multiple edits to the SAME file
         # compose; if an earlier edit invalidated a later one, stop honestly.
+        # `originals` captures each file's FIRST-SEEN content (before ANY edit
+        # in this batch) so the diff shown at the end is one clean before/after
+        # per file, not a fragment per edit -- exactly what "what did this
+        # multi_edit change" should show.
         applied = []
+        originals: dict = {}
         for p, rel, old, new in staged:
             with open(p, "r", encoding="utf-8") as f:
                 text = f.read()
+            if rel not in originals:
+                originals[rel] = text
             if text.count(old) != 1:
                 return {"ok": False, "content":
                         f"multi_edit stopped at {rel}: an earlier edit in this batch changed "
@@ -291,8 +340,21 @@ class LocalToolExecutor:
             applied.append(rel)
         stale = ("\n⚠ changed on disk since you last read: " + ", ".join(stale_rels)
                  + " — re-read to be safe") if stale_rels else ""
-        return {"ok": True,
+        diffs = []
+        for p, rel, _old, _new in staged:
+            if rel in originals:
+                with open(p, "r", encoding="utf-8") as f:
+                    after = f.read()
+                d = _unified_diff(rel, originals.pop(rel), after)
+                if d:
+                    diffs.append(d)
+        out = {"ok": True,
                 "content": f"applied {len(applied)} edits: " + ", ".join(applied) + stale}
+        if diffs:
+            joined = "\n".join(diffs)
+            out["diff"] = joined[:_DIFF_CAP] + (
+                f"\n… (diff truncated at {_DIFF_CAP} chars)\n" if len(joined) > _DIFF_CAP else "")
+        return out
 
     def _t_checkpoint(self, a: dict) -> dict:
         if self.shadow is None:

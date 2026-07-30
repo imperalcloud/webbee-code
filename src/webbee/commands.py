@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 _MODES = ("default", "plan", "autopilot")
+_TIERS = ("smart", "supersmart", "ultrasmart")
 
 _HELP = """Commands:
   /help              show this help
@@ -8,6 +9,7 @@ _HELP = """Commands:
   /logout            sign out and remove local credentials
   /clear             clear the screen + reset session counters
   /mode [default|plan|autopilot]   consent mode (no arg — show current)
+  /model [smart|supersmart|ultrasmart]   coding brain tier (no arg — show current)
   /cost  (=/usage)   tokens + credits this session
   /status            cwd · git · surface · tokens · version
   /new [path]        open a new tab — a session in path (default: cwd)
@@ -29,6 +31,7 @@ _HELP = """Commands:
 Keys:
   Alt+↵ (or Shift+↵, or Ctrl+J)   new line in the prompt — Enter still sends
   Shift+TAB          switch mode        Ctrl+T   new tab
+  Ctrl+B             cycle model tier
   Alt+№              switch to tab №    Ctrl+W   close tab"""
 
 
@@ -43,6 +46,7 @@ class CommandContext:
     session_credits: int
     git_branch: str
     queued: tuple = ()   # snapshot of the dock's type-ahead queue, oldest first
+    model_tier: str = ""   # "" = server admin default; else smart|supersmart|ultrasmart
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class SlashResult:
     message: str = ""
     action: str = ""
     new_mode: "str | None" = None
+    new_tier: "str | None" = None
     arg: str = ""
 
 
@@ -165,4 +170,15 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
                                message=f"Unknown mode '{want}'. Available: {', '.join(_MODES)}.")
         return SlashResult(handled=True, action="mode", new_mode=want,
                            message=f"Mode → {want}.")
+    if cmd == "/model":
+        if not args:
+            current = ctx.model_tier or "(server default)"
+            return SlashResult(handled=True, action="model_tier", new_tier=None,
+                               message=f"Current tier: {current}. Available: {', '.join(_TIERS)}.")
+        want = args[0].lower()
+        if want not in _TIERS:
+            return SlashResult(handled=True, action="model_tier", new_tier=None,
+                               message=f"Unknown tier '{want}'. Available: {', '.join(_TIERS)}.")
+        return SlashResult(handled=True, action="model_tier", new_tier=want,
+                           message=f"Model tier → {want}.")
     return SlashResult(handled=True, message=f"Unknown command '{cmd}'. /help for the list.")

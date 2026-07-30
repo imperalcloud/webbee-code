@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.3.40
+
+The bottom-right version badge is now real everywhere, and Home stopped
+repeating itself.
+
+- **The version badge actually checks for updates now — on every tab, not
+  just Home.** One background PyPI check runs at startup (same 24h-cached
+  check Home already had), and the toolbar badge in the bottom-right corner
+  of every session tab reflects the real verdict: dim grey while unchecked,
+  a calm green "vX.Y.Z · up to date" once confirmed current, or a bee-yellow
+  "vX.Y.Z → X.Y.W available" the moment a newer release is found — offline
+  never claims to be "up to date" (see the exact wording in
+  `home_view.version_badge`).
+- **The badge is now clickable.** When an update is available, clicking it
+  flashes the upgrade command into the toolbar (`pipx upgrade webbee` / `uv
+  tool upgrade webbee`) — no need to dig through the CHANGELOG to find it.
+- **Home no longer shows the version at all.** It used to appear three
+  times at once (the Settings tile, Home's own footer badge, and the global
+  toolbar badge) — now there's exactly one place to check it: the toolbar,
+  always visible, always live. Home's Settings tile keeps only what's
+  actually Home-specific (code intel status + which gateway you're on).
+- **`write_file`/`edit_file`/`multi_edit` now show what actually changed.**
+  Every successful write/edit computes a real unified diff (`git diff`
+  style: `+`/`-`/`@@` lines, colored the same way) and prints it right after
+  the tool's result line in a compact bordered block — no need to re-open
+  the file to see what an edit did. Computed locally from the two strings
+  already in memory (no subprocess, no extra disk I/O), capped so a huge
+  rewrite can never flood the transcript, and silent on a true no-op edit.
+  `/steps N` (and Up/Down + Enter) already let you expand any step of the
+  last turn to see its full args/result — clicking a transcript line
+  directly to do the same is the natural next step and is being scoped
+  next.
+
+## 0.3.39
+
+Right-click now pastes too, so copy/paste works fully with the mouse alone
+(scroll, select-to-copy, middle-click, and now right-click), plus two small
+fixes.
+
+- **Right-click paste.** Mirrors Ctrl+V: pastes the OS clipboard (text or an
+  image, uploaded the same way as Ctrl+V/middle-click). Combined with the
+  existing wheel-scroll and click-drag-to-copy, the mouse alone now covers
+  the full copy/paste loop, no keyboard required.
+- **`/login` on a browser-less machine** now says outright that any device
+  works ("open this URL in any browser (a phone is fine)") on the plain
+  (non-Rich) fallback path too, matching the rich client's own wording.
+- Fixed the version badge reporting `0.3.37` after the 0.3.38 release
+  (`webbee.__version__` wasn't bumped alongside `pyproject.toml`).
+
 ## 0.3.38
 
 Attach files by path, paste with the middle mouse button, see how long a

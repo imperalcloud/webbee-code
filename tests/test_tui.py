@@ -2,7 +2,7 @@ import asyncio
 import re
 from types import SimpleNamespace
 
-from webbee.tui import next_mode, build_toolbar
+from webbee.tui import next_mode, next_tier, build_toolbar
 
 
 def mk_slots(*, pane=None, sink=None, pending=None, turn=None, mode="default",
@@ -62,6 +62,16 @@ def test_next_mode_cycles():
 
 def test_next_mode_unknown_resets():
     assert next_mode("weird") == "default"
+
+
+def test_next_tier_cycles():
+    assert next_tier("smart") == "supersmart"
+    assert next_tier("supersmart") == "ultrasmart"
+    assert next_tier("ultrasmart") == "smart"
+
+def test_next_tier_unknown_or_unset_resets():
+    assert next_tier("weird") == "smart"
+    assert next_tier("") == "smart"
 
 def test_toolbar_idle_has_mode_tokens_cost_and_hint():
     t = _txt(build_toolbar("plan", 51000, 66))

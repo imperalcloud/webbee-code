@@ -690,6 +690,44 @@ class RichSink:
         self.console.print(Text("  /sessions revoke <#>  ·  /logout-others", style="dim"))
         self._nudge()
 
+    def tool_diff(self, tool: str, diff: str) -> None:
+        """0.3.40 (I-STREAM-STEP-DIFF): a compact unified diff right after a
+        write_file/edit_file/multi_edit result -- "what did that edit
+        actually change", without opening the file yourself. Manually
+        colored (no Syntax/pygments dependency, no extra import weight):
+        `+` lines green, `-` lines red, `@@` hunk headers dim-cyan, file
+        header lines (`---`/`+++`) and everything else dim -- the same
+        3-color convention `git diff` itself uses, just plain Rich Text so
+        it costs nothing beyond what's already imported. Wrapped in the SAME
+        dim-bordered Panel as `step_detail` for one consistent "extra detail"
+        visual language, title names the tool so it reads standalone even if
+        scrolled past the result line above it."""
+        if not diff:
+            return
+        body = Text()
+        lines = diff.splitlines()
+        cap = 200   # hard render cap -- _DIFF_CAP already bounds chars; this bounds LINES
+        shown = lines[:cap]
+        for i, line in enumerate(shown):
+            if i:
+                body.append("\n")
+            if line.startswith("+++") or line.startswith("---"):
+                body.append(_clean(line), style="dim bold")
+            elif line.startswith("@@"):
+                body.append(_clean(line), style="cyan dim")
+            elif line.startswith("+"):
+                body.append(_clean(line), style="green")
+            elif line.startswith("-"):
+                body.append(_clean(line), style="red")
+            else:
+                body.append(_clean(line), style="dim")
+        if len(lines) > cap:
+            body.append(f"\n… ({len(lines) - cap} more lines, truncated)", style="dim italic")
+        self.console.print(_pad(Panel(body, border_style="dim",
+                                      title=f"diff · {tool}" if tool else "diff",
+                                      title_align="left")))
+        self._nudge()
+
     def step_detail(self, detail: dict) -> None:
         """P1b drill-down: one bordered block — facts row + bounded
         args/result previews (already PII-masked server-side)."""

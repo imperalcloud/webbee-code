@@ -19,6 +19,15 @@ def _isolate_mode_cache(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_tier_cache(tmp_path, monkeypatch):
+    """webbee-code-model-tier-slash-command-v1: tier_store.py writes a tiny
+    per-repo marker to ~/.cache/webbee/tier-{repo_key}, sibling of mode_store
+    -- same isolation rationale as _isolate_mode_cache above."""
+    import webbee.tier_store as tier_store
+    monkeypatch.setattr(tier_store, "_CACHE_DIR", str(tmp_path / "webbee-tier-cache"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_instance_lock_cache(tmp_path, monkeypatch):
     """0.3.25 Part C: the per-repo instance lock writes a real flock'd file
     under `~/.cache/webbee/instance-{repo_key}.lock` -- same rationale as
@@ -52,6 +61,9 @@ def _reset_mode_store_repo_key_cache():
     CONSTRUCTION instead of by luck.
     """
     import webbee.mode_store as mode_store
+    import webbee.tier_store as tier_store
     mode_store._KEY_CACHE.clear()
+    tier_store._KEY_CACHE.clear()
     yield
     mode_store._KEY_CACHE.clear()
+    tier_store._KEY_CACHE.clear()

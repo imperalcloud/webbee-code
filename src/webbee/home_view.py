@@ -685,9 +685,13 @@ class HomeView:
                       (sfor(nt), f"[{nt.value}]", self._item_handler(nt))])
             d = self.data
             intel = d.intel_status or ("on" if d.intel_enabled else "off")
-            L.append([("class:home.dim", f"  code intel {intel} · {d.endpoint} · v{d.version}")])
-            if d.update_notice:
-                L.append([("class:home.dim", f"  {d.update_notice}")])
+            # 0.3.40: the version moved OUT of Home entirely -- it was shown
+            # here AND in the footer badge below AND (identically) in the
+            # global toolbar badge that's visible on every tab, all at once.
+            # Home keeps only what's actually Home-specific (intel + which
+            # gateway it's talking to); the ONE place to check "am I on the
+            # latest release" is now the toolbar, always visible, always live.
+            L.append([("class:home.dim", f"  code intel {intel} · {d.endpoint}")])
             return L
 
         def security_lines():
@@ -707,22 +711,14 @@ class HomeView:
             L = [[("", "")], [("class:home.hint", f"  {hint}")]]
             if self.data.notice:
                 L.append([("class:home.dim", f"  {self.data.notice}")])
-            # Key legend on the LEFT, version badge hard-right on the SAME row
-            # (0.3.36) -- the bottom-right corner of Home, as asked. When the
-            # window is too narrow to hold both, the badge drops to its own
-            # right-aligned row instead of being truncated.
+            # 0.3.40: the version badge that used to live HERE, duplicating
+            # the one in settings_lines() above AND the global toolbar badge
+            # (tui.pin_version_right, now live-checked on every tab, not just
+            # Home) is gone -- it was in the way, exactly as reported. The
+            # key legend gets the full row width to itself now.
             keys = ("  ↑↓ move · ↵ open · ←→ change "
                     "· Alt+↵ newline · Ctrl+T new tab · Alt+N switch")
-            btxt, bstyle = version_badge(self.data.version, self.data.update_notice,
-                                         checked=self.data.update_checked)
-            pad = width - len(keys) - len(btxt) - 2
-            if pad >= 1:
-                L.append([("class:home.dim", keys), ("", " " * pad),
-                          (bstyle, btxt), ("", "  ")])
-            else:
-                L.append([("class:home.dim", keys)])
-                rpad = max(0, width - len(btxt) - 2)
-                L.append([("", " " * rpad), (bstyle, btxt), ("", "  ")])
+            L.append([("class:home.dim", keys)])
             return L
 
         # No center title — the tab bar's ◆ Home chip already names the tab,

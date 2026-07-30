@@ -109,6 +109,10 @@ class SessionSlot:
     qp_ui: dict = field(default_factory=lambda: {"collapsed": False})
     tp_ui: dict = field(default_factory=lambda: {"collapsed": False})
     mode: str = "default"
+    model_tier: str = ""               # "" = server admin default (unset by client), else
+                                        # "smart"|"supersmart"|"ultrasmart" -- see tier_store.py.
+                                        # Threaded into coding_context on every turn, mirroring
+                                        # how repo_key already rides the same dict.
     git_branch: str = "-"
     history: object | None = None      # prompt_toolkit InMemoryHistory (made in tui task)
     steer_backlog: deque = field(default_factory=deque)   # reserved (W4b)

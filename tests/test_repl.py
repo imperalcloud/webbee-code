@@ -6,7 +6,7 @@ from webbee.account import Account
 from webbee.repl import (_cancel_all_background, _cancel_slot, _exit_dump,
                          _finish_slot, _isolate_workspace, _make_session_slot,
                          _slot_ctx, run_marathon, run_repl,
-                         set_slot_mode)
+                         set_slot_mode, set_slot_tier)
 from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
 
 NO_CYRILLIC = re.compile(r"[а-яА-ЯёЁ]")
@@ -41,7 +41,7 @@ class FakeSink:
 
 
 class FakeAgent:
-    def __init__(self): self.tasks = []; self.mode = "default"; self.runs = []
+    def __init__(self): self.tasks = []; self.mode = "default"; self.model_tier = ""; self.runs = []
     async def run(self, task, sink, *, marathon=False, goal=""):
         self.tasks.append(task)
         self.runs.append({"task": task, "marathon": marathon, "goal": goal})
@@ -398,6 +398,52 @@ def test_set_slot_mode_persists_for_this_slots_workspace(monkeypatch):
                        pane=object(), sink=FakeSink(), agent=FakeAgent(), mode="default")
     set_slot_mode(slot, "autopilot")
     assert calls == [("/ws-a", "autopilot")]   # save_mode itself owns the never-persist-autopilot rule
+
+
+# -- set_slot_tier: the ONE place a slot's model tier is ever assigned ------
+# (webbee-code-model-tier-slash-command-v1, mirrors set_slot_mode above)
+
+def test_set_slot_tier_updates_slot_and_agent(monkeypatch):
+    import webbee.tier_store as TS
+    monkeypatch.setattr(TS, "save_tier", lambda ws, tier: None)
+    agent = FakeAgent()
+    slot = SessionSlot(kind="session", workspace="/ws-a", label="a",
+                       pane=object(), sink=FakeSink(), agent=agent, model_tier="")
+    set_slot_tier(slot, "supersmart")
+    assert slot.model_tier == "supersmart"
+    assert agent.model_tier == "supersmart"
+
+
+def test_set_slot_tier_never_crashes_on_agentless_home_slot(monkeypatch):
+    import webbee.tier_store as TS
+    monkeypatch.setattr(TS, "save_tier", lambda ws, tier: None)
+    home = SessionSlot(kind="home", workspace="/ws-home", label="Home",
+                       pane=object(), sink=None, agent=None)
+    set_slot_tier(home, "ultrasmart")
+    assert home.model_tier == "ultrasmart"
+
+
+def test_set_slot_tier_persists_for_this_slots_workspace(monkeypatch):
+    import webbee.tier_store as TS
+    calls = []
+    monkeypatch.setattr(TS, "save_tier", lambda ws, tier: calls.append((ws, tier)))
+    slot = SessionSlot(kind="session", workspace="/ws-a", label="a",
+                       pane=object(), sink=FakeSink(), agent=FakeAgent(), model_tier="")
+    set_slot_tier(slot, "ultrasmart")
+    assert calls == [("/ws-a", "ultrasmart")]
+
+
+def test_tier_cycle_and_model_action_route_through_set_slot_tier():
+    import inspect
+
+    import webbee.repl as R
+    src = inspect.getsource(R.run_repl)
+    assert "def _tier_cycle" in src
+    tier_cycle_body = src.split("def _tier_cycle")[1].split("async def _handle")[0]
+    assert "set_slot_tier(slot, next_tier(slot.model_tier))" in tier_cycle_body
+
+    tier_action = src.split('res.action == "model_tier" and res.new_tier:')[1][:200]
+    assert "set_slot_tier(slot, res.new_tier)" in tier_action
 
 
 def test_three_mode_mutation_sites_all_route_through_set_slot_mode():

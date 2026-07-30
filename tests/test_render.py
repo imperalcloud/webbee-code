@@ -932,3 +932,31 @@ def test_end_turn_preserves_turn_failed_flag():
     s.mark_turn_failed()
     s.end_turn("")
     assert s.status()["turn_failed"] is True
+
+
+# ---- 0.3.40 (I-STREAM-STEP-DIFF): tool_diff renders right after a result --
+def test_tool_diff_renders_added_and_removed_lines():
+    s = _sink()
+    diff = (
+        "--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n"
+        " unchanged line\n-old line\n+new line\n"
+    )
+    s.tool_diff("edit_file", diff)
+    out = s.console.export_text()
+    assert "old line" in out and "new line" in out
+    assert "edit_file" in out
+
+
+def test_tool_diff_is_a_no_op_on_empty_diff():
+    s = _sink()
+    s.tool_diff("edit_file", "")
+    assert s.console.export_text() == ""
+
+
+def test_tool_diff_caps_very_long_diffs_without_crashing():
+    s = _sink()
+    diff = "\n".join(f"+line {i}" for i in range(500))
+    s.tool_diff("write_file", diff)
+    out = s.console.export_text()
+    assert "line 0" in out
+    assert "truncated" in out.lower()

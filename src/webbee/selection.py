@@ -54,6 +54,18 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                 if hook is not None:
                     hook()
                 return None
+            if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.RIGHT:
+                # webbee-code-mouse-right-click-paste-v1: the OTHER common
+                # terminal convention (PuTTY / Windows Terminal / many Linux
+                # emulators) -- right-click pastes the regular OS CLIPBOARD
+                # (same source Ctrl+V reads, text OR image), independent of
+                # middle-click's PRIMARY-selection read. Same one-hook,
+                # sync-dispatch discipline as MIDDLE above; a pane with no
+                # hook wired (tests, no dock) is a harmless no-op.
+                hook = getattr(pane, "on_right_paste", None)
+                if hook is not None:
+                    hook()
+                return None
             if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.LEFT:
                 if self._down_abs is not None:
                     # A previous drag never got its MOUSE_UP (prompt_toolkit has

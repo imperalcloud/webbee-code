@@ -12,7 +12,7 @@ from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
 from webbee.slots import (SessionSlot, SlotManager, WorkspaceResources,
                          auto_label, close_active, close_at, sanitize_label)
-from webbee.tui import _MODES, next_mode
+from webbee.tui import _MODES, next_mode, next_tier
 
 
 async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
@@ -154,7 +154,8 @@ def _slot_ctx(slot: SessionSlot, *, logged_in: bool, slots=None) -> CommandConte
                           surface="terminal", logged_in=logged_in,
                           session_tokens=tokens,
                           session_credits=credits,
-                          git_branch=slot.git_branch, queued=tuple(slot.pending))
+                          git_branch=slot.git_branch, queued=tuple(slot.pending),
+                          model_tier=slot.model_tier)
 
 
 # FIX4 (W4a final review — Home None-sink command crashes): actions that are
@@ -176,7 +177,8 @@ def _slot_ctx(slot: SessionSlot, *, logged_in: bool, slots=None) -> CommandConte
 # number the Home toolbar and dashboard show) instead of Home's own zeros.
 _HOME_GATED_ACTIONS = frozenset({
     "steps", "step_detail", "checkpoints", "rollback", "notify", "mode",
-    "queue", "queue_clear", "queue_drop", "queue_edit", "rename", "attach",
+    "model_tier", "queue", "queue_clear", "queue_drop", "queue_edit",
+    "rename", "attach",
 })
 
 _HOME_GATE_NOTE = "open a session tab first — Ctrl+T or type a task"
@@ -202,7 +204,7 @@ class _SaySink:
         _say(self._slot, str(msg))
 
     def login_prompt(self, user_code: str, uri: str) -> None:
-        _say(self._slot, f"Open {uri} and enter code: {user_code}")
+        _say(self._slot, f"Open {uri} in any browser (a phone is fine) and enter code: {user_code}")
 
 
 def _format_sessions_plain(rows) -> str:
@@ -265,6 +267,24 @@ def set_slot_mode(slot: SessionSlot, mode: str) -> None:
         slot.agent.mode = mode
     from webbee.mode_store import save_mode
     save_mode(slot.workspace, mode)
+
+
+def set_slot_tier(slot: SessionSlot, tier: str) -> None:
+    """The ONE place a slot's model tier is ever assigned (webbee-code-
+    model-tier-slash-command-v1) -- mutates `slot.model_tier` + the live
+    `agent.model_tier` together, then remembers the choice for THIS repo via
+    tier_store.save_tier so the next process boot in it resumes here.
+    `tier=""` means \"forget my choice, use the server admin default\" --
+    the SAME semantics /model with no recognised value falls back to.
+    Mirrors set_slot_mode exactly (see its own docstring for the shared
+    rationale); kept as a SEPARATE function rather than folded into it
+    because tier and mode are two fully independent per-repo choices with
+    different valid-value sets."""
+    slot.model_tier = tier
+    if slot.agent is not None:
+        slot.agent.model_tier = tier
+    from webbee.tier_store import save_tier
+    save_tier(slot.workspace, tier)
 
 
 # Strong refs for in-flight autopilot confirms (see _on_mode). A module-level
@@ -630,6 +650,38 @@ async def _live_session_watch(cfg, token_provider, workspace, live: dict,
         await _sleep(interval)
 
 
+async def _check_update_bg(update_state: dict, *, invalidate=None,
+                           fetch=None, cache_path=None) -> None:
+    """One-shot background PyPI freshness check for the toolbar's version
+    badge (0.3.40) -- runs ONCE at startup, off the event loop (the real
+    HTTP call is sync `httpx`, via `webbee.update.default_fetch`), same 24h
+    file cache `home.py`'s own Home-only check already uses -- so wiring the
+    SAME badge into every tab's toolbar costs no extra PyPI traffic when
+    Home already warmed the cache, and costs exactly one request when it
+    didn't. Writes ONLY `update_state["notice"]`/`["checked"]`, which
+    `tui`'s toolbar reads every redraw (mirrors `_live_session_watch`'s
+    `live["text"]` pattern) -- fail-soft: any error leaves `checked=None`,
+    the toolbar's honest "haven't resolved yet" state, never a false claim.
+    """
+    import os
+    import time
+    from pathlib import Path
+
+    from webbee import __version__
+    from webbee.update import check_update_status, default_fetch
+    try:
+        cache = cache_path or Path(os.path.expanduser("~/.cache/webbee/update.json"))
+        notice, checked = await asyncio.to_thread(
+            check_update_status, __version__, cache_path=cache, now=time.time(),
+            fetch=fetch or default_fetch)
+        update_state["notice"] = notice
+        update_state["checked"] = checked
+        if invalidate is not None:
+            invalidate()
+    except Exception:
+        pass
+
+
 async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: WorkspaceResources,
                        agent_factory, intel_factory, shadow_factory, pane, sink, first: bool,
                        account, slot_id: str = "", label: "str | None" = None) -> "tuple[SessionSlot, int]":
@@ -657,11 +709,18 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
     factory = _resolve_agent_factory(agent_factory, bundle)
     agent = factory(cfg, token_provider, workspace, mode)
     agent.slot_id = slot_id
+    # webbee-code-model-tier-slash-command-v1: resume this repo's remembered
+    # tier (git-remote-keyed, same cache dir/convention as mode_store) --
+    # "" (no file / never chosen) means "server admin default", same as
+    # every pre-existing session before this feature shipped.
+    from webbee.tier_store import load_tier
+    tier = await asyncio.to_thread(load_tier, workspace) or ""
+    agent.model_tier = tier
     if label is None:
         label = os.path.basename(os.path.normpath(workspace)) or workspace
     slot = SessionSlot(kind="session", workspace=workspace, label=label, pane=pane,
                        sink=sink, agent=agent, mode=mode, git_branch=bundle["git_branch"],
-                       slot_id=slot_id, started_at=time.monotonic())
+                       slot_id=slot_id, started_at=time.monotonic(), model_tier=tier)
     # Queue-panel single-source dedup (0.3.16): hand the sink the SAME
     # type-ahead deque tui mutates for THIS slot, so a kernel task_queued
     # echo can promote a landed local twin (matched by steer_iid) into the
@@ -1052,6 +1111,12 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         slot = slots.active()
         set_slot_mode(slot, next_mode(slot.mode))
 
+    def _tier_cycle() -> None:
+        # webbee-code-model-tier-slash-command-v1: Ctrl+B's keyboard sibling
+        # of Shift+TAB's _cycle above -- same pattern, different store.
+        slot = slots.active()
+        set_slot_tier(slot, next_tier(slot.model_tier))
+
     async def _handle(line: str, slot: SessionSlot) -> str:
         """Process one input line AGAINST an EXPLICIT slot (FIX1, W4a final
         review) -- every caller pins the slot the line actually belongs to
@@ -1352,6 +1417,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 # Home never reaches here -- "mode" is in _HOME_GATED_ACTIONS,
                 # so Home's own slot.mode is never mutated by a remote /mode.
                 set_slot_mode(slot, res.new_mode)
+            if res.action == "model_tier" and res.new_tier:
+                set_slot_tier(slot, res.new_tier)
             if res.message:
                 _say(slot, res.message)
             return "continue"
@@ -1766,6 +1833,15 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     _live_session_watch(cfg, token_provider, workspace, _live_state,
                                         invalidate=_invalidate_dock)))
 
+                # 0.3.40: the toolbar's bottom-right version badge now checks
+                # for real on EVERY tab (not just Home) -- one background
+                # fetch at startup, same cache file `home.py`'s own check
+                # already uses (~/.cache/webbee/update.json, 24h TTL), so
+                # this adds no extra PyPI traffic beyond what already ran.
+                _update_state: dict = {"notice": "", "checked": None}
+                home_slot.bg_tasks.append(asyncio.ensure_future(
+                    _check_update_bg(_update_state, invalidate=_invalidate_dock)))
+
                 async def _on_line(text: str, slot: SessionSlot) -> None:
                     if await _handle(text, slot) == "exit":
                         from prompt_toolkit.application import get_app
@@ -1800,6 +1876,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 try:
                     ok = await tui.run_session(
                         slots=slots, on_line=_on_line, on_cycle=_cycle,
+                        on_tier_cycle=_tier_cycle,
                         steps_nav={
                             "count": lambda: len(getattr(slots.active().agent, "steps", [])),
                             "expand": lambda i, slot: _handle(f"/steps {i + 1}", slot),
@@ -1821,6 +1898,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         on_new=lambda: _open_new_tab(),
                         on_paste=_on_paste,
                         live=_live_state,
+                        update_state=_update_state,
                     )
                 finally:
                     # 0.3.37: remember the tab layout BEFORE teardown, while the

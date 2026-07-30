@@ -102,11 +102,17 @@ class AgentSession:
     so context carries across turns). Persistent signal-based sessions are P3."""
 
     def __init__(self, cfg, token_provider, workspace_root: str, mode: str = "default", intel=None,
-                 shadow=None, slot_id: str = "") -> None:
+                 shadow=None, slot_id: str = "", model_tier: str = "") -> None:
         self.cfg = cfg
         self.token_provider = token_provider
         self.workspace_root = workspace_root
         self.mode = mode
+        # webbee-code-model-tier-slash-command-v1: "" = server admin default
+        # (client never chose one); else "smart"|"supersmart"|"ultrasmart".
+        # Mutated in place by repl.set_slot_tier, exactly like self.mode is
+        # mutated by set_slot_mode -- read fresh into coding_context on every
+        # turn below, so a mid-session /model change takes effect next turn.
+        self.model_tier = model_tier
         self.session_id: str = ""
         self.steps: deque = deque(maxlen=200)
         self._task_id: str = ""
@@ -143,6 +149,8 @@ class AgentSession:
         # subprocess.run(git status, timeout=10) + os.walk; inline on the dock's
         # asyncio loop it froze the whole UI at every turn start.
         coding_context = await asyncio.to_thread(build_coding_context, self.workspace_root, self._intel)
+        if self.model_tier:
+            coding_context = {**coding_context, "model_tier": self.model_tier}
         if marathon:
             # verify_cmd is CLIENT-detected here and carried in coding_context —
             # the trusted proof-of-done the kernel runs (never brain-authored).
@@ -329,6 +337,19 @@ class AgentSession:
                         if _first_time(sid, finished):
                             try:
                                 sink.tool_result(_tag + frame.get("tool", ""), bool(res.get("ok")), _summary(res))
+                                # 0.3.40 (I-STREAM-STEP-DIFF): local write_file/
+                                # edit_file/multi_edit hand back a unified diff
+                                # of what actually changed on disk -- shown
+                                # right after the result line via an OPTIONAL
+                                # sink hook (getattr-guarded like `thinking`/
+                                # `reconnecting` above: a plain/older sink that
+                                # doesn't implement it just skips the extra
+                                # detail, never breaks).
+                                _diff = res.get("diff") if isinstance(res, dict) else ""
+                                if _diff:
+                                    _td = getattr(sink, "tool_diff", None)
+                                    if _td is not None:
+                                        _td(frame.get("tool", ""), _diff)
                                 self.steps.append({"step_id": sid,
                                                    "label": frame.get("tool", ""),
                                                    "ok": bool(res.get("ok"))})

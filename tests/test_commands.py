@@ -26,13 +26,13 @@ def test_exit_and_quit():
 def test_help_lists_commands():
     r = dispatch("/help", _ctx())
     assert r.handled and r.action == "help"
-    for c in ("/login", "/logout", "/clear", "/mode", "/cost", "/status", "/sessions", "/logout-others", "/exit"):
+    for c in ("/login", "/logout", "/clear", "/mode", "/model", "/cost", "/status", "/sessions", "/logout-others", "/exit"):
         assert c in r.message
 
 
 def test_help_is_english():
     r = dispatch("/help", _ctx())
-    for c in ("/login", "/logout", "/clear", "/mode", "/cost", "/status", "/sessions", "/logout-others", "/exit"):
+    for c in ("/login", "/logout", "/clear", "/mode", "/model", "/cost", "/status", "/sessions", "/logout-others", "/exit"):
         assert c in r.message
     assert not NO_CYRILLIC.search(r.message)
 
@@ -50,6 +50,26 @@ def test_mode_shows_current_when_no_arg():
 def test_mode_rejects_unknown():
     r = dispatch("/mode turbo", _ctx())
     assert r.handled and r.new_mode is None and "turbo" in r.message
+
+
+def test_model_tier_switch_valid():
+    r = dispatch("/model supersmart", _ctx())
+    assert r.handled and r.action == "model_tier" and r.new_tier == "supersmart"
+
+
+def test_model_tier_shows_current_when_no_arg():
+    r = dispatch("/model", _ctx(model_tier="ultrasmart"))
+    assert r.handled and r.new_tier is None and "ultrasmart" in r.message
+
+
+def test_model_tier_shows_server_default_when_unset():
+    r = dispatch("/model", _ctx())
+    assert r.handled and r.new_tier is None and "server default" in r.message
+
+
+def test_model_tier_rejects_unknown():
+    r = dispatch("/model turbo", _ctx())
+    assert r.handled and r.new_tier is None and "turbo" in r.message
 
 
 def test_status_reports_state():

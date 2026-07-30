@@ -507,3 +507,85 @@ def test_read_header_intel_degrades_gracefully(tmp_path):
     ex2 = LocalToolExecutor(str(tmp_path), indexer=_Boom())
     r = ex2.run("read_file", {"path": "a.py"})
     assert r["ok"] and "1 line" in r["content"].split("\n", 1)[0]
+
+
+# --------------------------------------------------------------------------
+# 0.3.40 (I-STREAM-STEP-DIFF) -- write_file/edit_file/multi_edit now return a
+# unified diff of what actually changed, so the terminal can show it right
+# after the result line instead of the user having to open the file.
+# --------------------------------------------------------------------------
+def test_write_file_new_file_has_no_diff_noise_but_edit_does(tmp_path):
+    ex = _ex(tmp_path)
+    # A brand-new file has nothing to diff AGAINST in a meaningful way for a
+    # first write (before="") -- still produces a proper +-only unified diff.
+    r = ex.run("write_file", {"path": "a.txt", "content": "line one\nline two\n"})
+    assert r["ok"]
+    assert "diff" in r
+    assert "+line one" in r["diff"]
+    assert "+line two" in r["diff"]
+
+
+def test_write_file_overwrite_shows_before_and_after(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "old content\n"})
+    r = ex.run("write_file", {"path": "a.txt", "content": "new content\n"})
+    assert r["ok"]
+    assert "-old content" in r["diff"]
+    assert "+new content" in r["diff"]
+
+
+def test_write_file_identical_content_produces_no_diff_key(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "same\n"})
+    r = ex.run("write_file", {"path": "a.txt", "content": "same\n"})
+    assert r["ok"]
+    assert "diff" not in r
+
+
+def test_edit_file_diff_shows_the_one_line_change(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "hello world\n"})
+    r = ex.run("edit_file", {"path": "a.txt", "old": "world", "new": "webbee"})
+    assert r["ok"]
+    assert "-hello world" in r["diff"]
+    assert "+hello webbee" in r["diff"]
+
+
+def test_multi_edit_diff_covers_every_touched_file_once(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "foo\n"})
+    ex.run("write_file", {"path": "b.txt", "content": "bar\n"})
+    r = ex.run("multi_edit", {"edits": [
+        {"path": "a.txt", "old": "foo", "new": "FOO"},
+        {"path": "b.txt", "old": "bar", "new": "BAR"},
+    ]})
+    assert r["ok"]
+    assert "diff" in r
+    assert "a.txt" in r["diff"] and "b.txt" in r["diff"]
+    assert "+FOO" in r["diff"] and "+BAR" in r["diff"]
+
+
+def test_multi_edit_same_file_diff_is_one_clean_before_after(tmp_path):
+    """Two edits to the SAME file in one batch -> ONE diff for that file
+    (first-seen content vs. final), not one fragment per edit."""
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "one two three\n"})
+    r = ex.run("multi_edit", {"edits": [
+        {"path": "a.txt", "old": "one", "new": "ONE"},
+        {"path": "a.txt", "old": "three", "new": "THREE"},
+    ]})
+    assert r["ok"]
+    # Exactly one diff hunk-set for a.txt, not two separate --- a.txt blocks.
+    assert r["diff"].count("--- a.txt") == 1
+    assert "+ONE two THREE" in r["diff"]
+
+
+def test_diff_is_capped_and_never_explodes_a_giant_rewrite(tmp_path):
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "a.txt", "content": "x\n" * 5})
+    big = "y\n" * 20000
+    r = ex.run("write_file", {"path": "a.txt", "content": big})
+    assert r["ok"]
+    assert "diff" in r
+    assert len(r["diff"]) <= 4000 + 100   # _DIFF_CAP + truncation marker slack
+    assert "truncated" in r["diff"]

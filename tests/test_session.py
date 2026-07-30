@@ -1678,3 +1678,169 @@ def test_attach_honors_given_task_id_filters_foreign_frames(monkeypatch):
     assert executed == []                           # foreign tool_request never dispatched
     assert posts == []                              # no /result POST for the foreign frame
     assert sess._task_id == "OURS"
+
+
+def test_serve_stream_calls_sink_tool_diff_when_executor_returns_a_diff(monkeypatch):
+    # 0.3.40 (I-STREAM-STEP-DIFF): a local write_file/edit_file/multi_edit
+    # result carrying a "diff" key must reach an OPTIONAL sink.tool_diff
+    # hook, right after tool_result -- so the terminal can show "what
+    # actually changed" without a second round trip.
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+    import webbee.tools as T
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    class _RecExecutor:
+        def __init__(self, root, indexer=None, shadow=None):
+            pass
+
+        def run(self, tool, args):
+            if tool == "edit_file":
+                return {"ok": True, "content": "edited a.txt", "diff": "-old\n+new"}
+            return {"ok": True, "content": "ran"}
+
+    monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
+        yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
+               "tool": "edit_file", "args": {}}
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    class _SessResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class _ResultResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, **kw):
+            return _SessResp() if path == "/v1/agent/sessions" else _ResultResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    class RecSink:
+        def __init__(self):
+            self.diffs = []
+        def tool_start(self, *a): ...
+        def tool_result(self, *a): ...
+        def tool_diff(self, tool, diff): self.diffs.append((tool, diff))
+        def ask_consent(self, *a): return "y"
+        def consent_dismissed(self, note): ...
+        def panel_release(self, *a): ...
+        def progress(self, text): ...
+        def usage(self, *a): ...
+        def foreign_turn(self, surface, role, text): ...
+        def todos(self, items, total, done): ...
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    sink = RecSink()
+    result = asyncio.run(sess.run("edit it", sink))
+
+    assert result == "done"
+    assert sink.diffs == [("edit_file", "-old\n+new")]
+
+
+def test_serve_stream_skips_tool_diff_hook_gracefully_when_sink_lacks_it(monkeypatch):
+    # A sink that doesn't implement tool_diff (older/plain sink, or a test
+    # stub) must never break the turn -- the diff is simply not shown.
+    import httpx
+    import imperal_mcp.client as ic
+    import webbee.session as S
+    import webbee.stream as ST
+    import webbee.tools as T
+
+    monkeypatch.setattr(S, "build_coding_context", lambda root, intel=None: {
+        "cwd": root, "git": "", "tree": "", "repo_key": "x", "repo_root": root,
+    })
+
+    class _FakeImperalClient:
+        def __init__(self, cfg, token_provider):
+            pass
+
+        async def whoami(self):
+            return "user-1"
+
+    monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
+
+    class _RecExecutor:
+        def __init__(self, root, indexer=None, shadow=None):
+            pass
+
+        def run(self, tool, args):
+            return {"ok": True, "content": "wrote a.txt", "diff": "+new"}
+
+    monkeypatch.setattr(T, "LocalToolExecutor", _RecExecutor)
+
+    async def _fake_stream(client, session_id, headers_provider, *, start_id="0-0", **_kw):
+        yield {"type": "tool_request", "task_id": "OURS", "req_id": "r1",
+               "tool": "write_file", "args": {}}
+        yield {"type": "final", "task_id": "OURS", "text": "done"}
+
+    monkeypatch.setattr(ST, "stream_frames", _fake_stream)
+
+    class _SessResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"session_id": "sid1", "last_id": "0-0", "task_id": "OURS"}
+
+    class _ResultResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, path, headers=None, **kw):
+            return _SessResp() if path == "/v1/agent/sessions" else _ResultResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    class RecSinkNoDiffHook:
+        def tool_start(self, *a): ...
+        def tool_result(self, *a): ...
+        # no tool_diff on purpose
+        def ask_consent(self, *a): return "y"
+        def consent_dismissed(self, note): ...
+        def panel_release(self, *a): ...
+        def progress(self, text): ...
+        def usage(self, *a): ...
+        def foreign_turn(self, surface, role, text): ...
+        def todos(self, items, total, done): ...
+
+    async def token_provider():
+        return "tok"
+
+    sess = S.AgentSession(cfg=_FakeCfg(), token_provider=token_provider, workspace_root=".")
+    result = asyncio.run(sess.run("write it", RecSinkNoDiffHook()))
+
+    assert result == "done"

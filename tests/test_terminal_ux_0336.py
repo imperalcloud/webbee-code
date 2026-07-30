@@ -121,15 +121,20 @@ def test_check_update_status_uses_cache_and_keeps_legacy_helper(tmp_path):
                                        fetch=_boom)
 
 
-def test_home_footer_puts_the_badge_bottom_right():
+def test_home_footer_has_no_version_badge_anymore():
+    """0.3.40: the version badge moved OUT of Home entirely -- it used to be
+    shown here (duplicating settings_lines() AND the global toolbar badge)
+    and got in the way, exactly as reported. The ONE place to check it now
+    is the toolbar (tui.pin_version_right), visible on every tab, always
+    live-checked -- not just on Home's own footer row."""
     view = _view(HomeData(version="0.3.35",
                           update_notice="🐝 webbee v0.3.36 available",
                           update_checked=True), _slots())
     lines = [_text(ln) for ln in view._all_lines()]
-    last = lines[-1]
-    assert last.rstrip().endswith("v0.3.35 → 0.3.36 available")
-    assert last.startswith(" ")                       # right-aligned, padded
-    assert "Alt+↵ newline" in "\n".join(lines)         # the chord is discoverable
+    body = "\n".join(lines)
+    assert "v0.3.35" not in body
+    assert "v0.3.36" not in body
+    assert "Alt+↵ newline" in body                    # the chord is still discoverable
 
 
 # --------------------------------------------------------------------------
