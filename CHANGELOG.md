@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.38
+
+Attach files by path, paste with the middle mouse button, see how long a
+session has been running, and never miss a question Webbee asks you.
+
+- **`/attach <path> [more paths...]` (globs work).** You no longer need a
+  file on your clipboard to hand it to Webbee — point at it directly from
+  the terminal and it goes through the exact same upload path as a paste.
+- **Middle-click paste on Linux/X11.** Pastes your PRIMARY selection (falls
+  back to the regular clipboard where PRIMARY doesn't exist, e.g.
+  macOS/Windows) — mouse and keyboard paste are now fully symmetric.
+- **Session durations, everywhere.** Home now shows how long each tab has
+  been running next to its token count ("1204 tok · 14m"), and `/sessions`
+  gained an age column — both survive a restart.
+- **You can no longer miss a question.** When Webbee is waiting on your
+  reply, the terminal now renders it as a visually distinct block (the same
+  weight as a yes/no confirmation) instead of blending into the scrollback.
+
 ## 0.3.37
 
 Your tabs come back, the queue does what you tell it, and the version sits
