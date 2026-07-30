@@ -18,6 +18,37 @@ _GUTTER = 2   # left margin (cols) — the single consistent transcript gutter.
               # so NOTHING renders flush against the screen edge.
 
 
+def _age_from_iso(iso_str: str) -> str:
+    """home-tab-durations-v1: 'how long ago' from a server ISO8601 timestamp
+    (created_at/last_seen_at), e.g. '14m', '2h14m', '3d2h'. "" on anything
+    unparseable -- never a fake/garbled age. Naive-vs-aware tolerant (treats
+    a naive timestamp as UTC, matching the server's own convention)."""
+    if not iso_str:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        s = iso_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        secs = (datetime.now(timezone.utc) - dt).total_seconds()
+        if secs < 0:
+            return ""
+        s_i = int(secs)
+        if s_i < 60:
+            return "<1m"
+        m, _ = divmod(s_i, 60)
+        h, m = divmod(m, 60)
+        d, h = divmod(h, 24)
+        if d:
+            return f"{d}d{h}h"
+        if h:
+            return f"{h}h{m}m"
+        return f"{m}m"
+    except Exception:
+        return ""
+
+
 def _pad(renderable):
     """Indent a block renderable by the transcript gutter so its left edge
     lines up with the 2-space chrome ('  🐝 Webbee', '  13.9s · …', the ❯ bar)."""
@@ -259,6 +290,12 @@ class RichSink:
         self._parked = True
 
     def end_turn(self, final_text: str) -> None:
+        # I-VISIBLE-ASSISTANT-QUESTION: pop the fact session.py stashed on
+        # THIS call (set-then-consumed, never lingers past one turn) --
+        # getattr default False covers every sink that never sets it (a
+        # bare test double, or a turn that never reached the kernel signal).
+        _awaits_reply = bool(getattr(self, "_awaits_reply", False))
+        self._awaits_reply = False
         self._busy = False
         # The kernel session's own queue only exists while a run is live —
         # once this turn returns COMPLETE or user-stopped, the terminal no
@@ -287,6 +324,13 @@ class RichSink:
             self.console.print()   # separation before the focus block
             self.console.print(Text("  🐝 Webbee", style=f"bold {_BEE}"))
             self.console.print(_pad(Markdown(final_text)))   # body aligns to the same 2-col gutter as the header
+            if _awaits_reply:
+                # Reuses ask_yes_no's own visual weight (⚠ + bold accent) so
+                # a real end-of-turn question is impossible to mistake for
+                # plain narration -- but this is NOT a blocking consent
+                # prompt (no future armed): the user just types their next
+                # message normally: the pinned input is already open.
+                self.console.print(_pad(Text("⚠ waiting for your reply", style=f"bold {_BEE}")))
         elapsed = self._elapsed()
         self.session_tokens += self.tokens
         self.session_credits += self.credits
@@ -630,13 +674,18 @@ class RichSink:
         t.add_column("session")
         t.add_column("ip", style="dim")
         t.add_column("last seen", style="dim")
+        t.add_column("age", style="dim")
         t.add_column("")
         for i, s in enumerate(sessions, 1):
             label = str(s.get("label") or s.get("surface") or "?")
             ip = str(s.get("ip_address") or "-")
             seen = str(s.get("last_seen_at") or "")[:16].replace("T", " ")
+            # home-tab-durations-v1: how long this session has existed,
+            # from the server's own created_at -- "" (blank cell) on an
+            # older gateway that doesn't send it yet, never a fake age.
+            age = _age_from_iso(str(s.get("created_at") or ""))
             here = Text("this device", style=f"bold {_BEE}") if s.get("current") else Text("")
-            t.add_row(str(i), label, ip, seen, here)
+            t.add_row(str(i), label, ip, seen, age, here)
         self.console.print(_pad(t))
         self.console.print(Text("  /sessions revoke <#>  ·  /logout-others", style="dim"))
         self._nudge()

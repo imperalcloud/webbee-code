@@ -41,6 +41,19 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                 pane._edge_drag = 0
                 pane.scroll(3)
                 return None
+            if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.MIDDLE:
+                # X11/Linux convention: middle-click pastes the PRIMARY
+                # selection (last-selected text), independent of Ctrl+V's
+                # CLIPBOARD read. Fires the SAME on_paste upload door via a
+                # pane-level hook (tui.py wires `pane.on_middle_paste`) --
+                # one paste implementation, two entry points. A sync mouse
+                # handler can't await, so the hook itself schedules its own
+                # background task; a pane with no hook wired (tests, no
+                # dock) is a harmless no-op.
+                hook = getattr(pane, "on_middle_paste", None)
+                if hook is not None:
+                    hook()
+                return None
             if et == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.LEFT:
                 if self._down_abs is not None:
                     # A previous drag never got its MOUSE_UP (prompt_toolkit has

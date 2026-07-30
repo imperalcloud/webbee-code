@@ -8,6 +8,7 @@ orchestration and feeds a `HomeData` here; every interaction repaints via
 `get_app().invalidate()`, never a `fill_home` re-run."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -16,6 +17,23 @@ from webbee.wallet import Wallet
 
 NOTIFY_OPTIONS = ("off", "panel", "tg", "both")
 MODE_OPTIONS = ("default", "plan", "autopilot")
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """PURE. Human-short duration for a tab's age: '14m', '2h14m', '3d2h'.
+    < 60s -> '<1m' (never '0m', which would misleadingly imply a stale tick).
+    home-tab-durations-v1."""
+    s = int(seconds)
+    if s < 60:
+        return "<1m"
+    m, _ = divmod(s, 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    if d:
+        return f"{d}d{h}h"
+    if h:
+        return f"{h}h{m}m"
+    return f"{m}m"
 
 # Trust/Security tile — public-facing product copy, held to the ICNLI claims
 # doctrine (Locus of Authority: anchor on WHO DECIDES, no overclaim, plain
@@ -48,6 +66,7 @@ class TabRow:
     tokens: int
     credits: int
     active: bool
+    elapsed_s: float = 0.0   # home-tab-durations-v1: 0.0 (falsy) = unknown age, never rendered
 
 
 @dataclass
@@ -244,9 +263,12 @@ def tab_rows(slots) -> "list[TabRow]":
                 credits = int(st.get("credits", 0) or 0)
             except Exception:
                 pass
+        started_at = float(getattr(s, "started_at", 0.0) or 0.0)
+        elapsed_s = (time.monotonic() - started_at) if started_at else 0.0
         rows.append(TabRow(idx=i, label=s.label or "", mode=s.mode,
                            glyph=s.status_glyph(), tokens=tokens,
-                           credits=credits, active=(i == active_idx)))
+                           credits=credits, active=(i == active_idx),
+                           elapsed_s=elapsed_s))
     return rows
 
 
@@ -622,12 +644,16 @@ class HomeView:
             for t in tabs:
                 sw, md, cl = by_id[f"tab-{t.idx}"], by_id[f"tab-mode-{t.idx}"], by_id[f"tab-close-{t.idx}"]
                 marker = "●" if t.active else "○"
+                # home-tab-durations-v1: age next to the glyph, only when known
+                # (elapsed_s==0.0 -- a bare test double or a slot that never
+                # got started_at -- renders nothing rather than a fake age).
+                age = f" · {_fmt_elapsed(t.elapsed_s)}" if t.elapsed_s else ""
                 L.append([
                     ("class:home.dim", f"  {marker} {t.idx} "),
                     act(sw, _fit(t.label or f"tab {t.idx}", 24)),
                     ("class:home.dim", f"  {t.glyph}  "),
                     act(md, f"[{md.value}]"),
-                    ("class:home.dim", f"  {_fmt_tokens(t.tokens)} tok · {_fmt_tokens(t.credits)} cr  "),
+                    ("class:home.dim", f"  {_fmt_tokens(t.tokens)} tok · {_fmt_tokens(t.credits)} cr{age}  "),
                     act(cl, "✕"),
                 ])
             return L

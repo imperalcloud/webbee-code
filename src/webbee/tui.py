@@ -777,7 +777,14 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         return slots.active()
 
     def _pane():
-        return _a().pane
+        p = _a().pane
+        # Middle-click paste (webbee-code-mouse-middle-click-paste-v1):
+        # wire the hook lazily + idempotently on first touch of each pane --
+        # avoids threading a new constructor arg through OutputPane's THREE
+        # call sites (repl.py x2, home_view.py) for one optional callback.
+        if getattr(p, "on_middle_paste", None) is None:
+            p.on_middle_paste = _middle_paste
+        return p
 
     def _sink_attr(name, default=None):
         s = _a().sink
@@ -1017,6 +1024,34 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # repl._open_new_tab). Home stays reachable by clicking its ◆ chip or
         # Alt+1-style switch (footer legend reminds muscle-memory users).
         _new_tab_click()
+
+    def _middle_paste() -> None:
+        # webbee-code-mouse-middle-click-paste-v1: X11/Linux middle-click ->
+        # paste PRIMARY selection (falls back to CLIPBOARD text where PRIMARY
+        # doesn't exist -- macOS/Windows have no PRIMARY concept at all, so
+        # this degrades to a plain Ctrl+V-style text paste there). A mouse
+        # handler is SYNC (selection.py can't await), so this schedules its
+        # own background task -- mirrors _paste_key's own worker-thread
+        # discipline (shelling out inline would freeze the whole dock).
+        from webbee.clipboard_read import read_clipboard_text, read_primary_text
+        slot = _a()
+        pane = _pane()
+        if slot.kind == "home" or not getattr(slot, "workspace", ""):
+            pane.flash_note("📎 open a session tab to paste")
+            return
+
+        async def _do_middle_paste():
+            text = await asyncio.to_thread(read_primary_text)
+            if not text:
+                text = await asyncio.to_thread(read_clipboard_text)
+            if not text:
+                pane.flash_note("selection is empty")
+                get_app().invalidate()
+                return
+            buf.insert_text(text)
+            get_app().invalidate()
+
+        get_app().create_background_task(_do_middle_paste())
 
     @kb.add("c-v")
     def _paste_key(event):
@@ -1515,6 +1550,15 @@ async def run_session(*, slots, on_line, on_cycle, steps_nav=None,
         # uses means the command path and the mouse path are literally one
         # implementation -- no second buffer-handling code to drift.
         ui_hooks["pull_queued"] = _pull_at
+        # /attach (terminal-file-attach-by-path-v1): drop an uploaded file's
+        # reference straight into the LIVE input buffer, mirroring how a
+        # clipboard paste (_paste_key above) inserts its own "📎 name
+        # (file_id=...)" ref -- one insertion mechanism, two entry points.
+        def _insert_text(text: str) -> None:
+            sep = "" if (not buf.text or buf.text.endswith(" ")) else " "
+            buf.insert_text(sep + text + " ")
+            get_app().invalidate()
+        ui_hooks["insert_text"] = _insert_text
         # FIX3: the Home-spawned first turn seam — repl's `_home_input` uses
         # this so the NEW slot's turn is started through the SAME path a
         # normal Enter-idle submit uses (`slot.turn["task"]` actually gets

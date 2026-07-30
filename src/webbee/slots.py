@@ -115,6 +115,12 @@ class SessionSlot:
     bg_tasks: list = field(default_factory=list)          # per-slot cancellables
     _last_fill: float = 0.0            # Home only (Task 6): monotonic ts of the last fill_home run
     _filling: bool = False             # Home only (Task 6): a fill_home is in flight -- re-entrancy guard
+    started_at: float = 0.0            # home-tab-durations-v1: monotonic ts this slot was opened --
+                                        # 0.0 (falsy) means "unknown age" (e.g. a bare test double),
+                                        # never rendered as a fake "just now". A RESTORED tab (reattach
+                                        # after a crash/reboot) gets this stamped from the persisted
+                                        # record's own age, not reset to "now", so it keeps its true
+                                        # original age across a restart.
 
     def status_glyph(self) -> str:
         """Tab glyph: ⚠ consent waiting beats ▶ busy beats ✓ idle; Home ◆.

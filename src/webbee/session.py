@@ -451,6 +451,13 @@ class AgentSession:
                     # non-marathon coding turn's `final` is terminal (unchanged).
                     if marathon and not frame.get("stopped"):
                         continue
+                    # I-VISIBLE-ASSISTANT-QUESTION: stash the kernel's own
+                    # awaits_reply fact on the sink itself (run()'s return
+                    # contract is a bare str -- widening it here would touch
+                    # every caller). end_turn() reads + clears it, so a sink
+                    # with no support for the field (a bare test double)
+                    # just never sees the attribute -- harmless getattr.
+                    setattr(sink, "_awaits_reply", bool(frame.get("awaits_reply")))
                     _text = frame.get("text", "")
                     return _tag + _text if _text else ""
         finally:

@@ -139,6 +139,28 @@ def read_clipboard_text() -> "str | None":
     return None
 
 
+def read_primary_text() -> "str | None":
+    """X11/Wayland PRIMARY selection text (the 'last selected' buffer, distinct
+    from CLIPBOARD) -- middle-click paste's own source per the Linux
+    select-then-middle-click convention. macOS/Windows have no PRIMARY
+    concept, so this is a no-op (None) there -- callers fall back to
+    read_clipboard_text(). Captured (tty-safe), never raises."""
+    if sys.platform == "darwin" or sys.platform == "win32":
+        return None
+    if shutil.which("xclip"):
+        p = _run(["xclip", "-selection", "primary", "-o"])
+    elif shutil.which("wl-paste"):
+        p = _run(["wl-paste", "--primary", "--no-newline"])
+    else:
+        return None
+    if p is not None and p.returncode == 0 and p.stdout:
+        try:
+            return p.stdout.decode("utf-8", "replace")
+        except Exception:
+            return None
+    return None
+
+
 def read_clipboard(ts: str) -> "ClipboardItem | None":
     """One paste's worth of clipboard content: an IMAGE if present (PNG bytes,
     named `pasted-<ts>.png`), else TEXT, else None. `ts` is a caller-supplied

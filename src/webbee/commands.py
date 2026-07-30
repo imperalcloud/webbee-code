@@ -15,6 +15,7 @@ _HELP = """Commands:
   /close             close the active tab (the run keeps going server-side)
   /tabs              list open tabs
   /rename <name>     rename the active tab (sticks -- auto-naming won't override it)
+  /attach <path>     attach a local file (or several, space-separated/glob) to the next message
   /queue [clear]     messages queued while Webbee works (clear drops them all)
   /steps [N]         last turn's steps; N expands one (also: Up/Down + Enter)
   /checkpoints       the reversibility time machine — list workspace checkpoints
@@ -90,6 +91,9 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         return SlashResult(handled=True, action="sessions")
     if cmd == "/logout-others":
         return SlashResult(handled=True, action="logout_others")
+    if cmd == "/attach":
+        return SlashResult(handled=True, action="attach",
+                           arg=(" ".join(args) if args else ""))
     if cmd == "/new":
         return SlashResult(handled=True, action="new_tab", arg=(" ".join(args) if args else ""))
     if cmd == "/tab":

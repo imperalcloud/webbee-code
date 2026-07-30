@@ -55,16 +55,24 @@ def _path_for(workspace: str) -> str:
 
 
 def tab_record(session_id: str = "", label: str = "", mode: str = "default",
-               workspace: str = "", draft: str = "") -> dict:
+               workspace: str = "", draft: str = "", created_at: float = 0.0) -> dict:
     """PURE. Build ONE normalised tab record. Central so the writer and the
     tests agree on the shape, and so the autopilot downgrade can never be
-    forgotten at a call site."""
+    forgotten at a call site.
+
+    `created_at` (home-tab-durations-v1): WALL-CLOCK epoch seconds the tab was
+    first opened -- persisted (unlike SessionSlot.started_at, which is
+    monotonic and meaningless across a process restart) so a restored tab
+    keeps its TRUE original age instead of resetting to "just now". 0.0 (the
+    default) means unknown -- an old record from before this field existed
+    degrades to "no duration shown", never a fake age."""
     return {
         "session_id": str(session_id or ""),
         "label": str(label or ""),
         "mode": "default" if str(mode or "") == "autopilot" else (str(mode or "") or "default"),
         "workspace": str(workspace or ""),
         "draft": str(draft or ""),
+        "created_at": float(created_at or 0.0),
     }
 
 
@@ -84,9 +92,11 @@ def load_tabs(workspace: str) -> list:
                 except Exception:
                     continue          # one unreadable tab, not a broken layout
                 if isinstance(rec, dict):
-                    out.append(tab_record(**{k: rec.get(k, "") for k in
-                                             ("session_id", "label", "mode",
-                                              "workspace", "draft")}))
+                    out.append(tab_record(**{
+                        **{k: rec.get(k, "") for k in
+                           ("session_id", "label", "mode", "workspace", "draft")},
+                        "created_at": rec.get("created_at", 0.0),
+                    }))
                 if len(out) >= MAX_TABS:
                     break
     except Exception:

@@ -1,5 +1,7 @@
 import asyncio
 import contextlib
+import glob as _glob
+import mimetypes
 import os
 import sys
 import time
@@ -174,7 +176,7 @@ def _slot_ctx(slot: SessionSlot, *, logged_in: bool, slots=None) -> CommandConte
 # number the Home toolbar and dashboard show) instead of Home's own zeros.
 _HOME_GATED_ACTIONS = frozenset({
     "steps", "step_detail", "checkpoints", "rollback", "notify", "mode",
-    "queue", "queue_clear", "queue_drop", "queue_edit", "rename",
+    "queue", "queue_clear", "queue_drop", "queue_edit", "rename", "attach",
 })
 
 _HOME_GATE_NOTE = "open a session tab first — Ctrl+T or type a task"
@@ -211,11 +213,14 @@ def _format_sessions_plain(rows) -> str:
     if not rows:
         return "Active sessions: (none)"
     out = ["Active sessions:"]
+    from webbee.render import _age_from_iso
     for i, s in enumerate(rows, 1):
         label = str(s.get("label") or s.get("surface") or "?")
         seen = str(s.get("last_seen_at") or "")[:16].replace("T", " ")
+        age = _age_from_iso(str(s.get("created_at") or ""))
         here = "  ← this device" if s.get("current") else ""
-        out.append(f"  {i}. {label}" + (f" · {seen}" if seen else "") + here)
+        out.append(f"  {i}. {label}" + (f" · {seen}" if seen else "")
+                   + (f" · {age} old" if age else "") + here)
     out.append("Revoke one with /sessions revoke <#>")
     return "\n".join(out)
 
@@ -490,6 +495,14 @@ async def restore_tabs(workspace: str, slots, make_slot, *, sessions_fn=None,
         if draft:
             slot.draft = draft
             slot.draft_cursor = len(draft)
+        # home-tab-durations-v1: a restored tab keeps its TRUE original age --
+        # convert the persisted WALL-CLOCK created_at back into THIS process's
+        # monotonic clock (age = now_wall - created_at; started_at = now_mono
+        # - age) instead of resetting to "just now" on every restart.
+        created_at = float(rec.get("created_at", 0.0) or 0.0)
+        if created_at:
+            age = max(0.0, time.time() - created_at)
+            slot.started_at = time.monotonic() - age
         slots.add(slot)
         if spawn_poller is not None:
             try:
@@ -522,16 +535,24 @@ def snapshot_tabs(slots) -> list:
     """
     from webbee.tab_store import tab_record
     out = []
+    now_mono = time.monotonic()
+    now_wall = time.time()
     for slot in list(getattr(slots, "slots", []) or []):
         if getattr(slot, "kind", "") == "home":
             continue
         agent = getattr(slot, "agent", None)
+        # home-tab-durations-v1: convert the slot's MONOTONIC started_at into
+        # a WALL-CLOCK created_at (the only kind that survives a process
+        # restart) -- age = now_mono - started_at, so created_at = now_wall - age.
+        started_at = float(getattr(slot, "started_at", 0.0) or 0.0)
+        created_at = (now_wall - (now_mono - started_at)) if started_at else 0.0
         out.append(tab_record(
             session_id=str(getattr(agent, "session_id", "") or ""),
             label=str(getattr(slot, "label", "") or ""),
             mode=str(getattr(slot, "mode", "default") or "default"),
             workspace=str(getattr(slot, "workspace", "") or ""),
             draft=str(getattr(slot, "draft", "") or ""),
+            created_at=created_at,
         ))
     return out
 
@@ -640,7 +661,7 @@ async def _finish_slot(cfg, token_provider, workspace, mode, *, resources: Works
         label = os.path.basename(os.path.normpath(workspace)) or workspace
     slot = SessionSlot(kind="session", workspace=workspace, label=label, pane=pane,
                        sink=sink, agent=agent, mode=mode, git_branch=bundle["git_branch"],
-                       slot_id=slot_id)
+                       slot_id=slot_id, started_at=time.monotonic())
     # Queue-panel single-source dedup (0.3.16): hand the sink the SAME
     # type-ahead deque tui mutates for THIS slot, so a kernel task_queued
     # echo can promote a landed local twin (matched by steer_iid) into the
@@ -1254,6 +1275,68 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         return "continue"
                     pull_fn(idx)
                     _say(slot, "queued item moved into the input — edit it and press Enter.")
+                return "continue"
+            if res.action == "attach":
+                # terminal-file-attach-by-path-v1: attach a local file (or a
+                # space-separated list / glob) WITHOUT needing it on the
+                # clipboard first. Reuses the EXACT upload door _on_paste
+                # already uses (file-reader::receive_files, base64) -- same
+                # size/type behavior, same honest degrade on failure. Each
+                # attach drops its own "📎 name (file_id=...)" ref into the
+                # LIVE input via ui_hooks["insert_text"] (dock) or is simply
+                # reported back (no-dock fallback loop -- can't touch a
+                # buffer that doesn't exist there).
+                if not res.arg:
+                    _say(slot, "Usage: /attach <path> [more paths...] (globs ok)")
+                    return "continue"
+                paths: list = []
+                for token in res.arg.split():
+                    matches = _glob.glob(os.path.expanduser(token))
+                    paths.extend(matches if matches else [token])
+                if not paths:
+                    _say(slot, f"no file matches: {res.arg}")
+                    return "continue"
+                insert_fn = ui_hooks.get("insert_text")
+                refs, failed = [], []
+                for p in paths:
+                    ap = p if os.path.isabs(p) else os.path.join(slot.workspace, p)
+                    if not os.path.isfile(ap):
+                        failed.append(p)
+                        continue
+                    try:
+                        with open(ap, "rb") as f:
+                            data = f.read()
+                    except Exception:
+                        failed.append(p)
+                        continue
+                    name = os.path.basename(ap)
+                    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+                    try:
+                        import base64
+                        from imperal_mcp.client import ImperalClient
+                        client = ImperalClient(cfg, token_provider)
+                        b64 = base64.b64encode(data).decode("ascii")
+                        resp = await client.run_tool(
+                            "file-reader", "receive_files",
+                            {"files": [{"name": name, "mime_type": mime,
+                                        "data_base64": b64}]})
+                        fid = _extract_file_id(resp)
+                        if fid:
+                            refs.append(f"📎 {name} (file_id={fid})")
+                        else:
+                            failed.append(p)
+                    except Exception:
+                        failed.append(p)
+                if refs:
+                    joined = " ".join(refs)
+                    if insert_fn is not None:
+                        insert_fn(joined)
+                    else:
+                        _say(slot, f"attached (paste into your next message): {joined}")
+                if failed:
+                    _say(slot, f"could not attach: {', '.join(failed)}")
+                elif refs:
+                    _say(slot, f"attached {len(refs)} file(s).")
                 return "continue"
             if res.action == "clear":
                 # FIX4: works fully on Home too -- clears Home's OWN pane
