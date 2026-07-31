@@ -1727,17 +1727,33 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 state["new_tab_mode"] = newtab_mode.load_newtab_mode() or mode
 
                 def _home_set_notify(arg: str) -> None:
+                    # webbee-code-home-live-notify-v1: resolve the TARGET
+                    # session ONCE, up front, and thread that SAME sid through
+                    # to the write below -- the old code re-resolved
+                    # "whichever session Home currently points at" only inside
+                    # the click handler, which is fine, but never told the
+                    # user anything when there was no session tab to apply it
+                    # to (silent no-op looked exactly like "did nothing" --
+                    # Valentin, live 2026-07-31: "doesn't show real values").
                     picked = _pick_session_slot(slots)
                     sid = getattr(getattr(picked, "agent", None), "session_id", "") if picked else ""
                     if not sid:
+                        home_view.data.notice = "open a session tab first — notifications are per-session"
+                        home_view.notify()
                         return
                     async def _do():
                         try:
                             st = await _remote_mod.set_remote(cfg, token_provider, sid, arg)
-                            home_view.data.notify_state = arg
+                            # webbee-code-home-live-notify-v1: show what the
+                            # SERVER actually confirmed (from_notify_state_from
+                            # its own state), never the raw click argument --
+                            # the old code trusted `arg` unconditionally, so a
+                            # write the server silently rejected/normalized
+                            # still displayed as if it had taken effect.
+                            home_view.data.notify_state = home._notify_state_from(st)
                             home_view.data.remote_desc = _remote_mod.describe(st)
                         except Exception:
-                            pass
+                            home_view.data.notice = "couldn't update notifications — try again"
                         home_view.notify()
                     get_app().create_background_task(_do())
 

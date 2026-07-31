@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.44
+
+Three real Home-dashboard bugs, found and fixed:
+
+- **Each open tab's elapsed time now actually ticks live, per tab.** The
+  numbers themselves were always computed correctly per-tab, but Home only
+  ever redrew while a turn was busy or a toast was fresh -- sitting idle on
+  Home (the normal way to look at your tabs) froze every age at whatever it
+  was the moment you switched there, which looked exactly like "one shared
+  time for all tabs" even though it wasn't. Home now redraws on the plain
+  1s idle tick too, so every tab's own age genuinely counts up in place.
+- **"Your devices" no longer lists dead terminal sessions.** A crashed
+  terminal or a laptop that lost network never calls the gateway's revoke
+  endpoint on its way out, so the raw session listing accumulated stale
+  entries forever. The list now hides a row only once its own last-activity
+  timestamp proves it's actually gone (>24h) -- your current device always
+  shows, and a row with no timestamp at all (older data) still shows rather
+  than risk hiding something real.
+- **The notification toggle now reflects what the server actually
+  confirmed, not just what you clicked.** The old code echoed the click's
+  raw argument straight into the display the instant the request was sent,
+  so a write the server silently rejected or normalized still looked like
+  it had taken effect. It now reads back the server's own state after the
+  write, and clicking with no session tab open tells you plainly instead of
+  doing nothing silently.
+
 ## 0.3.43
 
 Honest fix-up of three things 0.3.42 got wrong or left unfinished:

@@ -477,7 +477,8 @@ def _tick_once(slots, app, is_busy, breathing=None) -> None:
     when a turn is running OR the copy-flash toast is still fresh, so the
     spinner/elapsed-clock/flash-expiry all animate without redrawing on every
     idle tick for nothing."""
-    pane = slots.active().pane
+    active = slots.active()
+    pane = active.pane
     _width_watch(pane, app)
     try:
         pane.edge_tick()
@@ -488,7 +489,17 @@ def _tick_once(slots, app, is_busy, breathing=None) -> None:
     # state right now -- if so the idle 1.0s-cadence tick still has to
     # actually REDRAW so the alternating shade is ever seen, not just
     # computed and silently discarded on every tick the same as a no-op one.
-    if is_busy() or pane.flash() or (breathing is not None and breathing()):
+    # webbee-code-home-live-ages-v1: Home's own tab-list ages/durations are
+    # computed FRESH every render (home_view.tab_rows reads time.monotonic()
+    # each call) -- but a render only happens on an app.invalidate(), and the
+    # busy/flash/breathing checks above are ALL false while you're simply
+    # sitting on Home doing nothing. That froze every age at whatever it was
+    # the moment you switched to Home -- looking like one shared, wrong
+    # number instead of each tab's own live-ticking age. Home is cheap to
+    # redraw (same virtualized-slice render every other pane already does),
+    # so it gets the plain 1s idle cadence's invalidate too, unconditionally.
+    if (is_busy() or pane.flash() or (breathing is not None and breathing())
+            or getattr(active, "kind", "") == "home"):
         app.invalidate()
 
 

@@ -100,6 +100,49 @@ def _device_label(s: dict) -> str:
     return "session"
 
 
+DEVICE_STALE_TTL_S = 24 * 3600  # webbee-code-home-live-devices-v1
+
+
+def _is_recently_active(s: dict, now: float, ttl: float = DEVICE_STALE_TTL_S) -> bool:
+    """PURE. Whether a `/v1/auth/sessions` row is worth showing on Home's
+    device list. `/v1/auth/sessions` lists every session token the gateway
+    has ever ISSUED that hasn't been explicitly revoked -- a terminal that
+    crashed or a laptop that lost network never calls revoke on its way out,
+    so the raw listing accumulates dead entries forever (Valentin, live
+    2026-07-31: "a bunch of dead terminal sessions"). The CURRENT session
+    (`current`/`is_current`) always counts as active regardless of its own
+    timestamp -- it's the one you're looking at right now. Every other row
+    is checked against `last_seen_at` (or `updated_at`/`created_at` as a
+    fallback) when the gateway actually SENDS one of those fields: only a
+    successfully-parsed timestamp older than `ttl` hides the row. A row with
+    NONE of those fields at all (an older gateway shape that never sends
+    them) degrades the OTHER way -- unknown is shown, never hidden, since
+    hiding a device we simply have no data on risks hiding a real one; only
+    a row we can actually PROVE is stale gets filtered out."""
+    if bool(s.get("current") or s.get("is_current")):
+        return True
+    for k in ("last_seen_at", "updated_at", "created_at"):
+        iso = s.get(k)
+        if not iso:
+            continue
+        try:
+            from datetime import datetime, timezone
+            ss = str(iso).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ss)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - dt).total_seconds()
+            if age < 0:
+                continue   # malformed (future) timestamp -- try the next field
+            return age <= ttl
+        except Exception:
+            continue
+    # every timestamp field was absent, unparseable, or in the future:
+    # unknown, not PROVEN stale -- show it (see docstring) rather than
+    # silently hide a real device we simply have no good data on.
+    return True
+
+
 async def fill_home(slot, *, cfg, token_provider, slots, account_fetcher,
                     sessions_client, resources, version, wallet_fetcher=None) -> None:
     """Populate the Home dashboard's HomeData, best-effort, staged (a repaint
@@ -161,9 +204,14 @@ async def fill_home(slot, *, cfg, token_provider, slots, account_fetcher,
 
         try:
             listing = await sessions_client.list_sessions(cfg, token_provider)
+            # webbee-code-home-live-devices-v1: drop rows the gateway never
+            # got a chance to revoke (crashed terminal, dead laptop) so the
+            # list reads as "your real devices", not a graveyard of old
+            # terminal sessions -- see _is_recently_active's own docstring.
+            now = time.time()
             data.devices = [DeviceRow(label=_device_label(s),
                                       current=bool(s.get("current") or s.get("is_current")))
-                            for s in (listing or [])]
+                            for s in (listing or []) if _is_recently_active(s, now)]
         except Exception:
             data.devices = []
         _repaint()

@@ -1548,6 +1548,43 @@ def test_tick_once_fires_width_watch_edge_tick_and_invalidate(monkeypatch):
     assert calls["invalidate"] == 2    # is_busy() True -> app.invalidate()
 
 
+def test_tick_once_always_invalidates_on_home_even_when_idle(monkeypatch):
+    # webbee-code-home-live-ages-v1: Home's tab list computes each tab's own
+    # age fresh every render, but a render only happens on invalidate() --
+    # so sitting idle on Home (not busy, no flash, not breathing) must NOT
+    # skip the redraw the way every other idle pane correctly does, or every
+    # tab's elapsed time freezes at whatever it was when you switched here.
+    from webbee.tui import _tick_once
+
+    class _Pane:
+        def __init__(self):
+            self.console = type("Console", (), {"width": 72})()
+        def reflow(self, cols):
+            pass
+        def edge_tick(self):
+            pass
+        def flash(self):
+            return ""
+
+    class _App:
+        def __init__(self):
+            self.n = 0
+        def invalidate(self):
+            self.n += 1
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    slots = mk_slots(pane=_Pane())
+    slots.slots[0].kind = "home"
+    app = _App()
+    _tick_once(slots, app, lambda: False)   # idle, no breathing
+    assert app.n == 1   # still invalidated because the active slot is Home
+
+    slots.slots[0].kind = "session"
+    app2 = _App()
+    _tick_once(slots, app2, lambda: False)
+    assert app2.n == 0   # a genuinely idle SESSION tab still skips the redraw
+
+
 def test_tick_once_swallows_edge_tick_error(monkeypatch):
     from webbee.tui import _tick_once
 

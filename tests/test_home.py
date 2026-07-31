@@ -4,8 +4,8 @@ tiles, async best-effort fill, is_stale/refill scheduling, and home_input's
 import asyncio
 
 from webbee.account import Account
-from webbee.home import (_mask_email, _notify_state_from, _pick_session_slot,
-                         fill_home, is_stale)
+from webbee.home import (_is_recently_active, _mask_email, _notify_state_from,
+                         _pick_session_slot, fill_home, is_stale)
 from webbee.repl import _home_input, _home_target_workspace, _schedule_home_refill
 from webbee.slots import SessionSlot, SlotManager, WorkspaceResources
 from webbee.wallet import Wallet
@@ -173,6 +173,53 @@ def test_fill_home_builds_device_rows_without_pii():
     assert labels == ["MacBook · terminal", "panel"]   # label/surface, the real keys
     assert home.pane.data.devices[0].current is True
     assert not any("1.2.3.4" in lbl for lbl in labels)   # raw IP never surfaced
+
+
+def test_is_recently_active_keeps_current_regardless_of_timestamp():
+    # webbee-code-home-live-devices-v1: the row you're looking at right now
+    # always counts as active, even with a wildly stale/missing timestamp.
+    assert _is_recently_active({"current": True}, now=1_000_000.0) is True
+    assert _is_recently_active({"is_current": True, "last_seen_at": "2000-01-01T00:00:00Z"},
+                               now=1_000_000.0) is True
+
+
+def test_is_recently_active_hides_a_proven_stale_row():
+    from datetime import datetime, timedelta, timezone
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    assert _is_recently_active({"last_seen_at": old_ts}, now=0.0) is False
+
+
+def test_is_recently_active_shows_a_recent_row():
+    from datetime import datetime, timezone
+    fresh_ts = datetime.now(timezone.utc).isoformat()
+    assert _is_recently_active({"last_seen_at": fresh_ts}, now=0.0) is True
+
+
+def test_is_recently_active_shows_unknown_rows_never_proven_stale():
+    # No timestamp field at all (older gateway shape) -- unknown, not
+    # PROVEN stale, so it must still show rather than silently vanish.
+    assert _is_recently_active({"label": "old client"}, now=0.0) is True
+    # An unparseable timestamp degrades the same safe way.
+    assert _is_recently_active({"last_seen_at": "not-a-date"}, now=0.0) is True
+
+
+def test_fill_home_filters_stale_devices():
+    from datetime import datetime, timedelta, timezone
+    async def acct(cfg, tp):
+        return Account(signed_in=False)
+    fresh_ts = datetime.now(timezone.utc).isoformat()
+    stale_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    listing = [{"label": "this laptop", "current": True},
+               {"label": "dead terminal", "last_seen_at": stale_ts},
+               {"label": "phone, recently used", "last_seen_at": fresh_ts}]
+    home = _home_slot()
+    slots = SlotManager(); slots.add(home)
+    asyncio.run(fill_home(home, cfg=_Cfg(), token_provider=_tok, slots=slots,
+                          account_fetcher=acct, sessions_client=_FakeSessions(listing),
+                          resources=WorkspaceResources(), version="1.0.0", wallet_fetcher=None))
+    labels = [r.label for r in home.pane.data.devices]
+    assert labels == ["this laptop", "phone, recently used"]
+    assert "dead terminal" not in labels
 
 
 def test_fill_home_reentrancy_guard():
