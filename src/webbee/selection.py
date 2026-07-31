@@ -87,11 +87,29 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                     return NotImplemented
                 pane._edge_ticks = 0                # a fresh MOUSE_MOVE means the pointer isn't parked
                 y = ev.position.y
+                # webbee-code-selection-scroll-jitter-v1: a REAL terminal fires
+                # MOUSE_MOVE far more often than once (every pixel of hand
+                # tremor while parked at the edge trying to select further) --
+                # scrolling immediately on EVERY one of those, on top of
+                # edge_tick() ALREADY scrolling the same pane every 0.25s once
+                # armed, stacked two independent scroll sources racing each
+                # other and made the viewport visibly jump/jitter instead of
+                # scrolling smoothly (Valentin, live 2026-07-31: "окно бегает
+                # туда сюда"). The immediate nudge now fires ONLY on the edge
+                # transition (armed 0 -> 1/-1) for snappy first-touch
+                # feedback; every following MOUSE_MOVE that's STILL at the
+                # same edge just re-affirms the arm (resets _edge_ticks above,
+                # so the runaway guard doesn't fire) and leaves the ONGOING
+                # scroll entirely to edge_tick()'s single steady cadence --
+                # exactly the contract forward_mouse() already uses for the
+                # neighbor panels.
                 if y >= pane._view_h - 1:
-                    pane.scroll(3)
+                    if pane._edge_drag != 1:
+                        pane.scroll(3)
                     pane._edge_drag = 1
                 elif y <= 0:
-                    pane.scroll(-3)
+                    if pane._edge_drag != -1:
+                        pane.scroll(-3)
                     pane._edge_drag = -1
                 else:
                     pane._edge_drag = 0

@@ -258,6 +258,42 @@ def test_drag_at_bottom_edge_scrolls_and_grows_selection():
     assert pane._edge_drag == 0
 
 
+def test_repeated_mouse_move_at_same_edge_does_not_double_scroll():
+    # webbee-code-selection-scroll-jitter-v1: a real terminal fires MOUSE_MOVE
+    # repeatedly while the pointer sits at the SAME edge (hand tremor) --
+    # only the FIRST one (the 0 -> armed transition) may scroll immediately;
+    # every following MOUSE_MOVE at the same edge must leave the offset
+    # alone (still armed, still selecting) and let edge_tick() do the only
+    # ongoing scrolling, one steady source instead of two racing.
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._view_h = 10
+    pane._io.write("\n".join(f"line{i}" for i in range(100)))
+    pane._offset = 0
+
+    down = MouseEvent(position=Point(0, 5), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+
+    move = MouseEvent(position=Point(3, 9), event_type=MouseEventType.MOUSE_MOVE,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(move)
+    assert pane._offset == 3 and pane._edge_drag == 1   # first touch: one immediate nudge
+
+    # the pointer trembles but stays at the SAME bottom row -- must NOT scroll again.
+    pane.control.mouse_handler(move)
+    pane.control.mouse_handler(move)
+    assert pane._offset == 3 and pane._edge_drag == 1   # unchanged -- no double scroll
+
+    # only edge_tick() advances it further, at its own steady cadence.
+    pane.edge_tick()
+    assert pane._offset == 6
+
+
 def test_edge_drag_resets_on_mouse_up_and_top_edge_mirrors():
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType

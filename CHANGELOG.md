@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.46
+
+Fixed a real jitter bug in text selection: dragging to select past the
+bottom (or top) of the visible output no longer makes the pane "jump
+around" instead of scrolling smoothly.
+
+- **Root cause:** a real terminal fires MOUSE_MOVE far more often than
+  once while the pointer sits at the viewport edge (every pixel of hand
+  tremor counts as a new event) -- and EVERY one of those was scrolling
+  the pane immediately, at the same time the dock's own ticker
+  (`edge_tick`) was ALSO scrolling the same pane every 0.25s to keep the
+  drag going while the mouse holds still. Two independent scroll sources
+  racing each other on the same viewport is exactly what looked like
+  "the window runs back and forth" while trying to select a big chunk of
+  text (Valentin, live 2026-07-31).
+- **Fix:** the immediate scroll now fires ONLY on the actual edge
+  transition (the moment the drag first reaches the edge); every
+  following MOUSE_MOVE at the same edge just keeps the selection armed
+  and leaves ALL the ongoing scrolling to the ticker's one steady 0.25s
+  cadence -- the exact same one-source-of-truth contract the queue/todo
+  panels and tab bar already use for their own edge-forwarded drags, now
+  applied consistently everywhere in the terminal so no two panes/panels
+  ever fight over the same scroll.
+
 ## 0.3.45
 
 Consent prompts stop being an easy-to-miss detail:
