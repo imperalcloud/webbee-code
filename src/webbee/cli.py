@@ -58,7 +58,9 @@ def main(argv=None) -> None:
         # then exits. Reuses the same AgentSession + stream reader as coding.
         from webbee.repl import run_marathon
         try:
+            _print_boot_progress("checking for updates")
             _maybe_print_update_notice()
+            _print_boot_progress("booting workspace (indexing, git, session)")
             asyncio.run(run_marathon(cfg, args.mode, args.marathon))
         except KeyboardInterrupt:
             print("\nBye 🐝")
@@ -67,7 +69,19 @@ def main(argv=None) -> None:
     # Default: the polished REPL. Fire a non-blocking update-check first.
     from webbee.repl import run_repl
     try:
+        # webbee-code-boot-visibility-v1 (Valentin, live, Linux boxes: "просто
+        # висит в терминале \"webbee\" и хуй поймешь, работает или комп
+        # завис"): everything between process start and the first dock frame
+        # -- the update-notice PyPI fetch (network, up to ~2s timeout) and
+        # boot_workspace's intel/shadow/git jobs (now parallel, but a large
+        # repo's indexing can still take real seconds) -- used to run with
+        # ZERO output, so a slow network or a big repo looked indistinguishable
+        # from a hang. These are cheap, ONE-LINE, self-overwriting progress
+        # notes printed to the real (non-full-screen-yet) terminal -- gone the
+        # instant the dock takes over the screen, never left behind as clutter.
+        _print_boot_progress("checking for updates")
         _maybe_print_update_notice()
+        _print_boot_progress("booting workspace (indexing, git, session)")
         asyncio.run(run_repl(cfg, args.mode, once=args.once))
     except KeyboardInterrupt:
         # Ctrl-C during the update-check fetch, or at the read_line() prompt,
@@ -75,6 +89,25 @@ def main(argv=None) -> None:
         # a Ctrl-C mid-turn internally and returns to the prompt instead of
         # propagating — see run_repl.)
         print("\nBye 🐝")
+
+
+def _print_boot_progress(what: str) -> None:
+    """One-line, best-effort boot progress note (webbee-code-boot-
+    visibility-v1) -- printed to the plain terminal BEFORE the full-screen
+    dock takes over, so a slow network check or a big-repo index doesn't
+    look like a frozen process. `\r` + trailing spaces overwrite the
+    previous note in place rather than stacking lines; the dock's own first
+    frame paints over this the instant it starts, so nothing lingers.
+    Skips entirely on a non-tty (piped/redirected output, CI) where an
+    overwriting \r note would just print as garbage."""
+    try:
+        import sys
+        if not sys.stdout.isatty():
+            return
+        sys.stdout.write(f"\r🐝 {what}...".ljust(60))
+        sys.stdout.flush()
+    except Exception:
+        pass  # a progress note must never block or crash startup
 
 
 def _maybe_print_update_notice() -> None:

@@ -131,17 +131,25 @@ def _text_cmd() -> "list[str] | None":
     # store it was written to (previously this read wl-paste first
     # UNCONDITIONALLY while the writer preferred xclip -- on a box with
     # both installed the copy and the paste hit two different clipboards).
+    # webbee-code-clipboard-xsel-support-v1: xsel as the last X11 fallback,
+    # same CLIPBOARD buffer (`--clipboard`) the write side now also uses --
+    # matters on a box where xsel is the ONLY tool installed (some minimal
+    # Linux setups ship it instead of xclip).
     from webbee.clipboard_session import is_wayland_session
     if is_wayland_session():
         if shutil.which("wl-paste"):
             return ["wl-paste", "--no-newline"]
         if shutil.which("xclip"):
             return ["xclip", "-selection", "clipboard", "-o"]
+        if shutil.which("xsel"):
+            return ["xsel", "--clipboard", "--output"]
         return None
     if shutil.which("xclip"):
         return ["xclip", "-selection", "clipboard", "-o"]
     if shutil.which("wl-paste"):
         return ["wl-paste", "--no-newline"]
+    if shutil.which("xsel"):
+        return ["xsel", "--clipboard", "--output"]
     return None
 
 
@@ -176,6 +184,10 @@ def read_primary_text() -> "str | None":
         p = _run(["xclip", "-selection", "primary", "-o"])
     elif shutil.which("wl-paste"):
         p = _run(["wl-paste", "--primary", "--no-newline"])
+    elif shutil.which("xsel"):
+        # webbee-code-clipboard-xsel-support-v1: last X11 fallback for
+        # PRIMARY too, mirrors read_clipboard_text's own xsel addition.
+        p = _run(["xsel", "--primary", "--output"])
     else:
         return None
     if p is not None and p.returncode == 0 and p.stdout:

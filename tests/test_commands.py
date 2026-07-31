@@ -64,9 +64,14 @@ def test_model_tier_shows_current_when_no_arg():
     assert r.handled and r.new_tier is None and "UltraSmart" in r.message
 
 
-def test_model_tier_shows_server_default_when_unset():
+def test_model_tier_shows_the_real_default_tier_name_when_unset():
+    """webbee-code-model-selector-always-visible-v1 (Valentin, live
+    2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а не
+    system default"): an unset tier reports the REAL name of the tier that
+    actually runs -- "Smart" (webismart, the documented default tier) --
+    never a vague, unactionable "server default" placeholder."""
     r = dispatch("/model", _ctx())
-    assert r.handled and r.new_tier is None and "server default" in r.message
+    assert r.handled and r.new_tier is None and "Current tier: Smart" in r.message
 
 
 def test_model_tier_rejects_unknown():

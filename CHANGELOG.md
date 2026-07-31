@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.3.49
+
+Round 2 of real-hardware fixes reported live by Valentin after testing
+0.3.48 on Pop!_OS: clipboard still totally dead on Linux, a genuine
+recursion crash on mouse input, Alt+number tab-switching not reaching
+webbee on Linux terminals, slow/silent startup, and `/model` switches that
+"succeeded" but never actually changed anything server-side.
+
+- **Fixed a real infinite-recursion crash on Linux ("maximum recursion
+  depth exceeded", 981 repeated frames):** `input_win.content` IS
+  `_input_control` — the SAME object — so `input_win.content.mouse_handler
+  = _input_mouse_handler` was silently overwriting `_input_control`'s own
+  handler with itself. Any non-consumed mouse event on the prompt input
+  (not just right-click) then called the wrapper from inside the wrapper,
+  forever. GNOME Terminal/VTE fires continuous mouse-move tracking, so
+  almost any mouse activity near the input could trigger this — very
+  likely the real cause behind "copy doesn't work at all" too, since a
+  crash mid-interaction leaves no time for a copy to land. Fixed by
+  capturing the ORIGINAL handler before reassignment (`tui.py`).
+- **Clipboard failure on Linux now says what to actually do, AND a third
+  tool (xsel) is now supported:** a bare "✗ copy failed" left zero next
+  step on a fresh/minimal Linux desktop where neither a clipboard tool nor
+  OSC 52 can be assumed available. `copy_to_clipboard` now names the exact
+  package for the detected session type — `sudo apt install xclip` (X11)
+  or `sudo apt install wl-clipboard` (Wayland) — instead of a dead end.
+  Separately, some minimal Linux setups (reported live on Pop!_OS) ship
+  `xsel` instead of xclip/wl-clipboard — it was never tried at all, so a
+  box with only xsel installed had zero working copy path either way. Both
+  the write side (`clipboard.py`) and the read/paste side
+  (`clipboard_read.py`) now try `xsel` as a last X11 fallback, always
+  targeting the SAME `--clipboard` buffer (never the separate PRIMARY
+  selection) so copy and paste never land in two different stores.
+- **Alt+1..9 tab switching didn't work on Linux:** not a webbee bug — most
+  Linux terminal emulators (GNOME Terminal, Terminator, other VTE-based
+  ones) bind Alt+1..9 THEMSELVES as their own "jump to terminal tab N"
+  shortcut, so the keypress never reached webbee at all. macOS's
+  Terminal.app/iTerm2 ship with no such default, which is why it "just
+  worked" there. Added F1..F9 as a second, independent path to the same
+  tab switch — real escape sequences every terminal forwards untouched
+  (`tui.py`).
+- **Slow, silent startup on Linux ("не использует вообще многопоточность,
+  просто висит"):** `boot_workspace` ran intel indexing, the shadow-git
+  init, and the git-branch read one after another with blocking `await`s —
+  even though each was already its own background thread — paying their
+  full cost added together instead of the cost of the slowest one alone.
+  Now runs all three concurrently via `asyncio.gather` (`boot.py`). Also
+  added a one-line "🐝 checking for updates... / booting workspace..."
+  progress note on the plain terminal before the dock takes over, so a
+  slow network check or a big-repo index no longer looks like a frozen
+  process (`cli.py`).
+- **`/model` switch reported success but never actually changed the
+  model:** the client's tier names (`smart`/`supersmart`/`ultrasmart`)
+  didn't match the server's canonical tier keys
+  (`webismart`/`supersmart`/`ultrasmart` — imperal-ext-admin's Model Tiers
+  panel / the kernel's MODEL_TIERS). An unrecognised tier name silently
+  falls through to the existing default cascade server-side, so `/model
+  smart` always "succeeded" client-side while the server quietly ignored
+  it. Renamed the client's tier id to `webismart` everywhere it's sent,
+  stored, or matched (`commands.py`, `tier_store.py`, `tui.py`,
+  `session.py`, `slots.py`) — now wire-compatible with the server.
+- **Model name now always shown as a real name, never "system default":**
+  an unset tier used to render nothing, then a vague "server default"
+  placeholder. It now shows "Smart" — the actual, documented default tier
+  (`webismart` is genuinely what runs when none is chosen) — a grounded
+  fact about what's active, never an invented tier name (`tui.py`,
+  `commands.py`).
+
 ## 0.3.48
 
 A cluster of real-hardware fixes reported live by Valentin in one session:

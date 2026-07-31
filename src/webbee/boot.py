@@ -124,13 +124,30 @@ async def boot_workspace(cfg, workspace: str, intel_factory, shadow_factory) -> 
     Called once per distinct repo root; webbee.slots.WorkspaceResources
     caches the returned bundle so a second slot opened on the SAME root
     reuses it instead of re-booting (re-indexing, a second watcher, a
-    second git subprocess)."""
-    if cfg.intel_enabled:
-        # Guarded off-loop build + watcher; any failure degrades to
-        # intel=None, never crashes the boot (start_intel above).
-        intel, watcher_task = await start_intel(cfg, workspace, intel_factory)
-    else:
-        intel, watcher_task = None, None
-    shadow = await start_shadow(cfg, workspace, shadow_factory)
-    git_branch = await asyncio.to_thread(_git_branch, workspace)
+    second git subprocess).
+
+    webbee-code-parallel-boot-v1 (Valentin, live, Linux boxes: "запускается
+    очень долго, будто НЕ использует вообще многопоточность машины"): intel
+    indexing, the shadow-git init, and the git-branch read are THREE fully
+    independent off-loop jobs (each already its own asyncio.to_thread) but
+    used to run one after another via a blocking await on each -- paying
+    their full cost ADDED TOGETHER instead of the cost of the slowest one
+    alone. Indexing a real repo (model2vec embeddings, file walks) is by far
+    the heaviest of the three, so a large repo turned "add up all three"
+    into a very real, very visible wait with nothing on screen to show for
+    it. asyncio.gather now runs all three AT ONCE -- same guarded, fail-soft
+    behavior per job (a crash in one never blocks the others or the boot),
+    just concurrent instead of serial."""
+    async def _intel_job():
+        if cfg.intel_enabled:
+            # Guarded off-loop build + watcher; any failure degrades to
+            # intel=None, never crashes the boot (start_intel above).
+            return await start_intel(cfg, workspace, intel_factory)
+        return None, None
+
+    (intel, watcher_task), shadow, git_branch = await asyncio.gather(
+        _intel_job(),
+        start_shadow(cfg, workspace, shadow_factory),
+        asyncio.to_thread(_git_branch, workspace),
+    )
     return {"intel": intel, "watcher_task": watcher_task, "shadow": shadow, "git_branch": git_branch}

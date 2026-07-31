@@ -65,13 +65,13 @@ def test_next_mode_unknown_resets():
 
 
 def test_next_tier_cycles():
-    assert next_tier("smart") == "supersmart"
+    assert next_tier("webismart") == "supersmart"
     assert next_tier("supersmart") == "ultrasmart"
-    assert next_tier("ultrasmart") == "smart"
+    assert next_tier("ultrasmart") == "webismart"
 
 def test_next_tier_unknown_or_unset_resets():
-    assert next_tier("weird") == "smart"
-    assert next_tier("") == "smart"
+    assert next_tier("weird") == "webismart"
+    assert next_tier("") == "webismart"
 
 def test_toolbar_idle_has_mode_tokens_cost_and_hint():
     t = _txt(build_toolbar("plan", 51000, 66))
@@ -4499,6 +4499,52 @@ def test_alt_1_switches_from_home_to_session_tab_and_swaps_history():
     asyncio.run(scenario())
 
 
+def test_f1_also_switches_tabs_as_a_linux_terminal_safe_fallback():
+    """webbee-code-linux-tab-switch-fallback-v1: most Linux terminal
+    emulators (GNOME Terminal, Terminator, VTE-based) already bind Alt+1..9
+    themselves for THEIR OWN tab switching, so the chord never reaches
+    webbee's input stream there (Valentin, live, PopOS: "на маке Option+tab
+    number работает идеально, а на линуксе вообще нет"). F1 is a second,
+    independent binding to the SAME `_switch_to` for exactly that case --
+    Ctrl+<digit> was tried and reverted since most digits have no classic
+    control byte without a terminal mode GNOME Terminal doesn't send by
+    default; F-keys are universal, real escape sequences every terminal
+    forwards untouched."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+    from webbee.slots import SessionSlot, SlotManager
+
+    async def scenario():
+        home = SessionSlot(kind="home", workspace=".", label="Home",
+                           pane=tui.OutputPane(width=80), sink=None, agent=None)
+        session = SessionSlot(kind="session", workspace=".", label="proj",
+                              pane=tui.OutputPane(width=80), sink=_idle_sink(), agent=None)
+        slots = SlotManager()
+        slots.add(home)
+        slots.add(session)
+        slots.active_idx = 0
+        assert session.history is None
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x1bOP")                    # F1 -- SS3 encoding
+                await _until(lambda: slots.active_idx == 1)
+                assert session.history is not None           # _swap_history fired, same as Alt+1
+                pipe.send_text("\x04")                       # single session -> idle exit
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
 def test_lines_typed_before_the_first_switch_recall_after_home_and_back():
     # FIX7c: the boot-active slot's history is seeded BEFORE app.run_async
     # even starts -- a line typed before ANY switch must land in THAT
@@ -5361,14 +5407,17 @@ def test_idle_toolbar_shows_the_model_tier_when_set():
     assert "model: SuperSmart" in t
 
 
-def test_idle_toolbar_shows_server_default_when_tier_unset():
-    # webbee-code-model-selector-always-visible-v1: an unset tier used to
-    # render NOTHING (Valentin, live 2026-07-31: wants the model visible in
-    # EVERY tab, not just after a choice) -- now it honestly says "server
-    # default" instead of inventing a concrete tier name nobody picked.
+def test_idle_toolbar_shows_the_real_default_tier_name_when_unset():
+    # webbee-code-model-selector-always-visible-v1 (Valentin, live
+    # 2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а не
+    # system default"): an unset tier used to render NOTHING, then a vague
+    # "server default" placeholder -- now it shows the REAL tier that
+    # actually runs when none is chosen: "Smart" (webismart is the
+    # documented default tier), never SuperSmart/UltraSmart which are NOT
+    # what's running unless explicitly picked.
     t = _txt(build_toolbar("default", 0, 0.0, tier=""))
-    assert "model: server default" in t
-    assert "Smart" not in t and "SuperSmart" not in t and "UltraSmart" not in t
+    assert "model: Smart" in t
+    assert "SuperSmart" not in t and "UltraSmart" not in t
 
 
 def test_busy_toolbar_shows_a_short_tier_tag():
@@ -5376,12 +5425,13 @@ def test_busy_toolbar_shows_a_short_tier_tag():
     assert "UltraSmart" in t
 
 
-def test_busy_toolbar_shows_server_default_when_tier_unset():
+def test_busy_toolbar_shows_the_real_default_tier_name_when_unset():
     # webbee-code-model-selector-always-visible-v1: busy state gets the same
-    # honest fallback as idle -- "server default", never an invented tier.
+    # grounded default-tier name as idle -- "Smart", never SuperSmart or
+    # UltraSmart, which are NOT what's running unless explicitly chosen.
     t = _txt(build_toolbar("default", 0, 0.0, busy=True, elapsed=1.0, tier=""))
-    assert "server default" in t
-    assert "UltraSmart" not in t and "SuperSmart" not in t and "Smart" not in t
+    assert "Smart" in t
+    assert "UltraSmart" not in t and "SuperSmart" not in t
 
 
 def test_tier_colours_are_genuinely_distinct_from_mode_colours():
@@ -5542,6 +5592,54 @@ def test_right_click_on_the_prompt_input_pastes_clipboard_text():
                     await asyncio.sleep(0.05)
                     assert get_app().current_buffer.text == "pasted!"
                 get_app().current_buffer.text = ""
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# webbee-code-input-mouse-recursion-fix-v1: a LEFT click (or any non-right
+# mouse event) on the prompt input must reach prompt_toolkit's own handler
+# WITHOUT recursing into itself -- `input_win.content` is the SAME object as
+# `_input_control`, so the wrapper's fallback used to call the wrapper AGAIN
+# (self-reassignment), crashing with "maximum recursion depth exceeded" on
+# real hardware (PopOS, live 2026-07-31: 981 repeated frames in
+# _input_mouse_handler before the crash).
+# --------------------------------------------------------------------------
+def test_left_click_on_the_prompt_input_does_not_recurse_forever():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.controls import BufferControl
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import tui
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        slots = mk_slots(pane=pane, sink=_idle_sink(), workspace="/tmp/proj")
+
+        async def on_line(text, slot=None): ...
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                task = asyncio.create_task(tui.run_session(
+                    slots=slots, on_line=on_line, on_cycle=lambda: None))
+                await asyncio.sleep(0.05)
+                get_app().current_buffer.text = "hello world"
+                wins = [w for w in get_app().layout.find_all_windows()
+                        if isinstance(w.content, BufferControl)]
+                assert wins, "input window not found in the live layout"
+                input_win = wins[0]
+                ev = MouseEvent(position=Point(3, 0), event_type=MouseEventType.MOUSE_DOWN,
+                                 button=MouseButton.LEFT, modifiers=frozenset())
+                # Before the fix this call recursed into itself until the
+                # interpreter's recursion limit blew the stack -- this MUST
+                # return promptly instead of raising RecursionError.
+                input_win.content.mouse_handler(ev)
                 pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True

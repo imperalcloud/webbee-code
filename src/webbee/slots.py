@@ -117,7 +117,7 @@ class SessionSlot:
                                   # keys off step_for_record, not the tool name).
     mode: str = "default"
     model_tier: str = ""               # "" = server admin default (unset by client), else
-                                        # "smart"|"supersmart"|"ultrasmart" -- see tier_store.py.
+                                        # "webismart"|"supersmart"|"ultrasmart" -- see tier_store.py.
                                         # Threaded into coding_context on every turn, mirroring
                                         # how repo_key already rides the same dict.
     git_branch: str = "-"

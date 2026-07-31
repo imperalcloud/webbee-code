@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 
 _MODES = ("default", "plan", "autopilot")
-_TIERS = ("smart", "supersmart", "ultrasmart")
+_TIERS = ("webismart", "supersmart", "ultrasmart")
 # webbee-code-tier-colors-v1: wire/storage values stay lowercase everywhere
 # (tier_store.py, the kernel's MODEL_TIERS, /model's own argument parsing);
 # this is ONLY the human-facing label shown back to the user in messages.
-_TIER_DISPLAY = {"smart": "Smart", "supersmart": "SuperSmart", "ultrasmart": "UltraSmart"}
+_TIER_DISPLAY = {"webismart": "Smart", "supersmart": "SuperSmart", "ultrasmart": "UltraSmart"}
 
 _HELP = """Commands:
   /help              show this help
@@ -13,7 +13,7 @@ _HELP = """Commands:
   /logout            sign out and remove local credentials
   /clear             clear the screen + reset session counters
   /mode [default|plan|autopilot]   consent mode (no arg — show current)
-  /model [smart|supersmart|ultrasmart]   coding brain tier (no arg — show current)
+  /model [webismart|supersmart|ultrasmart]   coding brain tier (no arg — show current)
   /cost  (=/usage)   tokens + credits this session
   /status            cwd · git · surface · tokens · version
   /new [path]        open a new tab — a session in path (default: cwd)
@@ -50,7 +50,7 @@ class CommandContext:
     session_credits: int
     git_branch: str
     queued: tuple = ()   # snapshot of the dock's type-ahead queue, oldest first
-    model_tier: str = ""   # "" = server admin default; else smart|supersmart|ultrasmart
+    model_tier: str = ""   # "" = server admin default; else webismart|supersmart|ultrasmart
 
 
 @dataclass(frozen=True)
@@ -177,7 +177,11 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
     if cmd == "/model":
         pretty = ", ".join(_TIER_DISPLAY[t] for t in _TIERS)
         if not args:
-            current = _TIER_DISPLAY.get(ctx.model_tier, ctx.model_tier) if ctx.model_tier else "(server default)"
+            # webbee-code-model-selector-always-visible-v1 (Valentin, live
+            # 2026-07-31): report the REAL running tier even when unset --
+            # "webismart" IS the documented default tier, never a vague
+            # "(server default)" placeholder the user can't act on.
+            current = _TIER_DISPLAY.get(ctx.model_tier or _TIERS[0], ctx.model_tier or _TIERS[0])
             return SlashResult(handled=True, action="model_tier", new_tier=None,
                                message=f"Current tier: {current}. Available: {pretty}.")
         want = args[0].lower()

@@ -2895,3 +2895,46 @@ def test_save_pasted_writes_file_and_gitignore(tmp_path):
 def test_save_pasted_never_raises_on_bad_dir():
     from webbee.repl import _save_pasted
     assert _save_pasted("/dev/null/nope", "x.png", b"x") == ""
+
+
+def test_boot_workspace_runs_intel_shadow_and_git_branch_concurrently(monkeypatch):
+    """webbee-code-parallel-boot-v1 (Valentin, live, Linux boxes: "запускается
+    очень долго, будто НЕ использует вообще многопоточность машины"): intel
+    indexing, shadow-git init, and the git-branch read are three INDEPENDENT
+    off-loop jobs -- they must run CONCURRENTLY (asyncio.gather), not one
+    after another. Proven here by two artificially slow jobs: if they ran
+    serially the total would be >= sleep_a + sleep_b; run concurrently it's
+    close to max(sleep_a, sleep_b)."""
+    import time
+    from webbee import boot as BOOT
+    from webbee.config import Config
+
+    cfg = Config(api_url="http://x", panel_url="http://p", intel_enabled=True)
+
+    class _SlowIntel:
+        def build(self):
+            time.sleep(0.2)
+
+    async def _slow_shadow_thread(*a, **k):
+        # start_shadow already wraps shadow_factory in asyncio.to_thread;
+        # make the FACTORY itself slow so its 0.2s lands on a worker thread
+        # concurrently with intel's own 0.2s, not stacked after it.
+        pass
+
+    def _slow_shadow_factory(cfg, ws):
+        time.sleep(0.2)
+        return "shadow-ok"
+
+    monkeypatch.setattr(BOOT, "_git_branch", lambda ws: "main")
+
+    t0 = time.time()
+    result = asyncio.run(BOOT.boot_workspace(
+        cfg, os.getcwd(),
+        intel_factory=lambda cfg, ws: _SlowIntel(),
+        shadow_factory=_slow_shadow_factory))
+    elapsed = time.time() - t0
+
+    assert result["shadow"] == "shadow-ok"
+    assert result["git_branch"] == "main"
+    # Serial would take >= 0.4s (0.2 + 0.2); concurrent stays well under that.
+    assert elapsed < 0.35, f"boot_workspace took {elapsed:.2f}s -- looks serial, not concurrent"

@@ -31,12 +31,12 @@ from webbee.tabs import tab_fragments
 from webbee.todo_panel import todo_fragments, todo_height
 
 _MODES = ("default", "plan", "autopilot")
-_TIERS = ("smart", "supersmart", "ultrasmart")
+_TIERS = ("webismart", "supersmart", "ultrasmart")
 # webbee-code-tier-colors-v1: the wire/storage value stays lowercase
 # (tier_store.py, the kernel's MODEL_TIERS, /model's own argument parsing —
 # none of that changes), this is ONLY the human-facing label shown in the
 # toolbar and in the switch confirmation note.
-_TIER_DISPLAY = {"smart": "Smart", "supersmart": "SuperSmart", "ultrasmart": "UltraSmart"}
+_TIER_DISPLAY = {"webismart": "Smart", "supersmart": "SuperSmart", "ultrasmart": "UltraSmart"}
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # braille frames — animated while a turn runs
 
 # Leaked SGR mouse-report fragments ("<35;6;42M" / "35;6;42M"): under a
@@ -84,11 +84,11 @@ _STYLE_DICT = {
     # webbee-code-tier-colors-v2: FIXED -- v1 accidentally reused the exact
     # mode colours (cyan/purple/yellow), so tiers were visually identical to
     # modes. Genuinely distinct palette now, same "calm -> bold" progression
-    # but no shared hex with tb.mode.*: smart=teal-green (calm baseline),
+    # but no shared hex with tb.mode.*: webismart=teal-green (calm baseline),
     # supersmart=soft blue-violet (a step up), ultrasmart=hot magenta bold
     # (the top tier -- meant to pop, but pop DIFFERENTLY from autopilot's
     # yellow caution so the two are never confusable at a glance).
-    "tb.tier.smart": "#5fd7af",
+    "tb.tier.webismart": "#5fd7af",
     "tb.tier.supersmart": "#5f87ff",
     "tb.tier.ultrasmart": "#ff5fd7 bold",
     "tb.version": "#5f5f5f",             # 0.3.37 bottom-right version badge — quietest thing on screen
@@ -227,7 +227,7 @@ def next_mode(mode: str) -> str:
 
 
 def next_tier(tier: str) -> str:
-    """PURE. Cycles smart -> supersmart -> ultrasmart -> smart. An unset/""
+    """PURE. Cycles webismart -> supersmart -> ultrasmart -> webismart. An unset/""
     tier (server admin default, never chosen) or any unrecognised value
     starts the cycle at the first tier, same fallback discipline as
     next_mode above."""
@@ -274,15 +274,15 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         # colour + its human display name (Smart/SuperSmart/UltraSmart),
         # never the raw wire value.
         # webbee-code-model-selector-always-visible-v1 (Valentin, live
-        # 2026-07-31: wants the model NAME visible AND changeable in every
-        # tab): an unset tier used to render NOTHING here, so a fresh tab
-        # showed no model indicator at all -- now it honestly says "server
-        # default" (never a guessed/invented concrete tier name -- the
-        # I-DIAGNOSIS-GROUNDED spirit above still holds, this is not a
-        # claim about WHICH tier runs, just that none has been chosen yet).
+        # 2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а
+        # не system default"): an unset tier now shows the REAL name of the
+        # tier that actually runs when none is chosen -- "webismart" IS the
+        # documented default, fast everyday tier (imperal-ext-admin's own
+        # Model Tiers panel, `_TIERS[0]`), so showing its display name
+        # "Smart" here is a grounded fact about what's running, not a
+        # guess -- never a MADE-UP tier the server didn't confirm.
         frags += [("class:tb.dim", " · "),
-                  (f"class:tb.tier.{tier}", _TIER_DISPLAY.get(tier, tier))
-                  if tier else ("class:tb.dim", "server default")]
+                  (f"class:tb.tier.{tier or _TIERS[0]}", _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]])]
         frags.append(("class:tb.dim",
                       f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"))
         frags += q
@@ -295,16 +295,14 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     # forget, exactly the visibility gap the mode segment right next to it
     # never had.
     # webbee-code-model-selector-always-visible-v1 (Valentin, live
-    # 2026-07-31): every tab must show a model indicator, chosen or not --
-    # "" (unset) now shows "server default" instead of nothing, so the user
-    # always sees SOMETHING is there to change (Ctrl+B / `/model`), never a
-    # blank gap that looks like the feature doesn't exist. Still never
-    # claims a specific tier the user didn't pick and the server didn't
-    # confirm (I-DIAGNOSIS-GROUNDED) -- "server default" names the STATE,
-    # not a guessed value.
+    # 2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а не
+    # system default"): every tab must show a model indicator, chosen or
+    # not -- "" (unset) shows the REAL name of the default tier that's
+    # actually active ("Smart" / webismart, imperal-ext-admin's own
+    # documented default), never a vague placeholder phrase. Ctrl+B /
+    # `/model` still change it from here exactly like before.
     frags += [("class:tb.dim", " · model: "),
-              (f"class:tb.tier.{tier}", _TIER_DISPLAY.get(tier, tier))
-              if tier else ("class:tb.dim", "server default")]
+              (f"class:tb.tier.{tier or _TIERS[0]}", _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]])]
     frags += [("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
              *q]
     # 0.3.37: the PERSISTENT live-session indicator (active_sessions.
@@ -1163,7 +1161,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
     @kb.add("c-b", filter=Condition(lambda: on_tier_cycle is not None and _a().kind != "home"))
     def _tier_cycle(event):
         # webbee-code-model-tier-slash-command-v1: Ctrl+B cycles the coding
-        # brain tier (smart -> supersmart -> ultrasmart -> smart), the exact
+        # brain tier (webismart -> supersmart -> ultrasmart -> webismart), the exact
         # keyboard-symmetric sibling of Shift+TAB's mode cycle above. NOT
         # Ctrl+M: that's the same raw byte (\r, CR) as Enter on most
         # terminals lacking CSI-u/Kitty-protocol support -- binding it would
@@ -1375,6 +1373,24 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
         # prefix-of-longer-match timeout, tuned down further below.
         kb.add("escape", str(_d))(_alt_digit_handler(_d))
 
+    # webbee-code-linux-tab-switch-fallback-v1 (Valentin, live, PopOS: "на
+    # маке Option+tab number работает идеально, а на линуксе вообще нет"):
+    # this is NOT a webbee bug -- most Linux terminal emulators (GNOME
+    # Terminal, Terminator, and other VTE-based ones) bind Alt+1..9
+    # THEMSELVES as their own "jump to terminal tab N" accelerator, so the
+    # chord never reaches webbee's input stream there at all; macOS's
+    # Terminal.app/iTerm2 ship with no such default, which is exactly why
+    # the same chord "just works" there. Ctrl+<digit> was tried and reverted
+    # -- most digits have NO classic control byte at all without a
+    # modifyOtherKeys/CSI-u terminal mode GNOME Terminal doesn't send by
+    # default, so it would silently never fire on the very box that needs
+    # it. F1..F9 instead: real, universally-supported escape sequences
+    # every terminal emulator (VTE included) has forwarded untouched since
+    # the 80s, essentially never claimed by the terminal itself for tab
+    # switching.
+    for _d in range(1, 10):
+        kb.add(f"f{_d}")(_alt_digit_handler(_d))
+
     @kb.add("c-w", filter=Condition(lambda: _can_close_tab(buf, _a())))
     def _close_tab_key(event):
         # Filtered, not unconditional (contract): an empty input on an
@@ -1559,7 +1575,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
                 frags = [("class:tb.dim", "  ◆ home"),
                          ("class:tb.dim", f"   ·   {_fmt_tokens(tk)} tok · {_fmt_tokens(cr)} credits this session")]
                 _w = _toolbar_fit_width()
-                _hint = "   ·   type a task to start · Alt+№ switch"
+                _hint = "   ·   type a task to start · Alt/F-key+№ switch"
                 if not _w or sum(len(t) for _, t in frags) + len(_hint) <= _w:
                     frags.append(("class:tb.dim", _hint))
         # W2 Task 8: the toolbar has no mouse handling of its own, so
@@ -1729,6 +1745,21 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
 
     _input_control = BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)])
 
+    # webbee-code-input-mouse-recursion-fix-v1 (Valentin, live, PopOS crash
+    # with "maximum recursion depth exceeded" + 981 repeated frames in
+    # _input_mouse_handler): `input_win.content` IS `_input_control` -- the
+    # SAME object, not a copy -- so the assignment below used to overwrite
+    # `_input_control.mouse_handler` itself with this wrapper. The wrapper's
+    # own fallback then called `_input_control.mouse_handler(ev)`, which by
+    # then WAS the wrapper again -- calling itself forever until the stack
+    # blew up. This was invisible in our own tests because none of them
+    # route a real mouse event through the attribute on the LIVE object
+    # after assignment; it only bit on an actual click on real hardware.
+    # Fix: grab the ORIGINAL bound method BEFORE reassigning the attribute,
+    # so the fallback always reaches prompt_toolkit's real handler, never
+    # itself.
+    _orig_input_mouse_handler = _input_control.mouse_handler
+
     def _input_mouse_handler(ev):
         # webbee-code-right-click-everywhere-v1: right-click must paste
         # EVERYWHERE, including the prompt input box itself -- BufferControl's
@@ -1745,7 +1776,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
         if ev.event_type == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.RIGHT:
             _right_paste()
             return None
-        return _input_control.mouse_handler(ev)
+        return _orig_input_mouse_handler(ev)
 
     input_win = Window(
         _input_control, height=_input_height, wrap_lines=True, get_line_prefix=_line_prefix)

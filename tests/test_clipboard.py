@@ -156,3 +156,47 @@ def test_linux_still_prefers_xclip_on_a_plain_x11_session(monkeypatch):
 
     C.copy_to_clipboard("x")
     assert seen["cmd"] == ["xclip", "-selection", "clipboard"]
+
+
+def test_linux_no_tool_installed_names_the_package_to_apt_install(monkeypatch):
+    """webbee-code-clipboard-actionable-failure-v1: on Linux, when NEITHER a
+    local clipboard tool nor OSC 52 worked, the failure names the exact
+    package for the CURRENT session type -- wl-clipboard on Wayland, xclip
+    on X11 -- instead of leaving the user with a bare, actionless failure."""
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    monkeypatch.setattr(C.shutil, "which", lambda name: None)
+    monkeypatch.setattr(C, "_osc52_emit", lambda text: False)
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    assert C.copy_to_clipboard("hi") == "✗ copy failed — install it: sudo apt install xclip"
+
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    assert C.copy_to_clipboard("hi") == "✗ copy failed — install it: sudo apt install wl-clipboard"
+
+
+def test_linux_falls_back_to_xsel_when_no_xclip_or_wlcopy(monkeypatch):
+    """webbee-code-clipboard-xsel-support-v1 (Valentin, live 2026-07-31:
+    "все альтернативы должна поддерживаться с правильным буфером"): some
+    minimal Linux desktops (Pop!_OS included) ship xsel instead of xclip/
+    wl-clipboard -- it must be tried as a last resort, targeting the SAME
+    CLIPBOARD buffer (`--clipboard`, not the default PRIMARY selection)."""
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.setattr(C.shutil, "which", lambda name: "/usr/bin/xsel" if name == "xsel" else None)
+    calls = []
+    monkeypatch.setattr(C.subprocess, "run",
+                         lambda cmd, **k: (calls.append(cmd), _Proc(0))[1])
+    result = C.copy_to_clipboard("hi")
+    assert "copied" in result
+    assert calls and calls[0][0] == "xsel"
+    assert "--clipboard" in calls[0]
+
+
+def test_linux_no_tool_at_all_still_names_a_package_with_xsel_absent(monkeypatch):
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    monkeypatch.setattr(C.shutil, "which", lambda name: None)
+    monkeypatch.setattr(C, "_osc52_emit", lambda text: False)
+    result = C.copy_to_clipboard("hi")
+    assert "apt install" in result

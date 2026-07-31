@@ -119,3 +119,28 @@ def test_text_cmd_write_read_agree_on_wayland_with_both_tools(monkeypatch):
     monkeypatch.setattr(cr.shutil, "which", both)
     assert cw._local_copy_cmd()[0] == "wl-copy"
     assert cr._text_cmd()[0] == "wl-paste"   # the SAME family as the writer chose
+
+
+def test_text_cmd_falls_back_to_xsel_when_nothing_else_installed(monkeypatch):
+    """webbee-code-clipboard-xsel-support-v1 (Valentin, live 2026-07-31:
+    "все альтернативы должна поддерживаться с правильным буфером"): xsel is
+    the last X11 fallback on both read and write, targeting the SAME
+    --clipboard buffer copy_to_clipboard's own xsel path writes to."""
+    monkeypatch.setattr(cr.sys, "platform", "linux")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.setattr(cr.shutil, "which", lambda name: "/usr/bin/xsel" if name == "xsel" else None)
+    assert cr._text_cmd() == ["xsel", "--clipboard", "--output"]
+
+
+def test_text_cmd_write_read_agree_on_xsel_only_box(monkeypatch):
+    import webbee.clipboard as cw
+    monkeypatch.setattr(cw.sys, "platform", "linux")
+    monkeypatch.setattr(cr.sys, "platform", "linux")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    only_xsel = lambda name: "/usr/bin/xsel" if name == "xsel" else None
+    monkeypatch.setattr(cw.shutil, "which", only_xsel)
+    monkeypatch.setattr(cr.shutil, "which", only_xsel)
+    assert cw._local_copy_cmd() == ["xsel", "--clipboard", "--input"]
+    assert cr._text_cmd() == ["xsel", "--clipboard", "--output"]
