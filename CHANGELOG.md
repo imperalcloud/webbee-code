@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.47
+
+The cloud brain now sees BOTH your machine's real clock and your configured
+Imperal profile timezone on every turn -- never just one blindly trusted.
+
+- **What changed:** every coding-context snapshot now carries `client_now`
+  (this machine's actual wall-clock reading, ISO 8601 with UTC offset) and
+  `client_tz_label` (the OS/IANA timezone name) alongside the existing
+  cwd/git/tree/repo_key. The kernel renders both facts side by side and
+  flags a drift explicitly (wrong system clock, a VM in a different zone, a
+  stale profile setting) instead of silently trusting either source.
+- **Why:** the brain previously only knew the CONFIGURED profile timezone
+  server-side -- it had no way to tell if the machine actually running the
+  agent disagreed with that (e.g. a VM parked in UTC, a laptop with a wrong
+  system clock). Now it always has ground truth from both ends.
+- Best-effort: any clock-read failure just omits the fields -- never blocks
+  a turn.
+
 ## 0.3.46
 
 Fixed a real jitter bug in text selection: dragging to select past the

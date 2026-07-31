@@ -29,3 +29,15 @@ def test_build_coding_context_still_prunes_dotdirs(tmp_path):
     tree = build_coding_context(str(tmp_path))["tree"]
     assert "src/a.py" in tree
     assert ".secret" not in tree
+
+
+def test_build_coding_context_carries_client_now(tmp_path):
+    # I-CODING-TIME-CONTRACT: the brain needs the machine's ACTUAL wall-clock
+    # reading (distinct from the user's configured profile timezone) on every
+    # snapshot, so it can flag drift instead of blindly trusting one source.
+    import re
+    ctx = build_coding_context(str(tmp_path))
+    assert "client_now" in ctx
+    # ISO 8601 with an explicit UTC offset (+HH:MM/-HH:MM or Z) -- the kernel
+    # compares this against the configured timezone without re-resolving.
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$", ctx["client_now"])

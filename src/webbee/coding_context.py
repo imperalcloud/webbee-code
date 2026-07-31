@@ -1,9 +1,19 @@
 """Coding-context snapshot for the cloud brain (extracted verbatim from
 webbee.session): build_coding_context packages cwd/git/tree/repo identity
 (+ optional repo_profile), and detect_verify_cmd is the CLIENT-detected
-proof-of-done command a marathon carries in that context."""
+proof-of-done command a marathon carries in that context.
+
+client_now (2026-07-31, I-CODING-TIME-CONTRACT): the machine's OWN wall-clock
+reading, captured fresh on every snapshot -- distinct from whatever timezone
+the user has CONFIGURED in their Imperal profile/panel. The brain needs BOTH:
+the configured timezone (what the user SET) and the actual reading on the
+machine running the agent (what time it REALLY is there) so it can flag a
+drift (wrong system clock, VM in a different zone, stale profile setting)
+instead of silently trusting one source. Best-effort: any clock read failure
+degrades to an absent key, never blocks the turn."""
 import os
 import subprocess
+from datetime import datetime
 
 # Heavy dependency/build dirs the file-tree walk and the agent `grep` tool
 # must NEVER descend: they blow up walk time on real repos and (with the tree's
@@ -46,6 +56,19 @@ def build_coding_context(workspace_root: str, intel=None) -> dict:
     root = find_repo_root(cwd)
     d = {"cwd": cwd, "git": git, "tree": "\n".join(paths),
          "repo_key": compute_repo_key(root), "repo_root": root}
+    # I-CODING-TIME-CONTRACT: the machine's actual local wall-clock, ISO 8601
+    # WITH UTC offset (so the kernel can compare it against the user's
+    # CONFIGURED timezone without re-resolving anything) + the IANA zone name
+    # the OS reports, when available. Never raises -- a clock/tzdata error
+    # just omits the key, the kernel falls back to the configured-only view.
+    try:
+        _now_local = datetime.now().astimezone()
+        d["client_now"] = _now_local.isoformat(timespec="seconds")
+        _tzname = _now_local.tzname()
+        if _tzname:
+            d["client_tz_label"] = _tzname
+    except Exception:
+        pass
     if intel is not None and getattr(intel, "ready", False):
         try:
             d["repo_profile"] = intel.repo_profile()

@@ -51,7 +51,10 @@ def test_confirm_default_relays_raw_reply_verbatim():
 def test_build_coding_context_shape(tmp_path):
     (tmp_path / "a.txt").write_text("x")
     ctx = build_coding_context(str(tmp_path))
-    assert set(ctx) == {"cwd", "git", "tree", "repo_key", "repo_root"}
+    # I-CODING-TIME-CONTRACT: client_now/client_tz_label ride every snapshot
+    # (best-effort -- a clock-read failure would simply omit them).
+    assert set(ctx) == {"cwd", "git", "tree", "repo_key", "repo_root",
+                        "client_now", "client_tz_label"}
     assert "a.txt" in ctx["tree"]
 
 
