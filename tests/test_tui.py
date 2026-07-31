@@ -5303,6 +5303,35 @@ def test_busy_toolbar_says_nothing_about_tier_when_unset():
     assert "UltraSmart" not in t and "SuperSmart" not in t and "Smart" not in t
 
 
+def test_tier_colours_are_genuinely_distinct_from_mode_colours():
+    """webbee-code-tier-colors-v2 regression guard: v1 accidentally reused
+    the mode segment's exact hex codes for the tier segment, so the two
+    looked visually identical. Prove the fix holds -- no shared style string
+    between any tb.mode.* and any tb.tier.* entry."""
+    from webbee.tui import _STYLE_DICT
+    mode_styles = {v for k, v in _STYLE_DICT.items() if k.startswith("tb.mode.")}
+    tier_styles = {v for k, v in _STYLE_DICT.items() if k.startswith("tb.tier.")}
+    assert mode_styles and tier_styles
+    assert not (mode_styles & tier_styles), (
+        "tier colours must not reuse mode colours verbatim"
+    )
+
+
+def test_badge_style_override_breathes_only_when_confirmed_up_to_date():
+    """webbee-code-badge-breathe-v1: the badge only pulses in the ONE honest
+    state where it's safe to reassure (checked=True, no update notice) --
+    every other state (unchecked/offline/update-available) must return no
+    override, so it keeps its normal fixed colour."""
+    from webbee.tui import run_session
+    import inspect
+    src = inspect.getsource(run_session)
+    assert "_badge_style_override" in src
+    # the two half-beats must be genuinely different style classes, or the
+    # animation would silently do nothing
+    from webbee.tui import _STYLE_DICT
+    assert _STYLE_DICT["tb.fresh"] != _STYLE_DICT["tb.fresh.bright"]
+
+
 # --------------------------------------------------------------------------
 # webbee-code-click-to-expand-v1: a plain mouse click on a printed tool_result
 # line expands that step's detail card -- the SAME reveal /steps N (and

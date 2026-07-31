@@ -1118,10 +1118,19 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         # into the transcript -- the SAME "something really changed" signal
         # /new's tab-open note already gives (`_say`, printed straight into
         # the pane) -- a silent toolbar-only change was too easy to miss.
+        # webbee-code-tier-colors-v2: PLUS a toolbar flash (the exact same
+        # copy-flash mechanism the ✓ copied toast uses) -- the transcript
+        # note can scroll out of view fast on a busy pane, the toolbar
+        # flash cannot be missed because it sits pinned at the bottom.
         slot = slots.active()
         new_tier = next_tier(slot.model_tier)
         set_slot_tier(slot, new_tier)
-        _say(slot, f"🎛️ model tier → {_TIER_DISPLAY.get(new_tier, new_tier)}")
+        label = _TIER_DISPLAY.get(new_tier, new_tier)
+        _say(slot, f"🎛️ model tier → {label}")
+        pane = getattr(slot, "pane", None)
+        flash = getattr(pane, "flash_note", None) if pane is not None else None
+        if flash is not None:
+            flash(f"🎛️ tier → {label}", secs=1.5)
 
     async def _handle(line: str, slot: SessionSlot) -> str:
         """Process one input line AGAINST an EXPLICIT slot (FIX1, W4a final

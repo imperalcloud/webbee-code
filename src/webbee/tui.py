@@ -81,15 +81,20 @@ _STYLE_DICT = {
     "tb.mode.default": "#00afd7",        # default — cyan
     "tb.mode.plan": "#af87ff",           # plan — purple
     "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
-    # webbee-code-tier-colors-v1: each model tier gets its OWN unique colour,
-    # exactly like the mode segment right next to it — smart=cyan (calm,
-    # the baseline), supersmart=purple (a step up), ultrasmart=bee-yellow
-    # bold (the top tier, meant to pop the same way autopilot's caution does).
-    "tb.tier.smart": "#00afd7",
-    "tb.tier.supersmart": "#af87ff",
-    "tb.tier.ultrasmart": "#e8a317 bold",
+    # webbee-code-tier-colors-v2: FIXED -- v1 accidentally reused the exact
+    # mode colours (cyan/purple/yellow), so tiers were visually identical to
+    # modes. Genuinely distinct palette now, same "calm -> bold" progression
+    # but no shared hex with tb.mode.*: smart=teal-green (calm baseline),
+    # supersmart=soft blue-violet (a step up), ultrasmart=hot magenta bold
+    # (the top tier -- meant to pop, but pop DIFFERENTLY from autopilot's
+    # yellow caution so the two are never confusable at a glance).
+    "tb.tier.smart": "#5fd7af",
+    "tb.tier.supersmart": "#5f87ff",
+    "tb.tier.ultrasmart": "#ff5fd7 bold",
     "tb.version": "#5f5f5f",             # 0.3.37 bottom-right version badge — quietest thing on screen
     "tb.fresh": "#5faf5f",               # 0.3.40 — badge: verified up to date (mirrors home.fresh)
+    "tb.fresh.bright": "#87ff87 bold",    # webbee-code-badge-breathe-v1 — the brighter half-beat
+                                           # of the "up to date" badge's breathing animation
     "tb.update": "#e8a317 bold",         # 0.3.40 — badge: a newer release exists (mirrors home.update)
     "qp.header": "#e8a317 bold",         # queue-panel header — bee-yellow, pops
     "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
@@ -323,7 +328,8 @@ def version_badge_text(version: str) -> str:
 
 
 def pin_version_right(frags: list, version: str, width: int, *,
-                      notice: str = "", checked: "bool | None" = None) -> list:
+                      notice: str = "", checked: "bool | None" = None,
+                      style_override: str = "") -> list:
     """PURE. Pin the version badge flush to the RIGHT EDGE of the toolbar row.
 
     The toolbar is the LAST child of run_session's root HSplit, so its right
@@ -374,6 +380,11 @@ def pin_version_right(frags: list, version: str, width: int, *,
         raw, cls = version_badge(version, notice, checked=checked)
         text, style = raw, ("tb.fresh" if cls == "class:home.fresh" else
                             "tb.update" if cls == "class:home.update" else "tb.version")
+    # webbee-code-badge-breathe-v1: caller may override the STYLE CLASS only
+    # (never the text/length -- the row width contract above is unchanged)
+    # to make the "up to date" badge visibly breathe between two shades.
+    if style_override:
+        style = style_override.removeprefix("class:")
     badge = f" {text} "
     used = sum(len(t) for _, t in frags)
     pad = width - used - len(badge)
@@ -451,7 +462,7 @@ def _tick_interval(busy: bool) -> float:
     return 0.25 if busy else 1.0
 
 
-def _tick_once(slots, app, is_busy) -> None:
+def _tick_once(slots, app, is_busy, breathing=None) -> None:
     """One iteration of run_session's `_ticker` loop, extracted module-level
     so the wiring itself is directly unit-testable (an `async def` infinite
     loop otherwise only proves itself by running the whole dock). W4a Task 3:
@@ -472,7 +483,12 @@ def _tick_once(slots, app, is_busy) -> None:
         pane.edge_tick()
     except Exception:
         pass
-    if is_busy() or pane.flash():
+    # webbee-code-badge-breathe-v1: `breathing` (optional) reports whether the
+    # bottom-right version badge is in its "up to date, pulse the colour"
+    # state right now -- if so the idle 1.0s-cadence tick still has to
+    # actually REDRAW so the alternating shade is ever seen, not just
+    # computed and silently discarded on every tick the same as a no-op one.
+    if is_busy() or pane.flash() or (breathing is not None and breathing()):
         app.invalidate()
 
 
@@ -1403,6 +1419,24 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
         pane = _pane()
         pane.scroll(max(1, pane._view_h) - 2)
 
+    def _badge_style_override() -> str:
+        """webbee-code-badge-breathe-v1: the bottom-right version badge
+        genuinely BREATHES when we've confirmed you're up to date -- alternates
+        between the normal dim-green and a brighter green every ~1.2s, driven
+        off wall-clock time (no extra timer: `_tick_once` already invalidates
+        the app on its own 0.25/1.0s cadence while a turn is busy, and the
+        idle 1.0s cadence is exactly the tick rate this needs). Never changes
+        the TEXT or its length -- only the colour -- so the row width never
+        moves. Returns "" (no override) for every other badge state (offline/
+        unchecked/update-available) -- those keep their existing fixed colour,
+        only the reassuring "you're fine" state pulses."""
+        us = update_state or {}
+        if us.get("checked") is not True or (us.get("notice") or "").strip():
+            return ""
+        import time as _t
+        phase = int(_t.monotonic() * 10) % 24
+        return "class:tb.fresh.bright" if phase < 12 else "class:tb.fresh"
+
     def _current_badge_text() -> str:
         """The exact text `pin_version_right` will draw right now, so the
         width reservation below always matches (0.3.40: the badge is no
@@ -1484,7 +1518,8 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
         frags = pin_version_right(frags, __version__,
                                   sizing.get_size(get_app_or_none())[0],
                                   notice=us.get("notice", ""),
-                                  checked=us.get("checked"))
+                                  checked=us.get("checked"),
+                                  style_override=_badge_style_override())
         fwd = _forwarding(None, pane)
         badge_appended = len(frags) > pre_len   # pin_version_right may drop it (no room)
         out = []
@@ -1873,7 +1908,8 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
         while True:
             await asyncio.sleep(_tick_interval(_ticker_busy(slots, _busy_live)))
             _sync_hover_mode()
-            _tick_once(slots, app, _busy_live)
+            _tick_once(slots, app, _busy_live,
+                       breathing=lambda: bool(_badge_style_override()))
 
     # FIX7c (W4a final review — history seeding): the FIRST active slot's
     # own history is pointed at from the START, before a single key is

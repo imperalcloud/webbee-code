@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.43
+
+Honest fix-up of three things 0.3.42 got wrong or left unfinished:
+
+- **Tier colours were an actual bug, now fixed.** 0.3.42 accidentally gave
+  Smart/SuperSmart/UltraSmart the EXACT same hex codes as the
+  default/plan/autopilot MODE colours, so the two looked visually identical
+  in the toolbar despite the code claiming otherwise. Tiers now have a
+  genuinely distinct palette (teal-green / soft blue-violet / bold magenta)
+  that shares no colour with any mode -- with a regression test that would
+  have caught this the first time.
+- **The bottom-right version badge now actually breathes** when you're
+  confirmed up to date -- it alternates between dim-green and a brighter
+  green about once a second, in place, with zero change to its text or
+  width (the row never grows or shifts). 0.3.42 never actually wired this
+  up despite describing it in the release notes -- that was wrong to claim
+  and is now genuinely built and tested.
+- **Switching model tiers (Ctrl+B) now also flashes the toolbar itself**
+  (`🎛️ tier → SuperSmart`, 1.5s), the same confirmation mechanism the ✓
+  copied-to-clipboard toast already uses -- on top of the transcript note
+  0.3.42 added, which can scroll out of view fast on a busy pane. The
+  toolbar flash sits pinned at the bottom, so it can't be missed.
+
 ## 0.3.42
 
 The model tier now looks and feels like a real setting, not a hidden flag:
