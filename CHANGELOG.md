@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.48
+
+A cluster of real-hardware fixes reported live by Valentin in one session:
+clipboard reliability on Linux, a text-overflow bug, click-to-expand not
+firing on actual mice/trackpads, right-click not working in the prompt
+input, a static version badge, and the model indicator being invisible
+until you explicitly changed it.
+
+- **Linux clipboard (Wayland vs X11):** copy/paste could desync across tabs
+  because the wrong clipboard tool was picked for the running session type.
+  Added `clipboard_session.is_wayland_session()` and wired it into both the
+  copy path (`clipboard.py`) and the image/text read path
+  (`clipboard_read.py`) so the correct tool (wl-copy/wl-paste vs
+  xclip/xsel) is used every time, not guessed once at import time.
+- **Text overflow at the terminal edge:** `tool_result()` output could glue
+  itself to the left edge on narrow terminals instead of respecting the
+  panel's padding. Fixed in `render.py`'s `_pad()` wrapping.
+- **Click-to-expand silently never fired on real hardware:** the
+  click-vs-drag detector compared mouse-down/mouse-up coordinates with
+  EXACT equality -- but a real mouse or trackpad almost always drifts at
+  least one cell between press and release, so every genuine click was
+  being treated as a (near-empty) drag and the transcript's click-to-expand
+  never triggered outside of scripted tests with perfect coordinates. Fixed
+  with a small jitter tolerance (`selection.py`): releases within 1 cell of
+  the press now count as a click; anything bigger is still a real drag/copy.
+- **Right-click in the prompt input field didn't paste:** the input box's
+  own mouse handling swallowed right-click before it reached the paste
+  hook. `tui.py` now intercepts RIGHT MOUSE_DOWN on the input control first
+  and pastes, delegating everything else through unchanged.
+- **The version badge now genuinely lives:** in the one honest state where
+  you're confirmed up to date, the bottom-right badge alternates between
+  "v0.X.Y" and "up to date" every ~5 seconds (on top of the existing colour
+  pulse) -- visible proof the freshness check is a real, ongoing thing, not
+  a static line printed once at boot.
+- **The model indicator is now visible in every tab, not just after you
+  change it:** an unset (server-default) tier used to render nothing at
+  all in the toolbar, so a fresh tab gave no hint the feature (Ctrl+B /
+  `/model`) even existed. It now always shows "model: <tier>" or "model:
+  server default" -- never a guessed tier name, just an honest state.
+
 ## 0.3.47
 
 The cloud brain now sees BOTH your machine's real clock and your configured

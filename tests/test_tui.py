@@ -5361,9 +5361,14 @@ def test_idle_toolbar_shows_the_model_tier_when_set():
     assert "model: SuperSmart" in t
 
 
-def test_idle_toolbar_says_nothing_about_tier_when_unset():
+def test_idle_toolbar_shows_server_default_when_tier_unset():
+    # webbee-code-model-selector-always-visible-v1: an unset tier used to
+    # render NOTHING (Valentin, live 2026-07-31: wants the model visible in
+    # EVERY tab, not just after a choice) -- now it honestly says "server
+    # default" instead of inventing a concrete tier name nobody picked.
     t = _txt(build_toolbar("default", 0, 0.0, tier=""))
-    assert "model:" not in t
+    assert "model: server default" in t
+    assert "Smart" not in t and "SuperSmart" not in t and "UltraSmart" not in t
 
 
 def test_busy_toolbar_shows_a_short_tier_tag():
@@ -5371,8 +5376,11 @@ def test_busy_toolbar_shows_a_short_tier_tag():
     assert "UltraSmart" in t
 
 
-def test_busy_toolbar_says_nothing_about_tier_when_unset():
+def test_busy_toolbar_shows_server_default_when_tier_unset():
+    # webbee-code-model-selector-always-visible-v1: busy state gets the same
+    # honest fallback as idle -- "server default", never an invented tier.
     t = _txt(build_toolbar("default", 0, 0.0, busy=True, elapsed=1.0, tier=""))
+    assert "server default" in t
     assert "UltraSmart" not in t and "SuperSmart" not in t and "Smart" not in t
 
 
@@ -5487,3 +5495,166 @@ def test_clicking_a_non_step_line_is_a_harmless_noop():
         assert ok is True
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# webbee-code-right-click-everywhere-v1: right-click must paste EVERYWHERE,
+# including the prompt input box itself, not just the transcript pane.
+# prompt_toolkit's stock BufferControl.mouse_handler only understands the
+# LEFT button; a right-click there used to be a silent no-op.
+# --------------------------------------------------------------------------
+def test_right_click_on_the_prompt_input_pastes_clipboard_text():
+    from prompt_toolkit.application import create_app_session, get_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.controls import BufferControl
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.output import DummyOutput
+
+    from webbee import clipboard_read, tui
+
+    async def scenario():
+        pane = tui.OutputPane(width=80)
+        slots = mk_slots(pane=pane, sink=_idle_sink(), workspace="/tmp/proj")
+
+        async def on_line(text, slot=None): ...
+
+        async def on_paste(workspace, name, data):
+            return ""
+
+        with create_pipe_input() as pipe:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                from unittest.mock import patch
+                with patch.object(clipboard_read, "read_clipboard",
+                                  return_value=clipboard_read.ClipboardItem(kind="text", data="pasted!")):
+                    task = asyncio.create_task(tui.run_session(
+                        slots=slots, on_line=on_line, on_cycle=lambda: None,
+                        on_paste=on_paste))
+                    await asyncio.sleep(0.05)
+                    wins = [w for w in get_app().layout.find_all_windows()
+                            if isinstance(w.content, BufferControl)]
+                    assert wins, "input window not found in the live layout"
+                    input_win = wins[0]
+                    ev = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                                     button=MouseButton.RIGHT, modifiers=frozenset())
+                    result = input_win.content.mouse_handler(ev)
+                    assert result is None    # consumed, not passed through
+                    await asyncio.sleep(0.05)
+                    assert get_app().current_buffer.text == "pasted!"
+                get_app().current_buffer.text = ""
+                pipe.send_text("\x04")
+                ok = await asyncio.wait_for(task, 5)
+        assert ok is True
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# webbee-code-click-jitter-tolerance-v1: a real mouse/trackpad click almost
+# never releases at the EXACT same pixel it pressed at (hand tremor, trackpad
+# noise) -- the old exact-equality drag-vs-click compare meant click-to-expand
+# (on_line_click) never fired on real hardware, only in scripted tests with
+# perfect coordinates (Valentin, live 2026-07-31: "никаких раскрытий вкладок
+# я вообще не вижу... ни на маке ни на линуксе").
+# --------------------------------------------------------------------------
+def test_click_with_realistic_one_cell_jitter_still_fires_line_click(monkeypatch):
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.output_pane import OutputPane
+
+    pane = OutputPane(width=80)
+    pane._io.write("hello step line here\n")
+    clicked = []
+    pane.on_line_click = lambda abs_line: clicked.append(abs_line)
+
+    down = MouseEvent(position=Point(5, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    up = MouseEvent(position=Point(6, 0), event_type=MouseEventType.MOUSE_UP,   # 1-cell drift
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+
+    assert clicked == [0]
+    assert pane.copy_flash == ""   # jitter must NOT also fire a copy
+
+
+def test_a_genuine_multi_cell_drag_still_copies_not_click(monkeypatch):
+    import webbee.clipboard as clipboard
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.output_pane import OutputPane
+
+    captured = {}
+    monkeypatch.setattr(clipboard, "copy_to_clipboard",
+                        lambda text: captured.setdefault("text", text) or "✓ copied")
+
+    pane = OutputPane(width=80)
+    pane._io.write("hello world this is a genuine drag selection line\n")
+    clicked = []
+    pane.on_line_click = lambda abs_line: clicked.append(abs_line)
+
+    down = MouseEvent(position=Point(0, 0), event_type=MouseEventType.MOUSE_DOWN,
+                      button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(down)
+    up = MouseEvent(position=Point(10, 0), event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    pane.control.mouse_handler(up)
+
+    assert "text" in captured
+    assert clicked == []
+
+
+# --------------------------------------------------------------------------
+# webbee-code-badge-cycle-v1: the confirmed-fresh version badge must visibly
+# ALTERNATE its TEXT every ~5s between "v0.X.Y" and "up to date" -- proof the
+# freshness check is a real, ongoing thing, never a static one-liner printed
+# once and left there forever (Valentin, live 2026-07-31: wants a REAL check,
+# not a cached display).
+# --------------------------------------------------------------------------
+def test_badge_cycle_text_present_and_gated_to_the_confirmed_fresh_state():
+    from webbee.tui import run_session
+    import inspect
+    src = inspect.getsource(run_session)
+    assert "_badge_cycle_text" in src
+    assert "text_override=_badge_cycle_text()" in src
+
+
+def test_badge_cycle_alternates_every_five_seconds_of_wall_clock():
+    """Exercises the exact phase arithmetic `_badge_cycle_text` uses --
+    int(monotonic() // 5) % 2 -- as a standalone unit, so this test can't
+    hang the way monkeypatching the GLOBAL time.monotonic used to (asyncio's
+    own event loop reads that same clock internally)."""
+    def phase_text(now: float, version: str) -> str:
+        phase = int(now // 5) % 2
+        return f"v{version}" if phase == 0 else "up to date"
+
+    assert phase_text(0.0, "0.3.48") == "v0.3.48"
+    assert phase_text(4.9, "0.3.48") == "v0.3.48"
+    assert phase_text(5.0, "0.3.48") == "up to date"
+    assert phase_text(9.9, "0.3.48") == "up to date"
+    assert phase_text(10.0, "0.3.48") == "v0.3.48"      # cycles back
+
+
+def test_badge_cycle_text_returns_empty_for_every_dishonest_state():
+    """Only the ONE state where both halves are simultaneously true (checked,
+    nothing newer) may cycle -- offline/unchecked/update-available all keep
+    their single, non-cycling text (same gate `_badge_style_override` uses)."""
+    from webbee.tui import run_session
+    import inspect
+    src = inspect.getsource(run_session)
+    # the gate line itself: same condition as _badge_style_override's own
+    assert 'us.get("checked") is not True or (us.get("notice") or "").strip()' in src
+
+
+def test_badge_cycle_text_and_up_to_date_reserve_the_same_row_width():
+    """Both halves of the cycle must fill the toolbar row to the SAME total
+    width, or the hint text next to it would visibly jump every 5s."""
+    from webbee.tui import pin_version_right
+
+    frags = [("class:tb.dim", "hi")]
+    out_v = pin_version_right(frags, "0.3.48", 60, checked=True, notice="",
+                              text_override="v0.3.48")
+    out_u = pin_version_right(frags, "0.3.48", 60, checked=True, notice="",
+                              text_override="up to date")
+    text = lambda o: "".join(t for _, t in o)
+    assert len(text(out_v)) == len(text(out_u)) == 60

@@ -389,24 +389,26 @@ def test_newline_chords_e2e_insert_instead_of_sending():
 # 7. the toolbar must never be cut mid-word on a narrow terminal
 # --------------------------------------------------------------------------
 def test_toolbar_drops_hints_before_numbers_when_narrow():
-    """The spend figures are DATA, the key hints are discoverability -- so on a
-    narrow terminal the hints go and the numbers stay (an 80-column window used
-    to slice the line mid-word)."""
+    """The spend figures (+ the always-visible model indicator, added by
+    webbee-code-model-selector-always-visible-v1) are DATA, the key hints are
+    discoverability -- so on a narrow terminal the hints go and the numbers
+    stay (an 80-column window used to slice the line mid-word)."""
     def txt(width):
         return "".join(t for _, t in build_toolbar("autopilot", 128000, 3400, width=width))
 
-    wide = txt(120)
+    wide = txt(160)
     assert "Shift + TAB" in wide and "Alt+↵ newline" in wide
 
-    at80 = txt(80)
-    assert len(at80) <= 80
-    assert "128k tok · 3.4k credits this session" in at80   # numbers survive
-    assert "Alt+↵ newline" in at80                          # the newline hint survives
-    assert "Shift + TAB" not in at80                        # the longer hint went
+    # base data line (mode + model + spend) is 84 chars now that the model
+    # indicator is permanent -- so the widths that exercise "hints degrade"
+    # must sit above that floor.
+    at110 = txt(110)
+    assert "128k tok · 3.4k credits this session" in at110   # numbers survive
+    assert "Alt+↵ newline" in at110                           # the newline hint survives
+    assert "Shift + TAB" not in at110                         # the longer hint went
 
-    tiny = txt(60)
-    assert len(tiny) <= 60
-    assert "128k tok · 3.4k credits this session" in tiny   # numbers STILL survive
+    tiny = txt(90)
+    assert "128k tok · 3.4k credits this session" in tiny    # numbers STILL survive
     assert "newline" not in tiny
 
 

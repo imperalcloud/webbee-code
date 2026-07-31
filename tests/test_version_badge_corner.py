@@ -57,8 +57,10 @@ def test_every_toolbar_state_can_carry_the_badge():
 
 
 def test_reservation_keeps_the_badge_on_a_narrow_window():
-    """80 columns: the hints degrade (by design), the badge still lands."""
-    W = 80
+    """90 columns: the hints degrade (by design), the badge still lands. (90,
+    not 80, since webbee-code-model-selector-always-visible-v1 made the base
+    data line -- mode + the now-permanent model indicator + spend -- longer.)"""
+    W = 90
     fit = W - len(version_badge_text("0.3.37"))
     out = pin_version_right(build_toolbar("default", 1, 2, width=fit), "0.3.37", W)
     assert _text(out).endswith(" v0.3.37 ")

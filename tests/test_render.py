@@ -508,6 +508,24 @@ def test_note_strips_escape_sequences():
     assert "ok" in out and "done" in out
 
 
+def test_tool_result_wraps_with_gutter():
+    # webbee-code-tool-result-gutter-v1: tool_result is the single MOST
+    # frequently printed line in the whole transcript -- on a narrow
+    # terminal its summary regularly wraps to a second visual row, and
+    # that continuation must keep the same 2-col gutter every other line
+    # in the feed uses, not hug column 0 (Valentin, live 2026-07-31:
+    # "клеится к самому левому краю").
+    s = _narrow_sink()
+    s.tool_start("bash", {"command": "cat file"})
+    s.tool_result("bash", True,
+                  "this is a genuinely long summary line that will "
+                  "definitely need to wrap across more than one visual "
+                  "row on a narrow forty column terminal")
+    out = s.console.export_text()
+    _assert_gutter(out)
+    assert len(out.splitlines()) > 1   # sanity: it actually wrapped
+
+
 def test_tool_result_strips_escape_sequences():
     s = _sink()
     s.tool_start("bash", {"command": "cat file"})

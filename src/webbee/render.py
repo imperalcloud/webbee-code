@@ -583,14 +583,23 @@ class RichSink:
         icon = _ICON.get(_tool, "⚡")
         mark = "✓" if ok else "✗"
         w = self.console.width
-        self.console.print(Text.assemble(
-            ("  " + icon + " ", "dim"),
+        # webbee-code-tool-result-gutter-v1: this is the MOST frequently
+        # printed line in the whole transcript (one per action), and on a
+        # narrow terminal (mobile SSH client, a slim tmux pane) the summary
+        # regularly wraps to a second visual row -- without _pad() that
+        # continuation line hugged column 0 with no left margin at all, an
+        # ugly seam against every OTHER line in the feed, which all keep the
+        # 2-col gutter (Valentin, live 2026-07-31: "клеится к самому левому
+        # краю"). _pad() indents every wrapped row consistently, the same
+        # fix note()/progress()/thinking() already got.
+        self.console.print(_pad(Text.assemble(
+            (icon + " ", "dim"),
             (_clean(_tool), "dim"),
             (("  " + _clean(arg)[:trunc(w, 0.3, 40)]) if arg else "", "dim"),
             ("   ", ""),
             (mark + " ", "green" if ok else "red"),
             (_clean(summary)[:trunc(w, 0.35, 50)], "dim"),
-        ))
+        )))
         self._pending = ("", "")
         # webbee-code-click-to-expand-v1: tag the record JUST printed as
         # "step N" (1-based, matching /steps' own numbering) -- record_count()

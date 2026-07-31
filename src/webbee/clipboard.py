@@ -14,9 +14,25 @@ import sys
 
 def _local_copy_cmd() -> list[str] | None:
     """The first available local clipboard command for this platform, or
-    None if nothing usable is installed."""
+    None if nothing usable is installed.
+
+    webbee-code-clipboard-session-sync-v1: on Linux, tries the tool that
+    matches the ACTUAL running session (Wayland vs X11) first -- picking
+    xclip unconditionally when BOTH tools happen to be installed (common:
+    many Wayland distros still ship xclip for X11-app compatibility) wrote
+    into the WRONG store -- one clipboard_read.py's own (different) order
+    then never checked when reading back. See clipboard_session.py for the
+    shared detection both modules now use, so a copy always lands in the
+    SAME store the next paste reads from."""
     if sys.platform == "darwin":
         return ["pbcopy"] if shutil.which("pbcopy") else None
+    from webbee.clipboard_session import is_wayland_session
+    if is_wayland_session():
+        if shutil.which("wl-copy"):
+            return ["wl-copy"]
+        if shutil.which("xclip"):
+            return ["xclip", "-selection", "clipboard"]
+        return None
     if shutil.which("xclip"):
         return ["xclip", "-selection", "clipboard"]
     if shutil.which("wl-copy"):

@@ -111,3 +111,48 @@ def test_nothing_available_reports_failure_honestly(monkeypatch):
 def test_osc52_emit_no_running_app_returns_false():
     # Headless test process — no prompt_toolkit Application is running.
     assert C._osc52_emit("hi") is False
+
+
+# ── webbee-code-clipboard-session-sync-v1 ─────────────────────────────────
+# Root cause fixed: clipboard.py preferred xclip over wl-copy unconditionally
+# on Linux, while clipboard_read.py preferred wl-paste over xclip -- on a
+# box with BOTH tools installed (common on Wayland distros that still ship
+# xclip for X11-app compat), a copy and its very next paste hit two
+# different clipboard stores. Now both modules ask the SAME session
+# detector and agree on the same tool order.
+
+def test_linux_prefers_wlcopy_over_xclip_on_a_real_wayland_session(monkeypatch):
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    monkeypatch.setattr(C.shutil, "which",
+                        lambda name: "/usr/bin/xclip" if name == "xclip" else
+                                    ("/usr/bin/wl-copy" if name == "wl-copy" else None))
+    seen = {}
+
+    def fake_run(cmd, input=None, timeout=None):
+        seen["cmd"] = cmd
+        return _Proc(0)
+    monkeypatch.setattr(C.subprocess, "run", fake_run)
+
+    C.copy_to_clipboard("x")
+    assert seen["cmd"] == ["wl-copy"]
+
+
+def test_linux_still_prefers_xclip_on_a_plain_x11_session(monkeypatch):
+    # No WAYLAND_DISPLAY, no XDG_SESSION_TYPE=wayland -> unchanged X11 default.
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.setattr(C.shutil, "which",
+                        lambda name: "/usr/bin/xclip" if name == "xclip" else
+                                    ("/usr/bin/wl-copy" if name == "wl-copy" else None))
+    seen = {}
+
+    def fake_run(cmd, input=None, timeout=None):
+        seen["cmd"] = cmd
+        return _Proc(0)
+    monkeypatch.setattr(C.subprocess, "run", fake_run)
+
+    C.copy_to_clipboard("x")
+    assert seen["cmd"] == ["xclip", "-selection", "clipboard"]

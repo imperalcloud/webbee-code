@@ -72,18 +72,25 @@ def _mac_image() -> "bytes | None":
 
 
 def _linux_image() -> "bytes | None":
-    if shutil.which("wl-paste"):
-        types = _run(["wl-paste", "--list-types"])
-        if types is not None and types.returncode == 0 and b"image/png" in (types.stdout or b""):
-            p = _run(["wl-paste", "--type", "image/png"])
-            if p is not None and p.returncode == 0 and p.stdout:
-                return p.stdout
-    if shutil.which("xclip"):
-        tgt = _run(["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"])
-        if tgt is not None and tgt.returncode == 0 and b"image/png" in (tgt.stdout or b""):
-            p = _run(["xclip", "-selection", "clipboard", "-t", "image/png", "-o"])
-            if p is not None and p.returncode == 0 and p.stdout:
-                return p.stdout
+    # webbee-code-clipboard-session-sync-v1: same session-aware order as
+    # clipboard.py's write path -- a copy on THIS session's tool must be
+    # read back via that SAME tool, not whichever of wl-paste/xclip happens
+    # to be probed first regardless of what's actually running.
+    from webbee.clipboard_session import is_wayland_session
+    tools = ("wl-paste", "xclip") if is_wayland_session() else ("xclip", "wl-paste")
+    for tool in tools:
+        if tool == "wl-paste" and shutil.which("wl-paste"):
+            types = _run(["wl-paste", "--list-types"])
+            if types is not None and types.returncode == 0 and b"image/png" in (types.stdout or b""):
+                p = _run(["wl-paste", "--type", "image/png"])
+                if p is not None and p.returncode == 0 and p.stdout:
+                    return p.stdout
+        elif tool == "xclip" and shutil.which("xclip"):
+            tgt = _run(["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"])
+            if tgt is not None and tgt.returncode == 0 and b"image/png" in (tgt.stdout or b""):
+                p = _run(["xclip", "-selection", "clipboard", "-t", "image/png", "-o"])
+                if p is not None and p.returncode == 0 and p.stdout:
+                    return p.stdout
     return None
 
 
@@ -116,12 +123,25 @@ def read_clipboard_image() -> "bytes | None":
 def _text_cmd() -> "list[str] | None":
     if sys.platform == "darwin":
         return ["pbpaste"] if shutil.which("pbpaste") else None
-    if shutil.which("wl-paste"):
-        return ["wl-paste", "--no-newline"]
-    if shutil.which("xclip"):
-        return ["xclip", "-selection", "clipboard", "-o"]
     if sys.platform == "win32" and shutil.which("powershell"):
         return ["powershell", "-NoProfile", "-Command", "Get-Clipboard"]
+    # webbee-code-clipboard-session-sync-v1: match clipboard.py's write-side
+    # order exactly -- a Wayland session tries wl-paste first, an X11
+    # session tries xclip first, so a copy always reads back from the SAME
+    # store it was written to (previously this read wl-paste first
+    # UNCONDITIONALLY while the writer preferred xclip -- on a box with
+    # both installed the copy and the paste hit two different clipboards).
+    from webbee.clipboard_session import is_wayland_session
+    if is_wayland_session():
+        if shutil.which("wl-paste"):
+            return ["wl-paste", "--no-newline"]
+        if shutil.which("xclip"):
+            return ["xclip", "-selection", "clipboard", "-o"]
+        return None
+    if shutil.which("xclip"):
+        return ["xclip", "-selection", "clipboard", "-o"]
+    if shutil.which("wl-paste"):
+        return ["wl-paste", "--no-newline"]
     return None
 
 
@@ -147,7 +167,12 @@ def read_primary_text() -> "str | None":
     read_clipboard_text(). Captured (tty-safe), never raises."""
     if sys.platform == "darwin" or sys.platform == "win32":
         return None
-    if shutil.which("xclip"):
+    # webbee-code-clipboard-session-sync-v1: same session-aware order as
+    # the CLIPBOARD-selection paths above, for consistency.
+    from webbee.clipboard_session import is_wayland_session
+    if is_wayland_session() and shutil.which("wl-paste"):
+        p = _run(["wl-paste", "--primary", "--no-newline"])
+    elif shutil.which("xclip"):
         p = _run(["xclip", "-selection", "primary", "-o"])
     elif shutil.which("wl-paste"):
         p = _run(["wl-paste", "--primary", "--no-newline"])

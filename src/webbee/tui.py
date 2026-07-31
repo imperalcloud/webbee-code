@@ -273,9 +273,16 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         # legible form). webbee-code-tier-colors-v1: each tier gets its own
         # colour + its human display name (Smart/SuperSmart/UltraSmart),
         # never the raw wire value.
-        if tier:
-            frags += [("class:tb.dim", " · "),
-                      (f"class:tb.tier.{tier}", _TIER_DISPLAY.get(tier, tier))]
+        # webbee-code-model-selector-always-visible-v1 (Valentin, live
+        # 2026-07-31: wants the model NAME visible AND changeable in every
+        # tab): an unset tier used to render NOTHING here, so a fresh tab
+        # showed no model indicator at all -- now it honestly says "server
+        # default" (never a guessed/invented concrete tier name -- the
+        # I-DIAGNOSIS-GROUNDED spirit above still holds, this is not a
+        # claim about WHICH tier runs, just that none has been chosen yet).
+        frags += [("class:tb.dim", " · "),
+                  (f"class:tb.tier.{tier}", _TIER_DISPLAY.get(tier, tier))
+                  if tier else ("class:tb.dim", "server default")]
         frags.append(("class:tb.dim",
                       f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"))
         frags += q
@@ -286,12 +293,18 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     # webbee-code-model-tier-toolbar-v1: the tier was only ever visible via
     # `/model` (no arg) or right after a Ctrl+B cycle flash -- ask once, then
     # forget, exactly the visibility gap the mode segment right next to it
-    # never had. "" (unset -> server admin default) stays silent rather than
-    # claim a tier name nobody chose (I-DIAGNOSIS-GROUNDED spirit: never
-    # invent a value the user didn't pick and the server didn't confirm).
-    if tier:
-        frags += [("class:tb.dim", " · model: "),
-                  (f"class:tb.tier.{tier}", _TIER_DISPLAY.get(tier, tier))]
+    # never had.
+    # webbee-code-model-selector-always-visible-v1 (Valentin, live
+    # 2026-07-31): every tab must show a model indicator, chosen or not --
+    # "" (unset) now shows "server default" instead of nothing, so the user
+    # always sees SOMETHING is there to change (Ctrl+B / `/model`), never a
+    # blank gap that looks like the feature doesn't exist. Still never
+    # claims a specific tier the user didn't pick and the server didn't
+    # confirm (I-DIAGNOSIS-GROUNDED) -- "server default" names the STATE,
+    # not a guessed value.
+    frags += [("class:tb.dim", " · model: "),
+              (f"class:tb.tier.{tier}", _TIER_DISPLAY.get(tier, tier))
+              if tier else ("class:tb.dim", "server default")]
     frags += [("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
              *q]
     # 0.3.37: the PERSISTENT live-session indicator (active_sessions.
@@ -329,7 +342,7 @@ def version_badge_text(version: str) -> str:
 
 def pin_version_right(frags: list, version: str, width: int, *,
                       notice: str = "", checked: "bool | None" = None,
-                      style_override: str = "") -> list:
+                      style_override: str = "", text_override: str = "") -> list:
     """PURE. Pin the version badge flush to the RIGHT EDGE of the toolbar row.
 
     The toolbar is the LAST child of run_session's root HSplit, so its right
@@ -380,6 +393,15 @@ def pin_version_right(frags: list, version: str, width: int, *,
         raw, cls = version_badge(version, notice, checked=checked)
         text, style = raw, ("tb.fresh" if cls == "class:home.fresh" else
                             "tb.update" if cls == "class:home.update" else "tb.version")
+    # webbee-code-badge-cycle-v1: caller may override the TEXT ITSELF too
+    # (Valentin, live 2026-07-31: the badge must visibly ALTERNATE between
+    # "v0.X.Y" and "up to date" every ~5s -- proof the freshness check is a
+    # live thing, not a static line -- only in the one honest state where
+    # both halves are true at once (checked, nothing newer). The caller
+    # (`_badge_cycle_text`) already gates this to that exact state, so this
+    # function stays a dumb, pure swap with no state of its own.
+    if text_override:
+        text = text_override
     # webbee-code-badge-breathe-v1: caller may override the STYLE CLASS only
     # (never the text/length -- the row width contract above is unchanged)
     # to make the "up to date" badge visibly breathe between two shades.
@@ -1448,16 +1470,47 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
         phase = int(_t.monotonic() * 10) % 24
         return "class:tb.fresh.bright" if phase < 12 else "class:tb.fresh"
 
+    def _badge_cycle_text() -> str:
+        """webbee-code-badge-cycle-v1: in the ONE honest "confirmed fresh"
+        state (checked True, no update notice), alternate the badge's TEXT
+        every ~5s between the bare version number and the words "up to
+        date" -- two short, distinct beats, never both on one line -- so the
+        freshness display visibly LIVES instead of sitting there as one
+        static string forever (Valentin, live 2026-07-31: wants proof this
+        is a real, ongoing check, not a cached one-liner printed once).
+        Driven off wall-clock time, same source as `_badge_style_override`'s
+        colour pulse -- no extra timer needed, the idle 1.0s tick already
+        redraws often enough to catch each 5s flip. Returns "" (no override,
+        `pin_version_right` falls back to its own text) for every other
+        state -- offline/unchecked/update-available keep their normal,
+        single, non-cycling text."""
+        us = update_state or {}
+        if us.get("checked") is not True or (us.get("notice") or "").strip():
+            return ""
+        import time as _t
+        phase = int(_t.monotonic() // 5) % 2
+        return f"v{__version__}" if phase == 0 else "up to date"
+
     def _current_badge_text() -> str:
         """The exact text `pin_version_right` will draw right now, so the
         width reservation below always matches (0.3.40: the badge is no
         longer a fixed-length " v<version> " — an "update available" state
         is longer, and must reserve accordingly, or it would get dropped for
-        not fitting a reservation sized for the SHORTER plain form)."""
+        not fitting a reservation sized for the SHORTER plain form).
+        0.3.48: the confirmed-fresh state now CYCLES between two different-
+        length texts ("v0.3.47" vs "up to date") -- reserving for whichever
+        one happens to be showing this exact frame would make the hint text
+        next to it grow/shrink every 5s, a visible jank. Reserve the WIDER
+        of the two variants ALWAYS, regardless of which phase is live --
+        the shorter phase just leaves a little slack before the badge,
+        never a truncation."""
         us = update_state or {}
         checked = us.get("checked")
         if checked is None:
             return version_badge_text(__version__)
+        if checked is True and not (us.get("notice") or "").strip():
+            widest = max(f"v{__version__}", "up to date", key=len)
+            return f" {widest} "
         from webbee.home_view import version_badge
         text, _cls = version_badge(__version__, us.get("notice", ""), checked=checked)
         return f" {text} "
@@ -1530,7 +1583,8 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
                                   sizing.get_size(get_app_or_none())[0],
                                   notice=us.get("notice", ""),
                                   checked=us.get("checked"),
-                                  style_override=_badge_style_override())
+                                  style_override=_badge_style_override(),
+                                  text_override=_badge_cycle_text())
         fwd = _forwarding(None, pane)
         badge_appended = len(frags) > pre_len   # pin_version_right may drop it (no room)
         out = []
@@ -1673,9 +1727,29 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
             return ""
         return [("class:input.cont", "\u250a ")]
 
+    _input_control = BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)])
+
+    def _input_mouse_handler(ev):
+        # webbee-code-right-click-everywhere-v1: right-click must paste
+        # EVERYWHERE, including the prompt input box itself -- BufferControl's
+        # own mouse_handler only understands the LEFT button (click / drag
+        # to select / double-click), so a right-click on the input field used
+        # to silently do nothing at all (Valentin, live 2026-07-31: "правый
+        # клик обязан работать ... даже в поле ввода промпта"). This wraps
+        # the stock handler: RIGHT MOUSE_DOWN is intercepted for the SAME
+        # _right_paste already wired to the output pane (one paste
+        # implementation, now three entry points: pane, prompt, and
+        # Ctrl+V) -- click / drag / cursor placement / double-click all
+        # still go straight to prompt_toolkit's own handler, untouched.
+        from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+        if ev.event_type == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.RIGHT:
+            _right_paste()
+            return None
+        return _input_control.mouse_handler(ev)
+
     input_win = Window(
-        BufferControl(buffer=buf, input_processors=[BeforeInput(_prompt_fragments)]),
-        height=_input_height, wrap_lines=True, get_line_prefix=_line_prefix)
+        _input_control, height=_input_height, wrap_lines=True, get_line_prefix=_line_prefix)
+    input_win.content.mouse_handler = _input_mouse_handler
     toolbar = Window(FormattedTextControl(_toolbar), height=1, always_hide_cursor=True)
 
     _hover_on = {"v": None}

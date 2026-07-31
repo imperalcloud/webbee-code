@@ -127,7 +127,24 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                 # content underneath has moved; the old viewport-only compare
                 # missed exactly that case and silently dropped the copy.
                 up_abs = (ev.position.y + pane._offset, ev.position.x)
-                if down_abs is not None and down_abs != up_abs:
+                # webbee-code-click-jitter-tolerance-v1: a REAL mouse/trackpad
+                # almost never releases at the EXACT pixel it pressed at --
+                # even a "plain click, no drag intended" click commonly drifts
+                # 1 cell in some direction (hand tremor, trackpad noise). The
+                # old exact-equality compare meant on real hardware (any OS,
+                # any terminal) down_abs != up_abs was ALWAYS true, so
+                # click-to-expand (on_line_click) NEVER fired outside a
+                # scripted test with perfect coordinates -- every real click
+                # was silently treated as a (near-empty) drag-copy instead
+                # (Valentin, live 2026-07-31: "никаких раскрытий вкладок я
+                # вообще не вижу... ни на маке ни на линуксе"). A small
+                # Chebyshev tolerance (<=1 cell either axis) still treats any
+                # REAL drag (multiple cells/rows) as a copy, exactly as
+                # before -- only genuine within-jitter releases now count as
+                # a click.
+                jitter = (abs(up_abs[0] - down_abs[0]) <= 1
+                          and abs(up_abs[1] - down_abs[1]) <= 1) if down_abs is not None else False
+                if down_abs is not None and down_abs != up_abs and not jitter:
                     pane._copy_selection(down_abs, up_abs)
                 elif down_abs is not None:
                     # webbee-code-click-to-expand-v1: a PLAIN click (press and

@@ -82,3 +82,40 @@ def test_read_clipboard_prefers_image_then_text_then_none(monkeypatch):
 
     monkeypatch.setattr(cr, "read_clipboard_text", lambda: None)
     assert cr.read_clipboard("x") is None
+
+
+# ── webbee-code-clipboard-session-sync-v1 ─────────────────────────────────
+
+def test_text_cmd_prefers_wlpaste_on_a_real_wayland_session(monkeypatch):
+    monkeypatch.setattr(cr.sys, "platform", "linux")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    monkeypatch.setattr(cr.shutil, "which",
+                        lambda name: "/usr/bin/xclip" if name == "xclip" else
+                                    ("/usr/bin/wl-paste" if name == "wl-paste" else None))
+    assert cr._text_cmd() == ["wl-paste", "--no-newline"]
+
+
+def test_text_cmd_still_prefers_xclip_on_a_plain_x11_session(monkeypatch):
+    monkeypatch.setattr(cr.sys, "platform", "linux")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.setattr(cr.shutil, "which",
+                        lambda name: "/usr/bin/xclip" if name == "xclip" else
+                                    ("/usr/bin/wl-paste" if name == "wl-paste" else None))
+    assert cr._text_cmd() == ["xclip", "-selection", "clipboard", "-o"]
+
+
+def test_text_cmd_write_read_agree_on_wayland_with_both_tools(monkeypatch):
+    # THE regression this whole fix is about: copy_to_clipboard's tool choice
+    # and _text_cmd's tool choice must be the SAME tool on the SAME session.
+    import webbee.clipboard as cw
+    monkeypatch.setattr(cw.sys, "platform", "linux")
+    monkeypatch.setattr(cr.sys, "platform", "linux")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    both = lambda name: "/usr/bin/xclip" if name == "xclip" else ("/usr/bin/wl-copy" if name == "wl-copy" else ("/usr/bin/wl-paste" if name == "wl-paste" else None))
+    monkeypatch.setattr(cw.shutil, "which", both)
+    monkeypatch.setattr(cr.shutil, "which", both)
+    assert cw._local_copy_cmd()[0] == "wl-copy"
+    assert cr._text_cmd()[0] == "wl-paste"   # the SAME family as the writer chose
