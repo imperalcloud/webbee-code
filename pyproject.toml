@@ -1,6 +1,6 @@
 [project]
 name = "webbee"
-version = "0.3.41"
+version = "0.3.42"
 description = "Webbee 🐝 — the Imperal Cloud coding agent in your terminal"
 readme = "README.md"
 license = "MIT"

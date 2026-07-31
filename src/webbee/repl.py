@@ -12,7 +12,7 @@ from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
 from webbee.slots import (SessionSlot, SlotManager, WorkspaceResources,
                          auto_label, close_active, close_at, sanitize_label)
-from webbee.tui import _MODES, next_mode, next_tier
+from webbee.tui import _MODES, _TIER_DISPLAY, next_mode, next_tier
 
 
 async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
@@ -1114,8 +1114,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     def _tier_cycle() -> None:
         # webbee-code-model-tier-slash-command-v1: Ctrl+B's keyboard sibling
         # of Shift+TAB's _cycle above -- same pattern, different store.
+        # webbee-code-tier-colors-v1: also drops a one-line confirmation note
+        # into the transcript -- the SAME "something really changed" signal
+        # /new's tab-open note already gives (`_say`, printed straight into
+        # the pane) -- a silent toolbar-only change was too easy to miss.
         slot = slots.active()
-        set_slot_tier(slot, next_tier(slot.model_tier))
+        new_tier = next_tier(slot.model_tier)
+        set_slot_tier(slot, new_tier)
+        _say(slot, f"🎛️ model tier → {_TIER_DISPLAY.get(new_tier, new_tier)}")
 
     async def _handle(line: str, slot: SessionSlot) -> str:
         """Process one input line AGAINST an EXPLICIT slot (FIX1, W4a final

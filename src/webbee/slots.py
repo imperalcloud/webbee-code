@@ -108,6 +108,13 @@ class SessionSlot:
     draft_cursor: int = 0              # cursor position within `draft`, restored alongside it
     qp_ui: dict = field(default_factory=lambda: {"collapsed": False})
     tp_ui: dict = field(default_factory=lambda: {"collapsed": False})
+    expanded_steps: dict = field(default_factory=dict)   # webbee-code-step-toggle-v1:
+                                  # {step_no (1-based): True} while its detail panel is
+                                  # currently shown -- lets a click on the SAME
+                                  # tool_result line toggle expand <-> collapse instead
+                                  # of only ever expanding (tool-agnostic: works for
+                                  # bash/read_file/conn-ssh-run-command alike, since it
+                                  # keys off step_for_record, not the tool name).
     mode: str = "default"
     model_tier: str = ""               # "" = server admin default (unset by client), else
                                         # "smart"|"supersmart"|"ultrasmart" -- see tier_store.py.

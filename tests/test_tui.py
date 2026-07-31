@@ -5282,8 +5282,10 @@ def test_ticker_busy_includes_turn_flash_and_edge_drag():
 # a short tag mid-turn too.
 # --------------------------------------------------------------------------
 def test_idle_toolbar_shows_the_model_tier_when_set():
+    # webbee-code-tier-colors-v1: the toolbar shows the human display name
+    # (SuperSmart), never the raw wire value (supersmart).
     t = _txt(build_toolbar("default", 0, 0.0, tier="supersmart"))
-    assert "model: supersmart" in t
+    assert "model: SuperSmart" in t
 
 
 def test_idle_toolbar_says_nothing_about_tier_when_unset():
@@ -5293,12 +5295,12 @@ def test_idle_toolbar_says_nothing_about_tier_when_unset():
 
 def test_busy_toolbar_shows_a_short_tier_tag():
     t = _txt(build_toolbar("default", 0, 0.0, busy=True, elapsed=1.0, tier="ultrasmart"))
-    assert "ultrasmart" in t
+    assert "UltraSmart" in t
 
 
 def test_busy_toolbar_says_nothing_about_tier_when_unset():
     t = _txt(build_toolbar("default", 0, 0.0, busy=True, elapsed=1.0, tier=""))
-    assert "ultrasmart" not in t and "supersmart" not in t and "smart" not in t
+    assert "UltraSmart" not in t and "SuperSmart" not in t and "Smart" not in t
 
 
 # --------------------------------------------------------------------------

@@ -32,6 +32,11 @@ from webbee.todo_panel import todo_fragments, todo_height
 
 _MODES = ("default", "plan", "autopilot")
 _TIERS = ("smart", "supersmart", "ultrasmart")
+# webbee-code-tier-colors-v1: the wire/storage value stays lowercase
+# (tier_store.py, the kernel's MODEL_TIERS, /model's own argument parsing —
+# none of that changes), this is ONLY the human-facing label shown in the
+# toolbar and in the switch confirmation note.
+_TIER_DISPLAY = {"smart": "Smart", "supersmart": "SuperSmart", "ultrasmart": "UltraSmart"}
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # braille frames — animated while a turn runs
 
 # Leaked SGR mouse-report fragments ("<35;6;42M" / "35;6;42M"): under a
@@ -76,6 +81,13 @@ _STYLE_DICT = {
     "tb.mode.default": "#00afd7",        # default — cyan
     "tb.mode.plan": "#af87ff",           # plan — purple
     "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
+    # webbee-code-tier-colors-v1: each model tier gets its OWN unique colour,
+    # exactly like the mode segment right next to it — smart=cyan (calm,
+    # the baseline), supersmart=purple (a step up), ultrasmart=bee-yellow
+    # bold (the top tier, meant to pop the same way autopilot's caution does).
+    "tb.tier.smart": "#00afd7",
+    "tb.tier.supersmart": "#af87ff",
+    "tb.tier.ultrasmart": "#e8a317 bold",
     "tb.version": "#5f5f5f",             # 0.3.37 bottom-right version badge — quietest thing on screen
     "tb.fresh": "#5faf5f",               # 0.3.40 — badge: verified up to date (mirrors home.fresh)
     "tb.update": "#e8a317 bold",         # 0.3.40 — badge: a newer release exists (mirrors home.update)
@@ -251,10 +263,14 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         if current:
             frags += [("class:tb.dim", " · "), ("class:tb.action", current)]
         # webbee-code-model-tier-toolbar-v1: keep the tier visible mid-turn too
-        # (a short "· smart" tag, NOT the full "model: " label used at idle --
-        # busy is already the densest row, this is the cheapest legible form).
+        # (a short "· SuperSmart" tag, NOT the full "model: " label used at
+        # idle -- busy is already the densest row, this is the cheapest
+        # legible form). webbee-code-tier-colors-v1: each tier gets its own
+        # colour + its human display name (Smart/SuperSmart/UltraSmart),
+        # never the raw wire value.
         if tier:
-            frags += [("class:tb.dim", " · "), ("class:tb.mode.default", tier)]
+            frags += [("class:tb.dim", " · "),
+                      (f"class:tb.tier.{tier}", _TIER_DISPLAY.get(tier, tier))]
         frags.append(("class:tb.dim",
                       f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"))
         frags += q
@@ -269,7 +285,8 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     # claim a tier name nobody chose (I-DIAGNOSIS-GROUNDED spirit: never
     # invent a value the user didn't pick and the server didn't confirm).
     if tier:
-        frags += [("class:tb.dim", " · model: "), ("class:tb.mode.default", tier)]
+        frags += [("class:tb.dim", " · model: "),
+                  (f"class:tb.tier.{tier}", _TIER_DISPLAY.get(tier, tier))]
     frags += [("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
              *q]
     # 0.3.37: the PERSISTENT live-session indicator (active_sessions.
@@ -285,10 +302,13 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     # mid-word). `width=0` (unknown/headless) keeps the full line, which is
     # also what every pre-0.3.36 caller and test sees.
     used = sum(len(t) for _, t in frags)
-    full = "   ·   Alt+↵ newline · Shift + TAB: switch mode"
+    full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · Ctrl+B: model tier"
+    mid = "   ·   Alt+↵ newline · Shift + TAB: switch mode"
     short = "   ·   Alt+↵ newline"
     if not width or used + len(full) <= width:
         frags.append(("class:tb.dim", full))
+    elif used + len(mid) <= width:
+        frags.append(("class:tb.dim", mid))
     elif used + len(short) <= width:
         frags.append(("class:tb.dim", short))
     return frags
@@ -1219,6 +1239,19 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
         step_no = step_fn(record_idx)
         if not step_no:
             return
+        # webbee-code-step-toggle-v1: a SECOND click on the SAME already-open
+        # step line folds the detail panel back away instead of re-printing
+        # it -- a plain flash_note toast (same mechanism as copy-confirm)
+        # says so out loud, tool-agnostic (works identically whether the
+        # step was bash/read_file/write_file/anything else): raising and
+        # lowering the detail is now a real, visible round-trip, not a
+        # one-way reveal.
+        if slot.expanded_steps.get(step_no):
+            slot.expanded_steps.pop(step_no, None)
+            pane.flash_note(f"▸ step {step_no} collapsed")
+            get_app_or_none() and get_app_or_none().invalidate()
+            return
+        slot.expanded_steps[step_no] = True
         event = get_app_or_none()
         if event is None:
             return

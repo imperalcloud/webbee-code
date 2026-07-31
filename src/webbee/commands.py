@@ -2,6 +2,10 @@ from dataclasses import dataclass
 
 _MODES = ("default", "plan", "autopilot")
 _TIERS = ("smart", "supersmart", "ultrasmart")
+# webbee-code-tier-colors-v1: wire/storage values stay lowercase everywhere
+# (tier_store.py, the kernel's MODEL_TIERS, /model's own argument parsing);
+# this is ONLY the human-facing label shown back to the user in messages.
+_TIER_DISPLAY = {"smart": "Smart", "supersmart": "SuperSmart", "ultrasmart": "UltraSmart"}
 
 _HELP = """Commands:
   /help              show this help
@@ -171,14 +175,15 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
         return SlashResult(handled=True, action="mode", new_mode=want,
                            message=f"Mode → {want}.")
     if cmd == "/model":
+        pretty = ", ".join(_TIER_DISPLAY[t] for t in _TIERS)
         if not args:
-            current = ctx.model_tier or "(server default)"
+            current = _TIER_DISPLAY.get(ctx.model_tier, ctx.model_tier) if ctx.model_tier else "(server default)"
             return SlashResult(handled=True, action="model_tier", new_tier=None,
-                               message=f"Current tier: {current}. Available: {', '.join(_TIERS)}.")
+                               message=f"Current tier: {current}. Available: {pretty}.")
         want = args[0].lower()
         if want not in _TIERS:
             return SlashResult(handled=True, action="model_tier", new_tier=None,
-                               message=f"Unknown tier '{want}'. Available: {', '.join(_TIERS)}.")
+                               message=f"Unknown tier '{want}'. Available: {pretty}.")
         return SlashResult(handled=True, action="model_tier", new_tier=want,
-                           message=f"Model tier → {want}.")
+                           message=f"Model tier → {_TIER_DISPLAY[want]}.")
     return SlashResult(handled=True, message=f"Unknown command '{cmd}'. /help for the list.")

@@ -58,8 +58,10 @@ def test_model_tier_switch_valid():
 
 
 def test_model_tier_shows_current_when_no_arg():
+    # webbee-code-tier-colors-v1: the message shows the human display name
+    # (UltraSmart), the raw wire value ("ultrasmart") is never surfaced here.
     r = dispatch("/model", _ctx(model_tier="ultrasmart"))
-    assert r.handled and r.new_tier is None and "ultrasmart" in r.message
+    assert r.handled and r.new_tier is None and "UltraSmart" in r.message
 
 
 def test_model_tier_shows_server_default_when_unset():

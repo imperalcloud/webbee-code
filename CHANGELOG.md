@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.42
+
+The model tier now looks and feels like a real setting, not a hidden flag:
+proper names, its own colour per tier, a visible confirmation when you
+switch, and a keyboard hint you can actually see. Expanding a tool step in
+the transcript can now be collapsed again too.
+
+- **Model tier names are now shown properly-cased**: `Smart`, `SuperSmart`,
+  `UltraSmart` -- everywhere a tier is displayed (the toolbar, `/model`,
+  the switch confirmation). The underlying value stored/sent to the server
+  is unchanged (`smart`/`supersmart`/`ultrasmart`), this is purely how it
+  reads back to you.
+- **Each model tier has its own colour** in the toolbar, the same way
+  `default`/`plan`/`autopilot` modes already do: Smart is cyan, SuperSmart
+  is purple, UltraSmart is bold bee-yellow (the top tier, meant to pop).
+- **Switching tiers (Ctrl+B) now drops a visible confirmation line into the
+  transcript** -- `🎛️ model tier → SuperSmart` -- the same "something just
+  changed" signal opening a new tab already gives you, so a tier switch is
+  never silent or easy to miss.
+- **A keyboard hint for changing the model tier** (`Ctrl+B: model tier`) now
+  shows in the toolbar next to the mode-switch hint, and stays documented in
+  `/help`.
+- **Clicking an already-expanded tool step now collapses it back** instead
+  of only ever expanding -- click once to open the detail card, click the
+  same line again to fold it away, with a small `▸ step N collapsed` toast
+  confirming it. Works identically for every tool (bash, read/write file,
+  anything else) since it keys off the step index, not the tool name.
+
 ## 0.3.41
 
 The model tier is always visible now (not just via `/model`), and clicking a

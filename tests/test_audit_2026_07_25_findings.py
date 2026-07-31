@@ -387,7 +387,10 @@ def test_healthy_no_mutable_module_globals_in_tui_layer():
     # import and never mutated -- they are config, not per-tab state. The
     # companion test below proves the "never mutated" half by source scan, so
     # allowlisting them here does not weaken the isolation guarantee.
-    allowed = {"_STYLE_DICT", "_ICON"}
+    # webbee-code-tier-colors-v1: _TIER_DISPLAY (tui.py) is the same category
+    # as _STYLE_DICT/_ICON -- a read-only label lookup built once at import,
+    # never mutated (see the companion test below).
+    allowed = {"_STYLE_DICT", "_ICON", "_TIER_DISPLAY"}
     for mod in (tu, op, rd):
         for name, val in vars(mod).items():
             if name.startswith("__") or not name.startswith("_") or name in allowed:

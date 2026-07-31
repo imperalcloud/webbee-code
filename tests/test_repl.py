@@ -440,7 +440,11 @@ def test_tier_cycle_and_model_action_route_through_set_slot_tier():
     src = inspect.getsource(R.run_repl)
     assert "def _tier_cycle" in src
     tier_cycle_body = src.split("def _tier_cycle")[1].split("async def _handle")[0]
-    assert "set_slot_tier(slot, next_tier(slot.model_tier))" in tier_cycle_body
+    assert "set_slot_tier(slot, new_tier)" in tier_cycle_body
+    # webbee-code-tier-colors-v1: switching also drops a visible transcript
+    # note -- same "something really changed" signal /new's tab-open note
+    # already gives, so a silent toolbar-only change is never the only cue.
+    assert "_say(slot, f" in tier_cycle_body and "model tier" in tier_cycle_body
 
     tier_action = src.split('res.action == "model_tier" and res.new_tier:')[1][:200]
     assert "set_slot_tier(slot, res.new_tier)" in tier_action
