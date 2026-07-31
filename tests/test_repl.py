@@ -445,10 +445,14 @@ def test_tier_cycle_and_model_action_route_through_set_slot_tier():
     # note -- same "something really changed" signal /new's tab-open note
     # already gives, so a silent toolbar-only change is never the only cue.
     assert "_say(slot, f" in tier_cycle_body and "model tier" in tier_cycle_body
-    # webbee-code-tier-colors-v2: PLUS a real visible toolbar flash (same
-    # mechanism the copy-confirm toast uses) -- the transcript note can
-    # scroll out of view fast on a busy pane, the toolbar flash cannot.
-    assert '"flash_note"' in tier_cycle_body
+    # webbee-code-tier-shimmer-v1 (Valentin, live 2026-07-31: "при смене
+    # модели в тулбаре никакой анимации нету, он как-то поломанно
+    # выглядит"): the v2 toolbar flash (pane.flash_note) briefly swapped the
+    # ENTIRE toolbar for a static string then snapped back -- exactly that
+    # jank. It's gone: the tier segment shimmers PERMANENTLY inside
+    # build_toolbar itself (_tier_shimmer_fragments), so _tier_cycle no
+    # longer needs (or should) call flash_note at all.
+    assert ".flash_note(" not in tier_cycle_body
 
     tier_action = src.split('res.action == "model_tier" and res.new_tier:')[1][:200]
     assert "set_slot_tier(slot, res.new_tier)" in tier_action

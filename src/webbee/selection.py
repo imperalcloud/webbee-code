@@ -196,7 +196,23 @@ def forward_mouse(pane, ev, clamp: str = "bottom") -> bool:
     release only reaches here because the pointer already left the pane
     while the button was down, so it is by definition a drag, never a
     click. Either way, returns True (consumed)."""
-    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+
+    # webbee-code-universal-right-click-paste-v1 (Valentin, live 2026-07-31:
+    # "правый клик гарантированно работал везде... на любом устройстве"):
+    # right-click-to-paste previously only fired inside the transcript pane's
+    # OWN _SelectControl or the input box's own wrapper -- a right-click over
+    # the toolbar, the queue panel, the todo panel, or the tab bar (every
+    # neighbor window routed through THIS forward_mouse) landed on whatever
+    # THAT window's own mouse handling does with an unrecognised button,
+    # i.e. nothing. Checked FIRST, unconditionally (no drag needs to be
+    # armed) so right-click-paste is the same everywhere in the dock, not
+    # just over the two places that happened to wire it directly.
+    if ev.event_type == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.RIGHT:
+        hook = getattr(pane, "on_right_paste", None)
+        if hook is not None:
+            hook()
+        return True
 
     control = pane.control
     if control._down_abs is None:

@@ -108,7 +108,7 @@ class AgentSession:
         self.workspace_root = workspace_root
         self.mode = mode
         # webbee-code-model-tier-slash-command-v1: "" = server admin default
-        # (client never chose one); else "webismart"|"supersmart"|"ultrasmart".
+        # (client never chose one); else "webbeesmart"|"supersmart"|"ultrasmart".
         # Mutated in place by repl.set_slot_tier, exactly like self.mode is
         # mutated by set_slot_mode -- read fresh into coding_context on every
         # turn below, so a mid-session /model change takes effect next turn.

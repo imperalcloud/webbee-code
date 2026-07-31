@@ -1,5 +1,5 @@
 """Model-tier persistence per-repo (webbee-code-model-tier-slash-command-v1):
-remembers the chosen coding brain tier (webismart/supersmart/ultrasmart) across
+remembers the chosen coding brain tier (webbeesmart/supersmart/ultrasmart) across
 process restarts by writing a tiny marker file under
 ``~/.cache/webbee/tier-{repo_key}`` -- the exact same repo identity + cache
 directory convention `mode_store.py` already uses, sibling file, sibling
@@ -29,7 +29,7 @@ _CACHE_DIR = os.path.expanduser("~/.cache/webbee")   # test seam: monkeypatch th
 # this tuple only gates what the CLIENT will ever persist/offer locally, so
 # a future 4th tier is a one-line change here + one line server-side, never
 # a protocol change).
-TIERS: tuple[str, ...] = ("webismart", "supersmart", "ultrasmart")
+TIERS: tuple[str, ...] = ("webbeesmart", "supersmart", "ultrasmart")
 
 # repo_key is derived from `git remote get-url origin` (compute_repo_key,
 # timeout=5) -- cached per workspace for the process lifetime, same as

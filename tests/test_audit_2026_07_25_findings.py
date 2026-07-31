@@ -390,7 +390,7 @@ def test_healthy_no_mutable_module_globals_in_tui_layer():
     # webbee-code-tier-colors-v1: _TIER_DISPLAY (tui.py) is the same category
     # as _STYLE_DICT/_ICON -- a read-only label lookup built once at import,
     # never mutated (see the companion test below).
-    allowed = {"_STYLE_DICT", "_ICON", "_TIER_DISPLAY"}
+    allowed = {"_STYLE_DICT", "_ICON", "_TIER_DISPLAY", "_TIER_GLOW"}
     for mod in (tu, op, rd):
         for name, val in vars(mod).items():
             if name.startswith("__") or not name.startswith("_") or name in allowed:

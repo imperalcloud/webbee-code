@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.50
+
+Round 3, live feedback from Valentin after 0.3.49: the client-side tier id
+picked in that release (`webismart`) was ITSELF wrong — the correct name is
+`webbeesmart` everywhere, no exceptions, client AND admin panel. Also: a
+right-click paste dead zone over the toolbar/queue/todo/tab-bar, and a
+genuinely janky tier-switch toolbar animation.
+
+- **Renamed the tier id `webismart` -> `webbeesmart` everywhere, client AND
+  server:** the 0.3.49 release already fixed the tier-name MISMATCH bug but
+  picked the wrong replacement name itself. Every occurrence across
+  `commands.py`, `tier_store.py`, `tui.py`, `session.py`, `slots.py`, their
+  tests, and this changelog is now `webbeesmart` — matching the server's
+  canonical Model Tiers panel (`imperal-ext-admin/panels_llm_form_tiers.py`,
+  also renamed to match). **Known issue (server-side, out of reach from this
+  client repo):** if any user's per-repo tier choice was already persisted
+  server-side under the old `webismart_model`-style Redis key from 0.3.49,
+  it will silently fall through to the default cascade until re-picked via
+  `/model` or Ctrl+B — no data loss, just a one-time silent reset to the
+  default tier for anyone who explicitly chose a non-default tier in that
+  narrow window.
+- **Right-click paste now works EVERYWHERE in the dock, not just the
+  transcript/input box:** `forward_mouse` (used by the toolbar, queue panel,
+  todo panel, and tab bar) only reacted to mouse events while a drag was
+  already armed — a plain right-click over any of those areas, with no drag
+  in progress, silently did nothing. Right-click-to-paste is now checked
+  FIRST, unconditionally, so it fires the same way no matter where the
+  pointer happens to be sitting in the dock (`selection.py`).
+- **Tier-switch toolbar animation replaced — no more "broken-looking"
+  snap:** switching model tier (Ctrl+B or `/model`) used to swap the ENTIRE
+  toolbar for a static "tier -> X" string for 1.5s (mode, spend, hints all
+  vanished), then snap back — the reported jank. Replaced with a permanent,
+  gentle per-character colour sweep on the tier name ONLY — nothing else in
+  the toolbar ever changes because of it — plus a brief (~6s) smooth-cadence
+  window right after an actual switch so the sweep visibly animates instead
+  of stepping once a second (`tui.py`, `output_pane.py`, `repl.py`). Kept
+  fully compatible with the dock's idle-CPU-~0 discipline: the fast redraw
+  cadence only runs during that short post-switch window, never at rest.
+
 ## 0.3.49
 
 Round 2 of real-hardware fixes reported live by Valentin after testing
@@ -53,17 +92,17 @@ webbee on Linux terminals, slow/silent startup, and `/model` switches that
 - **`/model` switch reported success but never actually changed the
   model:** the client's tier names (`smart`/`supersmart`/`ultrasmart`)
   didn't match the server's canonical tier keys
-  (`webismart`/`supersmart`/`ultrasmart` — imperal-ext-admin's Model Tiers
+  (`webbeesmart`/`supersmart`/`ultrasmart` — imperal-ext-admin's Model Tiers
   panel / the kernel's MODEL_TIERS). An unrecognised tier name silently
   falls through to the existing default cascade server-side, so `/model
   smart` always "succeeded" client-side while the server quietly ignored
-  it. Renamed the client's tier id to `webismart` everywhere it's sent,
+  it. Renamed the client's tier id to `webbeesmart` everywhere it's sent,
   stored, or matched (`commands.py`, `tier_store.py`, `tui.py`,
   `session.py`, `slots.py`) — now wire-compatible with the server.
 - **Model name now always shown as a real name, never "system default":**
   an unset tier used to render nothing, then a vague "server default"
   placeholder. It now shows "Smart" — the actual, documented default tier
-  (`webismart` is genuinely what runs when none is chosen) — a grounded
+  (`webbeesmart` is genuinely what runs when none is chosen) — a grounded
   fact about what's active, never an invented tier name (`tui.py`,
   `commands.py`).
 

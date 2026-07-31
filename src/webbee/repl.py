@@ -1118,19 +1118,24 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         # into the transcript -- the SAME "something really changed" signal
         # /new's tab-open note already gives (`_say`, printed straight into
         # the pane) -- a silent toolbar-only change was too easy to miss.
-        # webbee-code-tier-colors-v2: PLUS a toolbar flash (the exact same
-        # copy-flash mechanism the ✓ copied toast uses) -- the transcript
-        # note can scroll out of view fast on a busy pane, the toolbar
-        # flash cannot be missed because it sits pinned at the bottom.
+        # webbee-code-tier-shimmer-v1 (Valentin, live 2026-07-31: "при смене
+        # модели в тулбаре никакой анимации нету, он как-то поломанно
+        # выглядит"): the OLD "v2" flash here replaced with flash_note
+        # briefly SWAPPED THE WHOLE TOOLBAR for a static string, then
+        # snapped back to normal -- exactly the reported jank. The tier
+        # segment now shimmers PERMANENTLY in build_toolbar itself (see
+        # _tier_shimmer_fragments), so nothing extra is needed here beyond
+        # the transcript note -- the toolbar's own next redraw already shows
+        # the new tier's name and colour family, alive, with no snap.
         slot = slots.active()
         new_tier = next_tier(slot.model_tier)
         set_slot_tier(slot, new_tier)
         label = _TIER_DISPLAY.get(new_tier, new_tier)
         _say(slot, f"🎛️ model tier → {label}")
         pane = getattr(slot, "pane", None)
-        flash = getattr(pane, "flash_note", None) if pane is not None else None
-        if flash is not None:
-            flash(f"🎛️ tier → {label}", secs=1.5)
+        arm_glow = getattr(pane, "arm_tier_glow", None) if pane is not None else None
+        if arm_glow is not None:
+            arm_glow()
 
     async def _handle(line: str, slot: SessionSlot) -> str:
         """Process one input line AGAINST an EXPLICIT slot (FIX1, W4a final
@@ -1434,6 +1439,14 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 set_slot_mode(slot, res.new_mode)
             if res.action == "model_tier" and res.new_tier:
                 set_slot_tier(slot, res.new_tier)
+                # webbee-code-tier-shimmer-v1: /model <tier> gets the exact
+                # same brief animated-glow window Ctrl+B's cycle already
+                # arms, so the toolbar visibly celebrates the change no
+                # matter which of the two ways the user picked it.
+                pane = getattr(slot, "pane", None)
+                arm_glow = getattr(pane, "arm_tier_glow", None) if pane is not None else None
+                if arm_glow is not None:
+                    arm_glow()
             if res.message:
                 _say(slot, res.message)
             return "continue"

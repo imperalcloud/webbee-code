@@ -65,13 +65,13 @@ def test_next_mode_unknown_resets():
 
 
 def test_next_tier_cycles():
-    assert next_tier("webismart") == "supersmart"
+    assert next_tier("webbeesmart") == "supersmart"
     assert next_tier("supersmart") == "ultrasmart"
-    assert next_tier("ultrasmart") == "webismart"
+    assert next_tier("ultrasmart") == "webbeesmart"
 
 def test_next_tier_unknown_or_unset_resets():
-    assert next_tier("weird") == "webismart"
-    assert next_tier("") == "webismart"
+    assert next_tier("weird") == "webbeesmart"
+    assert next_tier("") == "webbeesmart"
 
 def test_toolbar_idle_has_mode_tokens_cost_and_hint():
     t = _txt(build_toolbar("plan", 51000, 66))
@@ -463,6 +463,30 @@ def test_forward_mouse_noop_when_no_drag_armed():
                       button=MouseButton.LEFT, modifiers=frozenset())
     assert pane.forward_mouse(up) is False
     assert pane.forward_mouse(move) is False
+
+
+def test_forward_mouse_right_click_pastes_even_with_no_drag_armed():
+    """webbee-code-universal-right-click-paste-v1 (Valentin, live 2026-07-31:
+    "правый клик гарантированно работал везде... на любом устройстве"):
+    a right-click over the TOOLBAR/queue/todo/tab-bar (every neighbor window
+    that routes through forward_mouse) must paste even though no drag is
+    armed there -- the pre-fix code returned False immediately whenever
+    `_down_abs is None`, so a plain right-click over those areas was a
+    silent no-op with zero path to the clipboard."""
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from webbee.tui import OutputPane
+
+    pane = OutputPane(width=80)
+    assert pane.control._down_abs is None
+    calls = []
+    pane.on_right_paste = lambda: calls.append(1)
+    right_down = MouseEvent(position=Point(4, 0), event_type=MouseEventType.MOUSE_DOWN,
+                            button=MouseButton.RIGHT, modifiers=frozenset())
+    assert pane.forward_mouse(right_down) is True
+    assert calls == [1]
+    # armed drag untouched by this: still None afterwards, no phantom selection
+    assert pane.control._down_abs is None
 
 
 def test_forward_mouse_move_extends_selection_to_bottom_row_and_arms_edge_drag():
@@ -1619,6 +1643,41 @@ def test_tick_once_always_invalidates_on_home_even_when_idle(monkeypatch):
     app2 = _App()
     _tick_once(slots, app2, lambda: False)
     assert app2.n == 0   # a genuinely idle SESSION tab still skips the redraw
+
+
+def test_tick_once_invalidates_on_session_while_a_tier_glow_window_is_open(monkeypatch):
+    """webbee-code-tier-shimmer-v1 (Valentin, live 2026-07-31: wants the tier
+    name to visibly shimmer/glow in the toolbar right when it changes): the
+    fast redraw ONLY happens during the short glow window `arm_tier_glow`
+    opens (mirrors the existing copy-flash toast mechanism) -- a plain idle
+    session tab with NO glow armed keeps paying nothing (see the sibling test
+    above), preserving the idle-CPU-~0 guarantee the dock already promises."""
+    from webbee.tui import _tick_once
+
+    class _Pane:
+        def __init__(self):
+            self.console = type("Console", (), {"width": 72})()
+        def reflow(self, cols):
+            pass
+        def edge_tick(self):
+            pass
+        def flash(self):
+            return ""
+        def tier_glow(self):
+            return True
+
+    class _App:
+        def __init__(self):
+            self.n = 0
+        def invalidate(self):
+            self.n += 1
+
+    monkeypatch.setattr("webbee.sizing.get_size", lambda app: (72, 24))
+    slots = mk_slots(pane=_Pane())
+    slots.slots[0].kind = "session"
+    app = _App()
+    _tick_once(slots, app, lambda: False)   # idle, but tier_glow() is True
+    assert app.n == 1
 
 
 def test_tick_once_swallows_edge_tick_error(monkeypatch):
@@ -5412,7 +5471,7 @@ def test_idle_toolbar_shows_the_real_default_tier_name_when_unset():
     # 2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а не
     # system default"): an unset tier used to render NOTHING, then a vague
     # "server default" placeholder -- now it shows the REAL tier that
-    # actually runs when none is chosen: "Smart" (webismart is the
+    # actually runs when none is chosen: "Smart" (webbeesmart is the
     # documented default tier), never SuperSmart/UltraSmart which are NOT
     # what's running unless explicitly picked.
     t = _txt(build_toolbar("default", 0, 0.0, tier=""))
@@ -5446,6 +5505,84 @@ def test_tier_colours_are_genuinely_distinct_from_mode_colours():
     assert not (mode_styles & tier_styles), (
         "tier colours must not reuse mode colours verbatim"
     )
+
+
+# --------------------------------------------------------------------------
+# webbee-code-tier-shimmer-v1 (Valentin, live 2026-07-31: "при смене модели в
+# тулбаре никакой анимации нету, он как-то поломанно выглядит... хочу чтобы
+# ТОЛЬКО сама модель... переливалась или слегка светилась"): the old
+# Ctrl+B feedback swapped the WHOLE toolbar via flash_note for 1.5s then
+# snapped back -- the "поломанно" jank being reported. Replaced with a
+# permanent per-character colour sweep on the tier word ONLY.
+# --------------------------------------------------------------------------
+def test_tier_shimmer_produces_one_fg_fragment_per_character():
+    from webbee.tui import _tier_shimmer_fragments
+    frags = _tier_shimmer_fragments("supersmart", "SuperSmart", now=0.0)
+    assert len(frags) == len("SuperSmart")
+    assert "".join(ch for _, ch in frags) == "SuperSmart"
+    assert all(style.startswith("fg:#") for style, _ in frags)
+
+
+def test_tier_shimmer_colour_changes_over_time_ie_it_actually_animates():
+    from webbee.tui import _tier_shimmer_fragments
+    a = _tier_shimmer_fragments("ultrasmart", "UltraSmart", now=0.0)
+    b = _tier_shimmer_fragments("ultrasmart", "UltraSmart", now=2.0)
+    assert [s for s, _ in a] != [s for s, _ in b]
+
+
+def test_tier_shimmer_stays_within_that_tiers_own_hue_family():
+    """Each tier's shimmer must stay recognisably ITS colour family (never
+    drift into another tier's hue) -- e.g. ultrasmart's sweep is all magenta
+    channel-dominant, never teal/blue like the other two tiers."""
+    from webbee.tui import _tier_shimmer_fragments
+    for t in range(0, 20):
+        frags = _tier_shimmer_fragments("ultrasmart", "UltraSmart", now=t * 0.37)
+        for style, _ch in frags:
+            hexcolor = style.removeprefix("fg:#")
+            r, g, b = int(hexcolor[0:2], 16), int(hexcolor[2:4], 16), int(hexcolor[4:6], 16)
+            assert r >= g and r >= 100        # magenta/pink family: red channel leads
+
+
+def test_tier_shimmer_falls_back_to_first_tier_family_for_unknown_tier():
+    from webbee.tui import _tier_shimmer_fragments, _TIER_GLOW, _TIERS
+    frags = _tier_shimmer_fragments("nonsense-tier", "Nonsense", now=0.0)
+    assert len(frags) == len("Nonsense")
+    # must resolve to the SAME family as the first known tier, not crash/blank
+    known = _tier_shimmer_fragments(_TIERS[0], "Nonsense", now=0.0)
+    assert [s for s, _ in frags] == [s for s, _ in known]
+
+
+def test_build_toolbar_idle_tier_segment_is_shimmer_fragments_not_one_block():
+    """Regression guard: the tier word must render as MULTIPLE per-char
+    fg: fragments (the shimmer), never collapse back to the old single
+    static class:tb.tier.* block."""
+    from webbee.tui import build_toolbar
+    frags = build_toolbar("default", 0, 0.0, tier="webbeesmart", tier_now=1.0)
+    fg_frags = [f for f in frags if f[0].startswith("fg:#")]
+    assert len(fg_frags) == len("Smart")
+
+
+def test_build_toolbar_busy_tier_segment_is_shimmer_fragments_not_one_block():
+    from webbee.tui import build_toolbar
+    frags = build_toolbar("default", 0, 0.0, busy=True, elapsed=1.0,
+                          tier="supersmart", tier_now=1.0)
+    fg_frags = [f for f in frags if f[0].startswith("fg:#")]
+    assert len(fg_frags) == len("SuperSmart")
+
+
+def test_tier_cycle_no_longer_swaps_the_whole_toolbar_via_flash_note():
+    """webbee-code-tier-shimmer-v1: Ctrl+B must NOT call pane.flash_note for
+    the tier change any more -- that was the exact toolbar-wide swap the
+    user called "поломанно" (mode/spend/hints all vanish for 1.5s then snap
+    back). The shimmer itself is a permanent, non-flash effect."""
+    import inspect
+    from webbee import repl
+    src = inspect.getsource(repl)
+    # the _tier_cycle closure should not reference flash_note at all any more
+    start = src.index("def _tier_cycle()")
+    end = src.index("\n\n", start + 50)
+    body = src[start:end]
+    assert ".flash_note(" not in body   # (a comment MAY mention the word historically)
 
 
 def test_badge_style_override_breathes_only_when_confirmed_up_to_date():

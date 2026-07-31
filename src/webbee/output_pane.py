@@ -78,6 +78,9 @@ class OutputPane:
         self._plain_cache = (0, [""])      # (write-pos, ANSI-stripped lines) for select/highlight
         self.copy_flash = ""               # transient toolbar note after a copy
         self._flash_until = 0.0
+        self._tier_glow_until = 0.0        # webbee-code-tier-shimmer-v1: short
+                                            # fast-cadence window right after a
+                                            # tier switch (see tier_glow/arm_tier_glow)
 
         # The mouse-selection control lives in selection.py (file-ceiling
         # headroom) — a factory closed over this pane, not a shared class.
@@ -350,6 +353,27 @@ class OutputPane:
         import time as _t
         self.copy_flash = msg
         self._flash_until = _t.monotonic() + secs
+
+    def arm_tier_glow(self, secs: float = 6.0) -> None:
+        """webbee-code-tier-shimmer-v1 (Valentin, live 2026-07-31: "при смене
+        модели в тулбаре... хочу чтобы... переливались или слегка светились"):
+        called once, right when the model tier actually changes (Ctrl+B /
+        `/model`) -- opens a short window where the ticker's FAST (0.25s)
+        cadence runs so the tier segment's colour sweep (build_toolbar's
+        `_tier_shimmer_fragments`) visibly animates smoothly. Deliberately
+        TIME-BOUNDED (~6s, several full sweep periods) rather than
+        permanent: an idle session tab must keep costing ~0 CPU
+        (test_healthy_idle_ticker_does_not_repaint) -- the tier word still
+        SHOWS its calm colour at idle cadence, it just stops being buttery-
+        smooth once nobody is watching it change."""
+        import time as _t
+        self._tier_glow_until = _t.monotonic() + secs
+
+    def tier_glow(self) -> bool:
+        """Whether the tier-switch glow window (armed by arm_tier_glow) is
+        still live -- the ticker's cue to keep the fast cadence running."""
+        import time as _t
+        return _t.monotonic() < self._tier_glow_until
 
     # ---- W2 Task 8: selection capture past the pane's own Window --------
     def forward_mouse(self, ev, clamp: str = "bottom") -> bool:

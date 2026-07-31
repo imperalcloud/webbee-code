@@ -50,8 +50,8 @@ def test_load_ignores_corrupt_or_unknown_tier(tmp_path, monkeypatch):
 
 def test_save_empty_string_clears_the_choice(tmp_path, monkeypatch):
     ws = _fake_repo(tmp_path, monkeypatch)
-    save_tier(ws, "webismart")
-    assert load_tier(ws) == "webismart"
+    save_tier(ws, "webbeesmart")
+    assert load_tier(ws) == "webbeesmart"
     save_tier(ws, "")
     assert load_tier(ws) is None
 
@@ -63,4 +63,4 @@ def test_save_rejects_unknown_tier_silently(tmp_path, monkeypatch):
 
 
 def test_tiers_tuple_matches_kernel_contract():
-    assert TIERS == ("webismart", "supersmart", "ultrasmart")
+    assert TIERS == ("webbeesmart", "supersmart", "ultrasmart")

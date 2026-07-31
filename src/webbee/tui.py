@@ -31,13 +31,69 @@ from webbee.tabs import tab_fragments
 from webbee.todo_panel import todo_fragments, todo_height
 
 _MODES = ("default", "plan", "autopilot")
-_TIERS = ("webismart", "supersmart", "ultrasmart")
+_TIERS = ("webbeesmart", "supersmart", "ultrasmart")
 # webbee-code-tier-colors-v1: the wire/storage value stays lowercase
 # (tier_store.py, the kernel's MODEL_TIERS, /model's own argument parsing —
 # none of that changes), this is ONLY the human-facing label shown in the
 # toolbar and in the switch confirmation note.
-_TIER_DISPLAY = {"webismart": "Smart", "supersmart": "SuperSmart", "ultrasmart": "UltraSmart"}
+_TIER_DISPLAY = {"webbeesmart": "Smart", "supersmart": "SuperSmart", "ultrasmart": "UltraSmart"}
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # braille frames — animated while a turn runs
+
+# webbee-code-tier-shimmer-v1 (Valentin, live 2026-07-31: "при смене модели в
+# тулбаре никакой анимации нету, он как-то поломанно выглядит... хочу чтобы
+# ТОЛЬКО сама модель... переливалась или слегка светилась"): the old
+# tier-switch feedback was `pane.flash_note(...)` — it swapped the ENTIRE
+# toolbar (mode, spend, hints, everything) for a static string for 1.5s, then
+# snapped back — exactly the "поломанно" jank being reported. Replaced with a
+# PERMANENT, gentle per-character colour sweep on the tier segment ONLY —
+# nothing else in the toolbar ever changes because of it. Each tier keeps its
+# OWN existing hue family (tb.tier.* below) so a glance still tells tiers
+# apart; this just makes that one word visibly alive.
+_TIER_GLOW = {
+    "webbeesmart": ("#2f7a66", "#5fd7af", "#c8fff0"),
+    "supersmart": ("#33499e", "#5f87ff", "#d3e0ff"),
+    "ultrasmart": ("#9c2f95", "#ff5fd7", "#ffddf7"),
+}
+
+
+def _lerp_hex(c1: str, c2: str, frac: float) -> str:
+    """PURE. Linear-interpolate two '#rrggbb' colours by frac (clamped to
+    [0, 1]) — the smooth-gradient primitive the tier shimmer is built on."""
+    frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    r = round(r1 + (r2 - r1) * frac)
+    g = round(g1 + (g2 - g1) * frac)
+    b = round(b1 + (b2 - b1) * frac)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _tier_shimmer_fragments(tier: str, label: str, *, now: "float | None" = None) -> list:
+    """PURE given `now`. A slow, gentle per-character brightness wave travels
+    left-to-right across the model-tier name — a real gradient (smoothly
+    interpolated colour, not a blunt whole-word flip), one full sweep every
+    4s so it reads as a calm shimmer/glow even sampled at the idle ticker's
+    1Hz rate, never a fast flicker. Returns one (style, char) fragment per
+    character so prompt_toolkit renders each with its own instantaneous
+    colour along the gradient."""
+    import time as _t
+    if now is None:
+        now = _t.monotonic()
+    colors = _TIER_GLOW.get(tier, _TIER_GLOW[_TIERS[0]])
+    n = len(colors)
+    period = 4.0
+    frags = []
+    for i, ch in enumerate(label):
+        # per-character phase offset -> the bright band visibly TRAVELS
+        # across the word instead of the whole word pulsing in lock-step.
+        phase = ((now / period) + i * 0.18) % 1.0
+        tri = phase * 2 if phase < 0.5 else (1.0 - phase) * 2   # 0 -> 1 -> 0
+        pos = min(tri, 1.0) * (n - 1)
+        idx = min(int(pos), max(n - 2, 0))
+        frac = pos - idx
+        color = _lerp_hex(colors[idx], colors[min(idx + 1, n - 1)], frac)
+        frags.append((f"fg:{color}", ch))
+    return frags
 
 # Leaked SGR mouse-report fragments ("<35;6;42M" / "35;6;42M"): under a
 # mouse-move flood the vt100 parser splits sequences at read-chunk boundaries
@@ -84,11 +140,11 @@ _STYLE_DICT = {
     # webbee-code-tier-colors-v2: FIXED -- v1 accidentally reused the exact
     # mode colours (cyan/purple/yellow), so tiers were visually identical to
     # modes. Genuinely distinct palette now, same "calm -> bold" progression
-    # but no shared hex with tb.mode.*: webismart=teal-green (calm baseline),
+    # but no shared hex with tb.mode.*: webbeesmart=teal-green (calm baseline),
     # supersmart=soft blue-violet (a step up), ultrasmart=hot magenta bold
     # (the top tier -- meant to pop, but pop DIFFERENTLY from autopilot's
     # yellow caution so the two are never confusable at a glance).
-    "tb.tier.webismart": "#5fd7af",
+    "tb.tier.webbeesmart": "#5fd7af",
     "tb.tier.supersmart": "#5f87ff",
     "tb.tier.ultrasmart": "#ff5fd7 bold",
     "tb.version": "#5f5f5f",             # 0.3.37 bottom-right version badge — quietest thing on screen
@@ -227,7 +283,7 @@ def next_mode(mode: str) -> str:
 
 
 def next_tier(tier: str) -> str:
-    """PURE. Cycles webismart -> supersmart -> ultrasmart -> webismart. An unset/""
+    """PURE. Cycles webbeesmart -> supersmart -> ultrasmart -> webbeesmart. An unset/""
     tier (server admin default, never chosen) or any unrecognised value
     starts the cycle at the first tier, same fallback discipline as
     next_mode above."""
@@ -241,7 +297,7 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False, queued: int = 0,
                   reconnecting: int = 0, width: int = 0, live: str = "",
-                  tier: str = "") -> list:
+                  tier: str = "", tier_now: "float | None" = None) -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
     text (per-segment styled). Four states: consent (awaiting a reply),
     reconnecting (the stream transport is down mid-turn — honest, not a fake
@@ -276,13 +332,15 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         # webbee-code-model-selector-always-visible-v1 (Valentin, live
         # 2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а
         # не system default"): an unset tier now shows the REAL name of the
-        # tier that actually runs when none is chosen -- "webismart" IS the
+        # tier that actually runs when none is chosen -- "webbeesmart" IS the
         # documented default, fast everyday tier (imperal-ext-admin's own
         # Model Tiers panel, `_TIERS[0]`), so showing its display name
         # "Smart" here is a grounded fact about what's running, not a
         # guess -- never a MADE-UP tier the server didn't confirm.
-        frags += [("class:tb.dim", " · "),
-                  (f"class:tb.tier.{tier or _TIERS[0]}", _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]])]
+        frags += [("class:tb.dim", " · ")]
+        frags += _tier_shimmer_fragments(tier or _TIERS[0],
+                                         _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]],
+                                         now=tier_now)
         frags.append(("class:tb.dim",
                       f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"))
         frags += q
@@ -298,11 +356,13 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     # 2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а не
     # system default"): every tab must show a model indicator, chosen or
     # not -- "" (unset) shows the REAL name of the default tier that's
-    # actually active ("Smart" / webismart, imperal-ext-admin's own
+    # actually active ("Smart" / webbeesmart, imperal-ext-admin's own
     # documented default), never a vague placeholder phrase. Ctrl+B /
     # `/model` still change it from here exactly like before.
-    frags += [("class:tb.dim", " · model: "),
-              (f"class:tb.tier.{tier or _TIERS[0]}", _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]])]
+    frags += [("class:tb.dim", " · model: ")]
+    frags += _tier_shimmer_fragments(tier or _TIERS[0],
+                                     _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]],
+                                     now=tier_now)
     frags += [("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
              *q]
     # 0.3.37: the PERSISTENT live-session indicator (active_sessions.
@@ -456,16 +516,20 @@ def _ticker_busy(slots, is_busy) -> bool:
     """Whether the dock's animation loop must stay at the FAST (0.25s) cadence:
     a turn is running, a copy-flash toast is live, an edge-drag auto-scroll is
     in flight (`pane._edge_drag` — a drag-select past the viewport edge that
-    `pane.edge_tick()` keeps scrolling every tick), OR a debounced resize is
-    waiting to settle (`pane._resize_pending`, see `_width_watch`). All of them
-    need smooth ~4x/s updates; miss the edge-drag one and idle drag-scrolling
-    crawls 4x slower, miss the resize one and a re-wrap after a drag lands up
-    to a full second late. Otherwise the loop is idle → the caller uses the
-    slow 1.0s cadence."""
+    `pane.edge_tick()` keeps scrolling every tick), a debounced resize is
+    waiting to settle (`pane._resize_pending`, see `_width_watch`), OR a
+    tier-switch glow window is open (webbee-code-tier-shimmer-v1:
+    `pane.tier_glow()` — the few seconds right after Ctrl+B/`/model` actually
+    changes tiers, so the colour sweep animates smoothly instead of stepping
+    once a second). All of them need smooth ~4x/s updates; miss the
+    edge-drag one and idle drag-scrolling crawls 4x slower, miss the resize
+    one and a re-wrap after a drag lands up to a full second late. Otherwise
+    the loop is idle → the caller uses the slow 1.0s cadence."""
     try:
         pane = slots.active().pane
         if (bool(pane.flash()) or bool(getattr(pane, "_edge_drag", 0))
-                or bool(getattr(pane, "_resize_pending", 0))):
+                or bool(getattr(pane, "_resize_pending", 0))
+                or bool(getattr(pane, "tier_glow", lambda: False)())):
             return True
     except Exception:
         pass
@@ -518,8 +582,18 @@ def _tick_once(slots, app, is_busy, breathing=None) -> None:
     # number instead of each tab's own live-ticking age. Home is cheap to
     # redraw (same virtualized-slice render every other pane already does),
     # so it gets the plain 1s idle cadence's invalidate too, unconditionally.
+    # webbee-code-tier-shimmer-v1: the tier segment's colour sweep is driven
+    # by wall-clock time inside build_toolbar -- but it must NOT force a
+    # permanent redraw on every idle session tab (that would defeat the
+    # dock's whole idle-CPU-~0 discipline, see
+    # test_healthy_idle_ticker_does_not_repaint). Instead `pane.tier_glow()`
+    # reports a short (~6s) TRUE window right after a tier actually changes
+    # (armed by _tier_cycle/the /model action) -- the fast cadence kicks in
+    # for just that "wow, something changed" burst, exactly like the existing
+    # copy-flash toast already does, then idle goes back to costing nothing.
     if (is_busy() or pane.flash() or (breathing is not None and breathing())
-            or getattr(active, "kind", "") == "home"):
+            or getattr(active, "kind", "") == "home"
+            or bool(getattr(pane, "tier_glow", lambda: False)())):
         app.invalidate()
 
 
@@ -1161,7 +1235,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
     @kb.add("c-b", filter=Condition(lambda: on_tier_cycle is not None and _a().kind != "home"))
     def _tier_cycle(event):
         # webbee-code-model-tier-slash-command-v1: Ctrl+B cycles the coding
-        # brain tier (webismart -> supersmart -> ultrasmart -> webismart), the exact
+        # brain tier (webbeesmart -> supersmart -> ultrasmart -> webbeesmart), the exact
         # keyboard-symmetric sibling of Shift+TAB's mode cycle above. NOT
         # Ctrl+M: that's the same raw byte (\r, CR) as Enter on most
         # terminals lacking CSI-u/Kitty-protocol support -- binding it would
