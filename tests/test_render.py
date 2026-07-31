@@ -299,6 +299,49 @@ def test_consent_shows_human_summary_not_dict():
     assert "notes·delete_note" in out
 
 
+# ── webbee-code-consent-card-v1: the consent card is a real, hard-to-miss
+# bordered block printed IN the conversation, with the y/n instructions
+# living right next to the question -- not a dim one-liner + a separate
+# toolbar hint the user has to go hunting for. ────────────────────────────
+
+def test_consent_is_a_bordered_card_with_inline_instructions():
+    console = Console(record=True, width=90)
+    s = RichSink(console=console, live_enabled=False,
+                 input_fn=lambda p: "yes", clock=lambda: 0.0)
+    asyncio.run(s.ask_consent("notes", "delete_note", {"title": "Q3 budget"}))
+    out = console.export_text()
+    # a real Panel border, not a bare printed line
+    assert "\u256d" in out or "\u2500" in out   # rounded-corner or horizontal rule glyph
+    assert "approve?" in out
+    # the how-to-answer instructions are IN the card, not somewhere else
+    assert "yes" in out and "no" in out
+    assert "do it" in out and "skip it" in out
+    assert "notes·delete_note" in out
+
+
+def test_consent_card_reflows_to_narrow_terminal_width():
+    # A phone SSH client / narrow tmux pane: the card must not crash or
+    # silently drop the question -- Panel reflows, same as billing/login.
+    console = Console(record=True, width=28)
+    s = RichSink(console=console, live_enabled=False,
+                 input_fn=lambda p: "y", clock=lambda: 0.0)
+    asyncio.run(s.ask_consent("mail", "delete", {"query": "old newsletters"}))
+    out = console.export_text()
+    assert "mail" in out and "delete" in out
+    assert "yes" in out and "no" in out
+
+
+def test_ask_yes_no_is_also_a_bordered_card_with_instructions():
+    console = Console(record=True, width=90)
+    s = RichSink(console=console, live_enabled=False,
+                 input_fn=lambda p: "y", clock=lambda: 0.0)
+    asyncio.run(s.ask_yes_no("switch to autopilot — allow? [y/n]"))
+    out = console.export_text()
+    assert "\u256d" in out or "\u2500" in out
+    assert "allow" in out.lower()
+    assert "yes" in out and "no" in out
+
+
 def test_user_echo_is_unboxed_line():
     s = _sink()
     s.user_echo("delete my Q3 note")

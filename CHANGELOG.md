@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.45
+
+Consent prompts stop being an easy-to-miss detail:
+
+- **Both the kernel consent (`? approve ...`) and the local remote-control
+  yes/no ask now print as a bordered card, right in the conversation, the
+  moment they're asked** -- the same proven Panel this terminal already
+  uses for the billing and login prompts, so it reflows correctly to
+  whatever width the terminal actually has (a phone's SSH client, a narrow
+  tmux pane, a full window). The question and the "how to answer"
+  instructions (`y/yes -> do it`, `n/no -> skip it`, or type your own
+  reply) now live in the SAME box -- nothing to go hunting for in a
+  toolbar hint several rows away. The underlying protocol is unchanged:
+  still a bare raw string relayed verbatim for the kernel to interpret
+  (ICNLI, safe-by-default) -- this is a display-only change.
+
 ## 0.3.44
 
 Three real Home-dashboard bugs, found and fixed:

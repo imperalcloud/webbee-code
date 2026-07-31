@@ -614,12 +614,38 @@ class RichSink:
         NEVER interpret (the kernel decides, ICNLI). When the dock is running
         the reply comes through the pinned box via an asyncio.Future (no
         blocking input on the event loop); otherwise fall back to the injected
-        sync reader (tests / non-tty)."""
+        sync reader (tests / non-tty).
+
+        webbee-code-consent-card-v1: this used to be one dim, easy-to-miss
+        line in the feed plus a SEPARATE hint buried in the toolbar below --
+        several users said it wasn't obvious what was even being asked, let
+        alone how to answer it. Now it's a bordered card printed RIGHT IN
+        THE CONVERSATION, at the moment it's asked -- same proven Panel this
+        module already uses for the billing/login prompts, so it reflows to
+        whatever width the terminal actually has (phone SSH client, a narrow
+        tmux pane, a full-width window -- all get a readable card, not a
+        clipped line). The question AND the "how to answer" instructions
+        live in the SAME box, so there's nothing to hunt for elsewhere on
+        screen. The protocol contract is unchanged: still a bare raw string
+        relayed verbatim for the kernel to interpret (ICNLI, safe-by-default)."""
         label = _clean(f"{app_id}·{tool}" if app_id else tool)
-        sal = _clean(_salient_arg(args))
-        w = self.console.width
-        self.console.print(Text.assemble(("  ? approve ", "yellow"), (label, "dim"),
-                                          (("  " + sal[:trunc(w, 0.4, 60)]) if sal else "", "dim")))
+        sal = _clean(_salient_arg(args))[:500]
+        body = Text()
+        body.append(label, style=f"bold {_ACCENT}")
+        if sal:
+            body.append("\n" + sal, style="white")
+        body.append("\n\n")
+        body.append("y", style="bold green")
+        body.append(" / ", style="dim")
+        body.append("yes", style="bold green")
+        body.append("  →  do it     ", style="dim")
+        body.append("n", style="bold red")
+        body.append(" / ", style="dim")
+        body.append("no", style="bold red")
+        body.append("  →  skip it\n", style="dim")
+        body.append("or just type your own reply in any language — Enter to send", style="dim")
+        self.console.print(_pad(Panel(body, title="🔐 wants to do this — approve?",
+                                      border_style=_BEE)))
         fut = self._arm_consent(label, sal)
         if fut is None:                       # non-tty / no running app
             raw = self._input("     ")
@@ -643,8 +669,26 @@ class RichSink:
         all return False, so the caller keeps the current mode. This is a
         LOCAL policy decision, not a kernel consent, so the reply is
         interpreted here rather than relayed (ICNLI raw-relay applies to
-        kernel consents only)."""
-        self.console.print(_pad(Text("⚠ " + _clean(question), style=f"bold {_BEE}")))
+        kernel consents only).
+
+        webbee-code-consent-card-v1: same bordered-card treatment as
+        ask_consent -- a bare "⚠ ..." line was just as easy to miss as the
+        old one-line kernel consent was. The card reflows to the terminal's
+        real width on any device, and states the y/n instructions right
+        where the question is instead of leaving them implicit."""
+        body = Text()
+        body.append(_clean(question), style=f"bold {_BEE}")
+        body.append("\n\n")
+        body.append("y", style="bold green")
+        body.append(" / ", style="dim")
+        body.append("yes", style="bold green")
+        body.append("  →  allow     ", style="dim")
+        body.append("n", style="bold red")
+        body.append(" / ", style="dim")
+        body.append("no", style="bold red")
+        body.append("  →  stay as-is (default)", style="dim")
+        self.console.print(_pad(Panel(body, title="⚠ another surface is asking",
+                                      border_style=_BEE)))
         fut = self._arm_consent(question, question)
         try:
             if fut is None:                    # non-tty / no dock → sync reader
