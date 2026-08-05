@@ -10,7 +10,10 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 echo "Installing webbee…"
-uv tool install "webbee[intel,intel-embed]"
+# The code index (tree-sitter) and its semantic arm (model2vec) are BASE
+# dependencies since 0.3.51 — no extras needed. The [intel,intel-embed] names
+# still exist as empty aliases, so older copies of this script keep working.
+uv tool install "webbee"
 
 echo ""
 echo "✅ webbee installed. Start it with:  webbee"
