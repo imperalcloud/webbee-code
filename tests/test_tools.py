@@ -589,3 +589,104 @@ def test_diff_is_capped_and_never_explodes_a_giant_rewrite(tmp_path):
     assert "diff" in r
     assert len(r["diff"]) <= 4000 + 100   # _DIFF_CAP + truncation marker slack
     assert "truncated" in r["diff"]
+
+
+# --- I-TOOLS-HONEST-TRUNCATION ------------------------------------------------
+# Every unbounded tool caps its output AND says so. Regression for the live
+# audit (2026-08-06): `bash` returned 200,001 chars uncapped, and `grep`
+# returned exactly 200 of 500 real matches with NO marker -- the agent then
+# reasoned from a half-truth believing it had seen everything.
+
+def test_bash_output_is_capped_with_an_honest_marker(tmp_path):
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("bash", {"command": "python3 -c \"print('X'*200000)\""})
+    assert len(r["content"]) < 40000, "bash output must not be unbounded"
+    assert "TRUNCATED" in r["content"]
+    assert "200,000" in r["content"] or "200,001" in r["content"], "must state the real size"
+
+
+def test_bash_short_output_is_never_marked(tmp_path):
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("bash", {"command": "echo hello"})
+    assert "hello" in r["content"]
+    assert "TRUNCATED" not in r["content"]
+
+
+def test_grep_states_how_many_matches_were_hidden(tmp_path):
+    for i in range(300):
+        (tmp_path / f"f{i}.py").write_text("MATCHME = 1\n")
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("grep", {"pattern": "MATCHME"})
+    assert "TRUNCATED" in r["content"]
+    assert "300" in r["content"], "must state the true total, not just the shown count"
+    assert r["shown"] == 200 and r["match_count"] == 300
+    assert r["truncated"] is True
+
+
+def test_grep_under_the_cap_is_not_marked(tmp_path):
+    (tmp_path / "a.py").write_text("MATCHME = 1\n")
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("grep", {"pattern": "MATCHME"})
+    assert "TRUNCATED" not in r["content"]
+    assert r["truncated"] is False
+
+
+# --- I-TOOLS-PARTIAL-READ -----------------------------------------------------
+
+def test_read_file_window_returns_exactly_that_window(tmp_path):
+    (tmp_path / "big.py").write_text("".join(f"line {i}\n" for i in range(1, 3001)))
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("read_file", {"path": "big.py", "offset": 400, "limit": 5})
+    body = r["content"].split("\n", 1)[1]
+    assert body.splitlines() == [f"line {i}" for i in range(400, 405)]
+    assert (r["shown_from"], r["shown_to"], r["total_lines"]) == (400, 404, 3000)
+
+
+def test_read_file_without_a_window_auto_caps_a_huge_file(tmp_path):
+    (tmp_path / "big.py").write_text("".join(f"line {i}\n" for i in range(1, 3001)))
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("read_file", {"path": "big.py"})
+    assert r["truncated"] is True and r["shown_to"] == 2000
+    assert "offset/limit" in r["content"].splitlines()[0]
+
+
+def test_read_file_small_file_is_unchanged_and_unmarked(tmp_path):
+    (tmp_path / "s.py").write_text("a = 1\nb = 2\n")
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("read_file", {"path": "s.py"})
+    assert r["truncated"] is False
+    assert r["content"].split("\n", 1)[1] == "a = 1\nb = 2\n"  # byte-exact, trailing NL kept
+
+
+def test_read_file_offset_past_eof_is_empty_not_a_crash(tmp_path):
+    (tmp_path / "s.py").write_text("a = 1\n")
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("read_file", {"path": "s.py", "offset": 999, "limit": 10})
+    assert r["ok"] is True and r["shown_to"] >= r["shown_from"] - 1
+
+
+def test_read_file_garbage_offset_limit_degrade_to_full_read(tmp_path):
+    (tmp_path / "s.py").write_text("a = 1\n")
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("read_file", {"path": "s.py", "offset": "abc", "limit": None})
+    assert r["ok"] is True and "a = 1" in r["content"]
+
+
+# --- list_dir -----------------------------------------------------------------
+
+def test_list_dir_lists_and_prunes_dependency_dirs(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "node_modules" / "junk").mkdir(parents=True)
+    (tmp_path / "node_modules" / "junk" / "b.js").write_text("x\n")
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("list_dir", {"path": "."})
+    assert "a.py" in r["content"] and "sub/" in r["content"]
+    assert "node_modules" not in r["content"]
+
+
+def test_list_dir_on_a_file_is_an_honest_error(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("list_dir", {"path": "a.py"})
+    assert r["ok"] is False and "not a directory" in r["content"]

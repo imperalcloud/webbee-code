@@ -25,5 +25,9 @@ def test_readme_exists_and_mentions_install():
 def test_install_script_is_posix_and_uses_uv():
     txt = (ROOT / "install.sh").read_text()
     assert txt.startswith("#!/bin/sh")
-    # 0.3.14: the intel graph extras install by default
-    assert 'uv tool install "webbee[intel,intel-embed]"' in txt
+    # 0.3.51: the index + semantic arm are BASE dependencies, so the installer
+    # no longer needs extras. The [intel]/[intel-embed] names survive as empty
+    # aliases, so an OLD copy of this script still works -- but the shipped one
+    # must be the plain form.
+    assert 'uv tool install "webbee"' in txt
+    assert "webbee[intel" not in txt, "extras are redundant since 0.3.51"

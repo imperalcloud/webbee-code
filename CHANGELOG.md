@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.52
+
+Tool-honesty pass. An audit of the local tools against live behaviour found
+three ways a tool could hand back a **partial answer that looked complete** —
+the worst failure mode for an agent, because it reasons confidently from a
+half-truth instead of narrowing its query.
+
+**`bash` had no output cap at all.** A command printing 200,000 characters
+returned all 200,000 (measured), so a single `cat` of a log could swallow the
+context window. Output is now capped and the cap says exactly what it hid:
+`TRUNCATED: showing first 30,000 of 200,001 chars`.
+
+**`grep` silently truncated.** With 500 real matches it returned exactly 200
+and said nothing — the agent concluded "200 matches exist". It now reports
+`showing 200 of 500 matches (300 hidden)` and returns `match_count` /
+`truncated` as structured fields.
+
+**`read_file` was all-or-nothing.** Inspecting lines 400-450 of a 3,000-line
+file dragged the whole file through the context, which is why the agent kept
+reaching for `sed -n` over SSH. It now takes `offset`/`limit` for windowed
+reads and auto-caps very large files (stating the cap). A full read stays
+**byte-exact**, including the trailing newline — a regression caught by the
+existing edit-contract tests during this change.
+
+**New `list_dir`** — structured listing with per-file line counts and
+dependency dirs pruned, so sizing a file before reading a window no longer
+requires shelling out.
+
+All four are pinned by tests, including "under the cap, say nothing" cases so
+the markers can never become noise.
+
 ## 0.3.51
 
 Live finding from Valentin's own terminal session: the code-intelligence index

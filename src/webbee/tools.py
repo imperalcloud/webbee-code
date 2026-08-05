@@ -24,6 +24,30 @@ _STALE_NOTE = "\n⚠ file changed on disk since you last read it — re-read to 
 # never reaches this -- no diff is produced rather than a garbled one.
 _DIFF_CAP = 4000
 
+# Output discipline (I-TOOLS-HONEST-TRUNCATION): EVERY tool that can emit an
+# unbounded amount of text caps it AND says so. Silence is the bug -- a capped
+# result that looks complete makes the agent conclude "that's all there is"
+# and reason from a half-truth. Measured before this existed: `bash` returned
+# 200,001 chars uncapped (one `cat` of a big log burned the context), and
+# `grep` returned exactly 200 of 500 real matches with NO marker at all.
+_BASH_OUT_CAP = 30000          # chars of combined stdout+stderr
+_GREP_HIT_CAP = 200            # matching lines
+_READ_LINE_CAP = 2000          # lines per read_file call without explicit limit
+
+
+def _truncated(text: str, cap: int, unit: str = "chars") -> str:
+    """PURE. Cap `text`, appending an HONEST marker when anything was dropped.
+    Keeps the HEAD (where errors and headers live) and states how much is gone
+    so the agent can decide to narrow the command instead of assuming it saw
+    everything."""
+    t = text or ""
+    if len(t) <= cap:
+        return t
+    dropped = len(t) - cap
+    return (t[:cap] +
+            f"\n\n… ⚠ TRUNCATED: showing first {cap:,} of {len(t):,} {unit} "
+            f"({dropped:,} hidden). Narrow the command (head/tail/grep) to see the rest.")
+
 
 def _unified_diff(rel: str, before: str, after: str) -> str:
     """PURE. before == after -> "" (a no-op edit shows no diff, not an empty
@@ -158,9 +182,50 @@ class LocalToolExecutor:
             text = f.read()
         st = os.stat(p)
         self._read_mtimes[p] = st.st_mtime_ns
-        n = len(text.splitlines())
+        lines = text.splitlines()
+        n = len(lines)
+
+        # Partial reads (I-TOOLS-PARTIAL-READ): before this, read_file was
+        # all-or-nothing, so inspecting lines 400-450 of a 3000-line file
+        # dragged the whole file through the context -- the reason the agent
+        # kept reaching for `sed -n` via bash instead of its own tool.
+        # 1-based, inclusive `offset`; `limit` lines from there.
+        try:
+            offset = int(a.get("offset") or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            limit = int(a.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        partial = offset > 0 or limit > 0
+
+        start = max(offset - 1, 0) if offset > 0 else 0
+        if start > n:
+            start = n
+        end = (start + limit) if limit > 0 else n
+        # Even without an explicit window, never dump an enormous file blind.
+        if not partial and n > _READ_LINE_CAP:
+            end = _READ_LINE_CAP
+        end = min(end, n)
+
+        # Byte-exact when the whole file is returned: splitlines()+join drops a
+        # trailing newline, which would corrupt edit_file's exact-match contract
+        # and rewrite files without their final newline. Only a genuine WINDOW
+        # is re-joined; a full read hands back the original text untouched.
+        if start == 0 and end == n:
+            body = text
+        else:
+            body = "\n".join(lines[start:end])
         header = self._file_header(os.path.relpath(p, self.root), n, st.st_mtime)
-        return {"ok": True, "content": header + "\n" + text,
+        if start or end < n:
+            header += (f" [showing lines {start + 1}-{end} of {n}"
+                       + ("" if partial else f"; auto-capped at {_READ_LINE_CAP} — "
+                                             f"pass offset/limit for the rest")
+                       + "]")
+        return {"ok": True, "content": header + "\n" + body,
+                "shown_from": start + 1, "shown_to": end,
+                "truncated": (start > 0 or end < n),
                 "total_lines": n, "modified": int(st.st_mtime),
                 "modified_iso": datetime.fromtimestamp(st.st_mtime)
                                         .astimezone().isoformat(timespec="seconds")}
@@ -386,7 +451,13 @@ class LocalToolExecutor:
             capture_output=True, text=True, timeout=timeout,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
-        return {"ok": proc.returncode == 0, "content": out or f"(exit {proc.returncode})"}
+        full = len(out)
+        out = _truncated(out, _BASH_OUT_CAP)
+        return {"ok": proc.returncode == 0,
+                "content": out or f"(exit {proc.returncode})",
+                "exit_code": proc.returncode,
+                "output_chars": full,
+                "truncated": full > _BASH_OUT_CAP}
 
     def _t_grep(self, a: dict) -> dict:
         from webbee.coding_context import WALK_IGNORE_DIRS
@@ -410,7 +481,79 @@ class LocalToolExecutor:
                                 hits.append(f"{rel}:{i}:{line.rstrip()}")
                 except (UnicodeDecodeError, OSError):
                     continue
-        return {"ok": True, "content": "\n".join(hits[:200]) or "(no matches)"}
+        shown = hits[:_GREP_HIT_CAP]
+        body = "\n".join(shown) or "(no matches)"
+        if len(hits) > _GREP_HIT_CAP:
+            body += (f"\n\n… ⚠ TRUNCATED: showing {_GREP_HIT_CAP} of {len(hits):,} matches "
+                     f"({len(hits) - _GREP_HIT_CAP:,} hidden). Narrow `path` or tighten the "
+                     f"pattern -- do NOT assume these are all of them.")
+        return {"ok": True, "content": body,
+                "match_count": len(hits), "shown": len(shown),
+                "truncated": len(hits) > _GREP_HIT_CAP}
+
+    def _t_list_dir(self, a: dict) -> dict:
+        """Structured directory listing -- the cheap alternative to `bash ls`.
+        Prunes dependency/build dirs (same WALK_IGNORE_DIRS as grep) so a listing
+        of a real repo root stays readable, and reports line counts for text
+        files so the agent can pick offset/limit for read_file without opening
+        the file first."""
+        from webbee.coding_context import WALK_IGNORE_DIRS
+        base = self.resolve_in_workspace(a.get("path", ".") or ".")
+        if not os.path.isdir(base):
+            return {"ok": False, "content": f"not a directory: {a.get('path', '.')}"}
+        try:
+            depth = max(1, min(int(a.get("depth") or 1), 2))
+        except (TypeError, ValueError):
+            depth = 1
+
+        rows, truncated = [], False
+        for dp, dns, fns in os.walk(base):
+            if _is_git_dir(dp):
+                dns[:] = []
+                continue
+            dns[:] = sorted(d for d in dns if d not in WALK_IGNORE_DIRS
+                            and not d.startswith("."))
+            rel_dir = os.path.relpath(dp, base)
+            cur = 1 if rel_dir == "." else rel_dir.count(os.sep) + 2
+            if cur > depth:
+                dns[:] = []
+                continue
+            for d in dns:
+                rows.append(("dir", os.path.relpath(os.path.join(dp, d), base), None, None))
+            for fn in sorted(fns):
+                if fn.startswith("."):
+                    continue
+                fp = os.path.join(dp, fn)
+                try:
+                    size = os.path.getsize(fp)
+                except OSError:
+                    continue
+                nlines = None
+                if size < 2_000_000:
+                    try:
+                        with open(fp, "r", encoding="utf-8") as f:
+                            nlines = sum(1 for _ in f)
+                    except (UnicodeDecodeError, OSError):
+                        nlines = None
+                rows.append(("file", os.path.relpath(fp, base), size, nlines))
+            if cur >= depth:
+                dns[:] = []
+            if len(rows) > 1000:
+                truncated = True
+                break
+
+        out = []
+        for kind, name, size, nlines in rows[:1000]:
+            if kind == "dir":
+                out.append(f"  {name}/")
+            else:
+                meta = f"{size:,}B" + (f", {nlines} lines" if nlines is not None else ", binary")
+                out.append(f"  {name}  ({meta})")
+        body = "\n".join(out) or "(empty)"
+        if truncated:
+            body += "\n\n… ⚠ TRUNCATED at 1000 entries — narrow `path` or use depth=1."
+        return {"ok": True, "content": body, "entry_count": len(rows),
+                "truncated": truncated}
 
     def _t_glob(self, a: dict) -> dict:
         import glob as _g
