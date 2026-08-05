@@ -1,13 +1,40 @@
 [project]
 name = "webbee"
-version = "0.3.50"
+version = "0.3.51"
 description = "Webbee 🐝 — the Imperal Cloud coding agent in your terminal"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "Imperal, Inc.", email = "hello@imperal.io" }]
-dependencies = ["imperal-mcp>=0.5.0", "imperal-sdk>=5.9.3", "httpx>=0.27", "httpx-sse>=0.4", "rich>=13.7", "prompt_toolkit>=3"]
+dependencies = [
+    "imperal-mcp>=0.5.0",
+    "imperal-sdk>=5.9.3",
+    "httpx>=0.27",
+    "httpx-sse>=0.4",
+    "rich>=13.7",
+    "prompt_toolkit>=3",
+    # --- code intelligence (CPC): the symbol/graph index is NOT optional ---
+    # Without these the indexer silently yields 0 symbols (boot.py degrades to
+    # intel=None), so repo_profile / graph_slice / search_code / impact_of_change
+    # all answer "nothing found" on a perfectly good repo. That is a broken
+    # agent, not a lean install -- so they ship by default.
+    #
+    # The marker excludes ONLY macOS-on-Intel with CPython >= 3.13, where
+    # upstream publishes no wheels (verified on PyPI: tree-sitter's last
+    # macosx_x86_64 wheel is cp312, and numpy stops there too). On that one
+    # platform the install stays green and intel fails soft to lexical+graph
+    # or off, exactly as tests/test_intel_no_numpy.py guarantees.
+    'tree-sitter>=0.23; sys_platform != "darwin" or platform_machine != "x86_64" or python_version < "3.13"',
+    'tree-sitter-python>=0.23; sys_platform != "darwin" or platform_machine != "x86_64" or python_version < "3.13"',
+    'tree-sitter-typescript>=0.23; sys_platform != "darwin" or platform_machine != "x86_64" or python_version < "3.13"',
+    'tree-sitter-javascript>=0.23; sys_platform != "darwin" or platform_machine != "x86_64" or python_version < "3.13"',
+    'watchfiles>=0.24; sys_platform != "darwin" or platform_machine != "x86_64" or python_version < "3.13"',
+    # Semantic arm: model2vec is pure-numpy (no ONNX toolchain), so it installs
+    # wherever wheels exist -- same platform carve-out as above.
+    'model2vec>=0.8.2; sys_platform != "darwin" or platform_machine != "x86_64" or python_version < "3.13"',
+    'numpy>=2; sys_platform != "darwin" or platform_machine != "x86_64" or python_version < "3.13"',
+]
 keywords = ["webbee", "imperal", "icnli", "coding-agent", "ai-agent", "cli", "terminal", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -23,8 +50,19 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-intel = ["tree-sitter>=0.23", "tree-sitter-python>=0.23", "tree-sitter-typescript>=0.23", "tree-sitter-javascript>=0.23", "watchfiles>=0.24"]
-intel-embed = ["model2vec>=0.8.2", "numpy>=2"]
+# `intel` and `intel-embed` moved into the base dependencies (see above) -- the
+# code index and its semantic arm now ship by default. These names are KEPT as
+# empty aliases so existing installs, scripts and docs that say
+# `pip install webbee[intel]` / `webbee[intel-embed]` keep working instead of
+# erroring on an unknown extra.
+intel = []
+intel-embed = []
+# Genuinely optional alternates, opt-in only:
+#  * onnx  -- fastembed/ONNX backend. embed.load_backend() prefers model2vec,
+#             so this is only reached if model2vec is unavailable.
+#  * faiss -- reserved for an ANN backend; the current vector search is exact
+#             (pure-numpy argpartition in intel/vectors.py) and does NOT
+#             import faiss, so installing this changes nothing today.
 intel-embed-onnx = ["fastembed>=0.8.0", "numpy>=2"]
 intel-embed-faiss = ["faiss-cpu>=1.14.3", "numpy>=2"]
 

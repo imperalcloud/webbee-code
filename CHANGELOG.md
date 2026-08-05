@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.51
+
+Live finding from Valentin's own terminal session: the code-intelligence index
+(CPC) was shipping **switched off by default**. `repo_profile` reported 3025
+files indexed but `symbol_kinds={}` — every `graph_slice` / `search_code` /
+`impact_of_change` answered "nothing found" on a perfectly healthy repo, so the
+agent fell back to blind `grep` over SSH.
+
+Root cause: the tree-sitter parsers lived in the OPTIONAL `[intel]` extra, and
+`boot.py` is deliberately fail-soft (`degrades to intel=None` rather than
+crashing). A base `pip install webbee` therefore produced a permanently
+symbol-less index — silently, with no error and no warning.
+
+- **The code index and its semantic arm are now BASE dependencies, not extras.**
+  `tree-sitter`, `tree-sitter-{python,typescript,javascript}`, `watchfiles`,
+  `model2vec` and `numpy` install with `pip install webbee` on every platform
+  that has wheels. A fresh install now yields a real symbol graph AND semantic
+  search out of the box (measured on a 3025-file repo: 11,592 symbols across
+  9,271 functions + 2,321 classes, 1,296 files with graph edges, 34,978
+  embedded chunks).
+- **Platform carve-out via PEP 508 markers, verified against PyPI:** macOS on
+  Intel with CPython >= 3.13 has no upstream wheels (tree-sitter's last
+  `macosx_x86_64` wheel is cp312; numpy stops there too). On that single
+  platform the new deps are skipped so `pip install` still succeeds and intel
+  fails soft, exactly as `tests/test_intel_no_numpy.py` already guaranteed.
+  Confirmed installing FULL on macOS arm64 (3.11-3.14), macOS x86_64 (<=3.12),
+  Linux x86_64 + aarch64, and Windows AMD64.
+- **`[intel]` and `[intel-embed]` are kept as empty aliases** so existing
+  installs, scripts and docs that say `pip install webbee[intel]` keep working
+  instead of failing on an unknown extra.
+- **`[intel-embed-faiss]` documented as inert:** `faiss` is not imported
+  anywhere in the client — vector search is exact, pure-numpy `argpartition` in
+  `intel/vectors.py` — so installing it changes nothing today. `[intel-embed-onnx]`
+  stays opt-in: `embed.load_backend()` prefers model2vec, so fastembed/ONNX is
+  only reached when model2vec is unavailable.
+- **Note for existing installs:** the on-disk cache is keyed by `git_ref` and
+  does NOT know it was built without parsers, so upgrading alone will not
+  refill a stale symbol-less index. Delete
+  `~/.cache/webbee/intel/<repo_key>/index.json` once (or make any commit) and
+  the next boot rebuilds it with symbols.
+
 ## 0.3.50
 
 Round 3, live feedback from Valentin after 0.3.49: the client-side tier id
