@@ -154,3 +154,23 @@ def test_apply_changes_does_not_drop_unrelated_unchanged_chunks(tmp_path):
 
     ids_after = set(svc.vectors.ids())
     assert alpha_id in ids_after
+
+
+def test_profile_carries_content_addressed_contract_summary(tmp_path):
+    (tmp_path / "api.py").write_text(
+        'from pydantic import BaseModel\n'
+        'class Item(BaseModel):\n    name: str\n'
+        '@app.post("/v1/items", response_model=Item)\n'
+        'def create(body: Item): pass\n'
+    )
+    svc = IntelService(str(tmp_path), "rk_contract", cache_dir=str(tmp_path / "c"))
+    svc.build()
+    prof = svc.repo_profile()
+    assert len(prof["content_digest"]) == 64
+    assert prof["evidence_version"] == 1
+    assert prof["endpoint_count"] == 1
+    assert prof["schema_count"] == 1
+    assert prof["contract_evidence_limit"] == 5000
+    assert prof["contract_evidence_complete"] is True
+    assert prof["endpoints"][0]["route"] == "/v1/items"
+    assert prof["schemas"][0]["name"] == "Item"

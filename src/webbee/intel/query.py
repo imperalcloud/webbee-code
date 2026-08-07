@@ -139,6 +139,53 @@ def search_code(svc, q, k: int = 20, kind=None, path_glob=None) -> dict:
     return _env(hits, has_more=len(fused) > k)
 
 
+def contract_slice(svc, query: str = "", kind: str = "all", k: int = 50) -> dict:
+    """Return bounded, source-proven endpoint/schema evidence for this repo.
+
+    Matching is deterministic substring search over route/method/handler/schema
+    names and fields. Semantic expansion belongs to `search_code`; this tool is
+    the exact contract projection used to ground cross-repo reasoning.
+    """
+    if svc is None or svc.index is None:
+        return {"ok": False, "content": "index not ready"}
+    q = (query or "").strip().lower()
+    wanted = (kind or "all").strip().lower()
+    limit = max(1, min(int(k or 50), 200))
+    items = []
+    for fi in svc.index.files.values():
+        if wanted in {"all", "endpoint"}:
+            for endpoint in fi.endpoints:
+                hay = " ".join((str(endpoint.get("method", "")),
+                                  str(endpoint.get("route", "")),
+                                  str(endpoint.get("handler", "")),
+                                  " ".join(endpoint.get("schema_refs") or ())))
+                if q and q not in hay.lower():
+                    continue
+                route = str(endpoint.get("route") or "")
+                method = str(endpoint.get("method") or "")
+                items.append({
+                    "id": f"{svc.repo_key}:endpoint:{method}:{route}:{endpoint.get('path')}:{endpoint.get('line')}",
+                    "title": f"{method} {route}", "kind": "endpoint",
+                    "repo_key": svc.repo_key, **endpoint,
+                })
+        if wanted in {"all", "schema"}:
+            for schema in fi.schemas:
+                hay = " ".join((str(schema.get("name", "")),
+                                  str(schema.get("schema_kind", "")),
+                                  str(schema.get("storage_name", "")),
+                                  " ".join(schema.get("fields") or ())))
+                if q and q not in hay.lower():
+                    continue
+                name = str(schema.get("name") or "")
+                items.append({
+                    "id": f"{svc.repo_key}:schema:{name}:{schema.get('path')}:{schema.get('line')}",
+                    "title": name, "kind": "schema",
+                    "repo_key": svc.repo_key, **schema,
+                })
+    items.sort(key=lambda x: (x["kind"], x["title"], x.get("path", ""), x.get("line", 0)))
+    return _env(items[:limit], has_more=len(items) > limit)
+
+
 def impact_of_change(svc, symbols) -> dict:
     if svc is None or svc.graph is None:
         return {"ok": False, "content": "index not ready"}

@@ -19,6 +19,9 @@ class FileIndex:
     symbols: list[Symbol] = field(default_factory=list)
     imports: list[str] = field(default_factory=list)   # imported module/path strings
     refs: list[str] = field(default_factory=list)      # referenced identifier names (for the graph)
+    content_hash: str = ""
+    endpoints: list[dict] = field(default_factory=list)
+    schemas: list[dict] = field(default_factory=list)
 
 
 @dataclass

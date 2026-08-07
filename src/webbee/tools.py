@@ -573,6 +573,9 @@ class LocalToolExecutor:
     def _t_impact_of_change(self, a: dict) -> dict:
         return self._cpc("impact_of_change", a)
 
+    def _t_contract_slice(self, a: dict) -> dict:
+        return self._cpc("contract_slice", a)
+
     def _t_orient(self, a: dict) -> dict:
         return self._cpc("orient", a)
 
@@ -611,6 +614,9 @@ class LocalToolExecutor:
                                       a.get("kind"), a.get("path_glob"))
         if verb == "impact_of_change":
             return query.impact_of_change(self.indexer, self._as_str_list(a.get("symbols")))
+        if verb == "contract_slice":
+            return query.contract_slice(self.indexer, a.get("query", ""),
+                                        a.get("kind", "all"), int(a.get("k", 50) or 50))
         if verb == "orient":
             return query.orient(self.indexer, a.get("query", ""))
         return {"ok": False, "content": f"unknown cpc verb: {verb}"}

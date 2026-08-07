@@ -4,6 +4,7 @@ cold path (cache-load or full index) off the event loop, `.apply_changes()`
 does the cheap incremental re-parse the watcher drives, and `.repo_profile()`
 is the bounded summary handed to the brain."""
 from __future__ import annotations
+import hashlib
 import os
 import subprocess
 import threading
@@ -14,6 +15,7 @@ from webbee.intel.graph import CodeGraph
 from webbee.intel.models import ProjectIndex
 
 _MAX_PROFILE_SAMPLE = 20
+_MAX_CONTRACT_EVIDENCE = 5000
 _TEST_HINT_FILES = ("pytest.ini", "tox.ini", "package.json", "Makefile", "pyproject.toml")
 
 
@@ -242,13 +244,21 @@ class IntelService:
             files = list((self.index or ProjectIndex()).files.values())
             embedded_chunks = len(self.vectors.ids()) if self.vectors else 0
             vectors_ready = self.vectors_ready
+            content_hashes = sorted(fi.content_hash for fi in files if fi.content_hash)
+            endpoints = [e for fi in files for e in fi.endpoints]
+            schemas = [x for fi in files for x in fi.schemas]
         langs = Counter(fi.lang for fi in files if fi.lang != "other")
         kinds = Counter(s.kind for fi in files for s in fi.symbols)
         top = [f"{s.name} ({s.kind}) @ {s.path}:{s.start_line}"
                for fi in files[:200] for s in fi.symbols][:_MAX_PROFILE_SAMPLE]
         hints = [h for h in _TEST_HINT_FILES if os.path.exists(os.path.join(self.root, h))]
+        digest = hashlib.sha256("".join(content_hashes).encode()).hexdigest()
+        endpoints.sort(key=lambda x: (x.get("route", ""), x.get("method", ""), x.get("path", "")))
+        schemas.sort(key=lambda x: (x.get("name", ""), x.get("path", "")))
         return {
             "repo_key": self.repo_key,
+            "evidence_version": 1,
+            "content_digest": digest,
             "file_count": len(files),
             "languages": dict(langs),
             "symbol_kinds": dict(kinds),
@@ -258,4 +268,14 @@ class IntelService:
             "git_ref": self.git_ref[:12],
             "embedded_chunks": embedded_chunks,
             "vectors_ready": vectors_ready,
+            "endpoint_count": len(endpoints),
+            "schema_count": len(schemas),
+            # Account transport stays bounded; totals + cap metadata make a
+            # large repo's projection explicitly partial rather than quietly
+            # masquerading as the complete contract graph.
+            "contract_evidence_limit": _MAX_CONTRACT_EVIDENCE,
+            "contract_evidence_complete": (len(endpoints) <= _MAX_CONTRACT_EVIDENCE
+                                           and len(schemas) <= _MAX_CONTRACT_EVIDENCE),
+            "endpoints": endpoints[:_MAX_CONTRACT_EVIDENCE],
+            "schemas": schemas[:_MAX_CONTRACT_EVIDENCE],
         }

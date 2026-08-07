@@ -23,7 +23,7 @@ from webbee.intel.models import ProjectIndex, FileIndex, Symbol
 # schema 2 holds the OLD id format, so both the index and the vector cache
 # must be treated as a clean miss and rebuilt -- bumping the version is what
 # makes load()/load_vectors() do exactly that.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _path(cache_dir: str, repo_key: str) -> str:
@@ -35,6 +35,7 @@ def save(cache_dir: str, repo_key: str, index: ProjectIndex) -> None:
     os.makedirs(os.path.dirname(p), exist_ok=True)
     data = {"schema_version": SCHEMA_VERSION, "git_ref": index.git_ref,
             "files": {k: {"path": v.path, "lang": v.lang, "imports": v.imports, "refs": v.refs,
+                          "content_hash": v.content_hash, "endpoints": v.endpoints, "schemas": v.schemas,
                           "symbols": [asdict(s) for s in v.symbols]} for k, v in index.files.items()}}
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -59,7 +60,8 @@ def load(cache_dir: str, repo_key: str, git_ref: str) -> ProjectIndex | None:
         for k, v in (data.get("files") or {}).items():
             idx.files[k] = FileIndex(path=v["path"], lang=v["lang"],
                                      imports=v.get("imports", []), refs=v.get("refs", []),
-                                     symbols=[Symbol(**s) for s in v.get("symbols", [])])
+                                     content_hash=v.get("content_hash", ""), endpoints=v.get("endpoints", []),
+                                     schemas=v.get("schemas", []), symbols=[Symbol(**s) for s in v.get("symbols", [])])
         return idx
     except Exception:
         return None  # miss, corrupt, or wrong-shape -- never raise into the caller

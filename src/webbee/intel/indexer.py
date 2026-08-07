@@ -1,6 +1,8 @@
 from __future__ import annotations
+import hashlib
 import os
 
+from webbee.intel.contracts import extract_contracts
 from webbee.intel.models import FileIndex, ProjectIndex, Symbol
 
 LANG_BY_EXT = {".py": "python", ".ts": "typescript", ".tsx": "typescript",
@@ -59,7 +61,10 @@ def _name_of(node, src_bytes: bytes) -> str:
 
 def parse_file(path: str, text: str) -> FileIndex | None:
     lang = _lang_for(path)
-    fi = FileIndex(path=path, lang=lang)
+    fi = FileIndex(path=path, lang=lang, content_hash=hashlib.sha256(text.encode("utf-8", "replace")).hexdigest())
+    endpoints, schemas = extract_contracts(path, text, lang)
+    fi.endpoints = [x.to_dict() for x in endpoints]
+    fi.schemas = [x.to_dict() for x in schemas]
     if lang == "other":
         return fi  # line-only fallback (no symbols) — never crash
     L = _get_language(lang)
