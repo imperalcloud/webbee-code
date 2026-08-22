@@ -95,10 +95,17 @@ class OutsideWorkspaceError(Exception):
 
 
 class LocalToolExecutor:
-    def __init__(self, workspace_root: str, indexer=None, shadow=None) -> None:
+    def __init__(self, workspace_root: str, indexer=None, shadow=None,
+                 client_factory=None) -> None:
         self.root = os.path.realpath(workspace_root)
         self.indexer = indexer  # IntelService (or None on a base install) -- Task 5's _t_<verb> shims read this
         self.shadow = shadow    # ShadowGit (or None) -- the reversibility time machine
+        # Zero-arg callable -> ImperalClient, used ONLY to reach the system
+        # file-reader extension when read_file meets a document or an image
+        # (native-document-read-v1). A factory, not a client, so a session with
+        # no cloud reach simply has None and that path degrades to one honest
+        # sentence instead of a crash.
+        self.client_factory = client_factory
         # abs path -> st_mtime_ns of the file as the agent last SAW it (a
         # read_file, or this executor's own write) -- powers the stale-edit
         # warning. In-instance only: one executor == one coding session.
@@ -178,8 +185,30 @@ class LocalToolExecutor:
         # into an old-string match.
         rel = self._rel(a)
         p = self.resolve_in_workspace(rel)
-        with open(p, "r", encoding="utf-8") as f:
-            text = f.read()
+
+        # native-document-read-v1: a .pdf/.docx/.xlsx/.odt or an image is NOT
+        # broken input -- it is a document the platform can already read. Before
+        # this, opening one as UTF-8 raised UnicodeDecodeError and the agent got
+        # nothing at all. Route it to the system File Reader instead; source
+        # files take the byte-exact text path below, untouched.
+        from webbee.native_files import is_native
+        if is_native(rel):
+            from webbee.native_read import read_native
+            return read_native(self.client_factory, p, rel,
+                               offset=int(a.get("offset") or 0),
+                               limit=int(a.get("limit") or 0))
+
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            # A binary whose extension did not give it away (no extension, an
+            # unusual one, a mislabelled export). Same door rather than the
+            # decode error the agent could do nothing with.
+            from webbee.native_read import read_native
+            return read_native(self.client_factory, p, rel,
+                               offset=int(a.get("offset") or 0),
+                               limit=int(a.get("limit") or 0))
         st = os.stat(p)
         self._read_mtimes[p] = st.st_mtime_ns
         lines = text.splitlines()

@@ -132,7 +132,7 @@ def test_run_ignores_foreign_turn_actionable_frames_ends_on_own_final(monkeypatc
     executor_calls = []
 
     class _RecExecutor:
-        def __init__(self, root, indexer=None, shadow=None):
+        def __init__(self, root, indexer=None, shadow=None, client_factory=None):
             pass
 
         def run(self, tool, args):
@@ -252,7 +252,7 @@ def test_own_turn_frames_with_cross_surface_origin_render_tagged_and_execute(mon
     executor_calls = []
 
     class _RecExecutor:
-        def __init__(self, root, indexer=None, shadow=None):
+        def __init__(self, root, indexer=None, shadow=None, client_factory=None):
             pass
 
         def run(self, tool, args):
@@ -681,7 +681,7 @@ def _run_consent_race(monkeypatch, fake_stream, sink, on_result_post=None):
     monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
 
     class _NoExecutor:
-        def __init__(self, root, indexer=None, shadow=None): ...
+        def __init__(self, root, indexer=None, shadow=None, client_factory=None): ...
         def run(self, tool, args): return {"ok": True, "content": "ran"}
 
     monkeypatch.setattr(T, "LocalToolExecutor", _NoExecutor)
@@ -1214,7 +1214,7 @@ def _run_queue_frames_stream(monkeypatch, frames, sink):
     monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
 
     class _NoExecutor:
-        def __init__(self, root, indexer=None, shadow=None): pass
+        def __init__(self, root, indexer=None, shadow=None, client_factory=None): pass
         def run(self, tool, args): raise AssertionError("no tools in this test")
 
     monkeypatch.setattr(T, "LocalToolExecutor", _NoExecutor)
@@ -1582,7 +1582,7 @@ def _run_attach(monkeypatch, fake_stream, sink, *, task_id="OURS", start_id="0-0
     monkeypatch.setattr(SR, "derive_session_id", fake_derive)
 
     class _RecExecutor:
-        def __init__(self, root, indexer=None, shadow=None):
+        def __init__(self, root, indexer=None, shadow=None, client_factory=None):
             pass
 
         def run(self, tool, args):
@@ -1708,7 +1708,7 @@ def test_serve_stream_calls_sink_tool_diff_when_executor_returns_a_diff(monkeypa
     monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
 
     class _RecExecutor:
-        def __init__(self, root, indexer=None, shadow=None):
+        def __init__(self, root, indexer=None, shadow=None, client_factory=None):
             pass
 
         def run(self, tool, args):
@@ -1793,7 +1793,7 @@ def test_serve_stream_skips_tool_diff_hook_gracefully_when_sink_lacks_it(monkeyp
     monkeypatch.setattr(ic, "ImperalClient", _FakeImperalClient)
 
     class _RecExecutor:
-        def __init__(self, root, indexer=None, shadow=None):
+        def __init__(self, root, indexer=None, shadow=None, client_factory=None):
             pass
 
         def run(self, tool, args):

@@ -124,6 +124,25 @@ class AgentSession:
         # mints an `-s{slot}`-suffixed session id from it.
         self.slot_id = slot_id
 
+    def _file_client_factory(self):
+        """Zero-arg callable -> ImperalClient, for read_file's native-document
+        path (native-document-read-v1).
+
+        A FACTORY, not a client: LocalToolExecutor runs in a worker thread with
+        its own event loop, so the client must be built there, not shared from
+        here. Returns None when this session has no cloud config -- the read
+        then degrades to one honest sentence instead of a crash.
+        """
+        cfg, token_provider = self.cfg, self.token_provider
+        if cfg is None or token_provider is None:
+            return None
+
+        def _make():
+            from imperal_mcp.client import ImperalClient
+            return ImperalClient(cfg, token_provider)
+
+        return _make
+
     async def _headers(self) -> dict:
         token = await self.token_provider()
         return {"Authorization": f"Bearer {token}"}
@@ -159,7 +178,8 @@ class AgentSession:
             coding_context = {**coding_context, "verify_cmd": verify_cmd}
         imperal_id = await ImperalClient(self.cfg, self.token_provider).whoami()
         executor = LocalToolExecutor(self.workspace_root, indexer=self._intel,
-                                     shadow=self._shadow)
+                                     shadow=self._shadow,
+                                     client_factory=self._file_client_factory())
 
         body = {"user_id": imperal_id, "task": task, "coding_context": coding_context}
         if surface:
@@ -224,7 +244,8 @@ class AgentSession:
             self.cfg, self.token_provider, self.workspace_root,
             marathon=marathon, slot_id=self.slot_id)
         executor = LocalToolExecutor(self.workspace_root, indexer=self._intel,
-                                     shadow=self._shadow)
+                                     shadow=self._shadow,
+                                     client_factory=self._file_client_factory())
         async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:
             return await self._serve_stream(sink, client, session_id, start_id, task_id,
                                             executor, marathon=marathon)
