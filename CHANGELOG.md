@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.53
+
+**Documents and images are now readable — natively, on every OS.**
+
+`read_file` opened every path as UTF-8. A `.docx`, `.pdf`, `.xlsx` or a
+screenshot therefore did not read *badly* — it raised `UnicodeDecodeError` and
+the agent got **nothing at all**, on macOS, Windows and Linux alike. The
+workaround was a detour through `bash` (`strings`, a converter, an OCR tool)
+that burned a turn and produced garbage.
+
+Meanwhile the platform already reads those formats: the document service on
+the API server, reached through the **system File Reader extension**, handles
+pdf/docx/doc/odt/rtf/xlsx/ods/csv/pptx/odp and images (OCR + vision). The
+capability existed; the bridge from a *local* path to it did not.
+
+That bridge is what this release adds — and nothing else:
+
+* **No parsers on the client.** Extraction stays the service's job, reached
+  only through the file-reader extension. Vendoring `pdfplumber` here would
+  have created a second, drifting source of truth.
+* **Bytes never enter the model's context.** They ride base64 in the extension
+  call — the same door the panel dropzone, Telegram and clipboard paste
+  already use — and the brain gets back a compact **text window** plus a
+  `file_id` it pages through with `offset`/`limit`. A 300-page PDF costs a
+  window, not a fortune in tokens.
+* **Source files are untouched.** They keep the byte-exact text path that
+  `edit_file`'s exact-match contract depends on. `.svg` stays text: it is
+  markup an agent edits, not a picture to OCR.
+* **Honest degradation.** Offline, no plan, service down, still extracting —
+  each is one readable sentence, never a traceback, never a silently empty
+  read.
+* **A binary that hides its type** (no extension, an odd one, a mislabelled
+  export) is caught on the decode error and routed the same way, instead of
+  failing with an error the agent can do nothing about.
+
+Two bugs found by reading real files end-to-end rather than trusting the
+schema: the extracted text arrives as `body` (reading only `text` returned a
+confident, completely empty answer), and a not-yet-extracted file answers with
+a human placeholder sentence — treating that as content made the wait exit on
+its first tick and declare a perfectly readable image empty.
+
 ## 0.3.52
 
 Tool-honesty pass. An audit of the local tools against live behaviour found
