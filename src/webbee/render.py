@@ -78,6 +78,13 @@ _ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "
 _BEE = "yellow"       # bee-yellow brand accent — logo / 🐝 / notes / busy dot ONLY
 _ACCENT = "cyan"      # interactive chrome ONLY — live caret / mode / panel url
 
+def _tier_thinking_style(tier: str) -> str:
+    if tier == "supersmart":
+        return "italic #5f87ff"
+    if tier == "ultrasmart":
+        return "italic #ff5fd7"
+    return "italic #5fd7af"
+
 # ---- welcome copy (single source of truth for the splash + its tests) ------
 # The privacy promise is claims-disciplined: every clause is TRUE and enforced
 # today — user data is never sold and never used to train any model (ours or
@@ -836,11 +843,24 @@ class RichSink:
             self.console.print(_pad(Text(_clean(text), style="dim italic")))
             self._nudge()
 
-    def thinking(self, text: str) -> None:
-        # System-driven reasoning as a distinct 💭 block — visually apart from the
-        # dim `progress` line (which stays reserved for status like low-balance).
+    def thinking(self, text: str, tier: str = "") -> None:
+        # System-driven reasoning as a distinct 💭 block — visually colored in the active
+        # model's hue family so the user immediately perceives which model is reasoning.
         if text:
-            self.console.print(_pad(Text("💭 " + _clean(text), style="italic medium_purple3")))
+            if not tier:
+                try:
+                    from webbee.tier_store import load_tier
+                    tier = load_tier() or "webbeesmart"
+                except Exception:
+                    tier = "webbeesmart"
+            style = _tier_thinking_style(tier)
+            t_now = time.strftime("%H:%M:%S")
+            line = Text.assemble(
+                (f"{t_now} ", "dim grey50"),
+                ("💭 ", "dim"),
+                (_clean(text), style),
+            )
+            self.console.print(_pad(line))
             self._nudge()
 
     def plan_blocked(self, tool: str) -> None:

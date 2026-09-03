@@ -378,9 +378,21 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     # mid-word). `width=0` (unknown/headless) keeps the full line, which is
     # also what every pre-0.3.36 caller and test sees.
     used = sum(len(t) for _, t in frags)
-    full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · Ctrl+B: model tier"
+    # Rotating tips without blinking: calm 8-second cycle across useful platform tips,
+    # always preserving essential shortcuts (Alt+↵ newline & Shift + TAB: switch mode).
+    import time as _t_tips
+    _tip_cycle = int(_t_tips.monotonic() // 8) % 4
+    if _tip_cycle == 0:
+        full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · Ctrl+B: model tier"
+    elif _tip_cycle == 1:
+        full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · Ctrl+T: new tab"
+    elif _tip_cycle == 2:
+        full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · /cost: spend"
+    else:
+        full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · /status: system"
     mid = "   ·   Alt+↵ newline · Shift + TAB: switch mode"
     short = "   ·   Alt+↵ newline"
+
     if not width or used + len(full) <= width:
         frags.append(("class:tb.dim", full))
     elif used + len(mid) <= width:
@@ -1551,22 +1563,13 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
         pane.scroll(max(1, pane._view_h) - 2)
 
     def _badge_style_override() -> str:
-        """webbee-code-badge-breathe-v1: the bottom-right version badge
-        genuinely BREATHES when we've confirmed you're up to date -- alternates
-        between the normal dim-green and a brighter green every ~1.2s, driven
-        off wall-clock time (no extra timer: `_tick_once` already invalidates
-        the app on its own 0.25/1.0s cadence while a turn is busy, and the
-        idle 1.0s cadence is exactly the tick rate this needs). Never changes
-        the TEXT or its length -- only the colour -- so the row width never
-        moves. Returns "" (no override) for every other badge state (offline/
-        unchecked/update-available) -- those keep their existing fixed colour,
-        only the reassuring "you're fine" state pulses."""
+        """webbee-code-badge-calm-v1: calm, steady version badge WITHOUT blinking
+        or flashing. Returns consistent class:tb.fresh when confirmed fresh so
+        there is zero annoying flicker."""
         us = update_state or {}
         if us.get("checked") is not True or (us.get("notice") or "").strip():
             return ""
-        import time as _t
-        phase = int(_t.monotonic() * 10) % 24
-        return "class:tb.fresh.bright" if phase < 12 else "class:tb.fresh"
+        return "class:tb.fresh"
 
     def _badge_cycle_text() -> str:
         """webbee-code-badge-cycle-v1: in the ONE honest "confirmed fresh"
