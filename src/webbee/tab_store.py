@@ -28,7 +28,6 @@ WHAT IS PERSISTED, and what deliberately is NOT:
 """
 from __future__ import annotations
 
-import json
 import os
 
 from webbee.repo import compute_repo_key, find_repo_root
@@ -88,6 +87,7 @@ def load_tabs(workspace: str) -> list:
                 if not line:
                     continue
                 try:
+                    import json
                     rec = json.loads(line)
                 except Exception:
                     continue          # one unreadable tab, not a broken layout
@@ -114,6 +114,7 @@ def save_tabs(workspace: str, tabs: list) -> None:
         for t in list(tabs)[:MAX_TABS]:
             if not isinstance(t, dict):
                 continue
+            import json
             lines.append(json.dumps(tab_record(**{k: t.get(k, "") for k in
                                                   ("session_id", "label", "mode",
                                                    "workspace", "draft")}),

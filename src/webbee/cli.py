@@ -45,7 +45,13 @@ def main(argv=None) -> None:
 
     if args.cmd == "login":
         from imperal_mcp import auth
-        print(f"Logged in as {asyncio.run(auth.login_device(cfg))}.")
+        try:
+            email = asyncio.run(auth.login_device(cfg))
+            print(f"Logged in as {email}.")
+        except KeyboardInterrupt:
+            print("\nLogin cancelled.")
+        except Exception as e:
+            print(f"Login failed: {e}")
         return
     if args.cmd == "logout":
         from imperal_mcp import auth

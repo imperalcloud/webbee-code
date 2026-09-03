@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 PYPI_URL = "https://pypi.org/pypi/webbee/json"
@@ -30,6 +29,7 @@ def _resolve_latest(current: str, *, cache_path, now: float, fetch, ttl: float) 
     cache_path = Path(cache_path)
     latest = None
     try:
+        import json
         cached = json.loads(cache_path.read_text())
         if now - float(cached.get("checked_at", 0)) < ttl:
             latest = cached.get("latest")

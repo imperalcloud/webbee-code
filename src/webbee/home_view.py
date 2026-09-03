@@ -17,6 +17,7 @@ from webbee.wallet import Wallet
 
 NOTIFY_OPTIONS = ("off", "panel", "tg", "both")
 MODE_OPTIONS = ("default", "plan", "autopilot")
+RAM_OPTIONS = ("auto", "512MB", "1GB", "2GB", "4GB", "unlimited")
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -78,6 +79,7 @@ class HomeData:
     notify_state: str = ""       # "off"|"panel"|"tg"|"both"|"" (unknown)
     remote_desc: str = ""        # human line (display)
     new_tab_mode: str = "default"
+    ram_limit: str = "auto"
     intel_enabled: bool = True
     intel_status: str = ""       # e.g. "42 files indexed" / ""
     endpoint: str = ""
@@ -112,6 +114,7 @@ class HomeActions:
     set_new_tab_mode: "Callable[[str], None]"
     top_up: "Callable[[], None]"
     open_security_docs: "Callable[[], None]"
+    set_ram_limit: "Callable[[str], None] | None" = None
     # 0.3.36 -- signing in is now possible FROM Home (/login was un-gated), so
     # the dashboard offers it as a real action instead of leaving a bare "…"
     # where the account should be. Optional: None -> the item is not offered
@@ -322,6 +325,13 @@ def build_home_model(data: "HomeData", tabs: "list[TabRow]",
         hint="←→ change the mode new tabs open in",
         left=(lambda: actions.set_new_tab_mode(_cycle(MODE_OPTIONS, data.new_tab_mode, -1))),
         right=(lambda: actions.set_new_tab_mode(_cycle(MODE_OPTIONS, data.new_tab_mode, +1)))))
+
+    ram_val = getattr(data, "ram_limit", "auto") or "auto"
+    items.append(ActionItem(
+        id="set-ram-limit", label=ram_val, value=ram_val,
+        hint="←→ configure maximum RAM cap / memory budget",
+        left=(lambda: actions.set_ram_limit(_cycle(RAM_OPTIONS, ram_val, -1)) if actions.set_ram_limit else None),
+        right=(lambda: actions.set_ram_limit(_cycle(RAM_OPTIONS, ram_val, +1)) if actions.set_ram_limit else None)))
 
     has_session = bool(tabs)
     notify_val = data.notify_state or "off"
@@ -681,6 +691,9 @@ class HomeView:
             L = [hdr("Settings")]
             ntm, nt = by_id["set-newtab-mode"], by_id["set-notify"]
             L.append([("class:home.dim", "  new tabs open in  "), act(ntm, f"[{ntm.value}]")])
+            if "set-ram-limit" in by_id:
+                srl = by_id["set-ram-limit"]
+                L.append([("class:home.dim", "  memory cap / RAM  "), act(srl, f"[{srl.value}]")])
             L.append([("class:home.dim", "  notifications     "),
                       (sfor(nt), f"[{nt.value}]", self._item_handler(nt))])
             d = self.data

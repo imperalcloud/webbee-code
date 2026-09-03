@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.0
+
+**Webbee v0.4.0: GPLv3 Open-Source Milestone, Native Multimodal Vision & Integrated Web Search.**
+
+This major milestone relicenses Webbee under the **GNU General Public License v3.0 (GPLv3)**, firmly anchoring Webbee as an open-source, community-driven coding agent within the Imperal Cloud ecosystem.
+
+### Highlights & New Capabilities
+
+* **GPLv3 Open Source**:
+  - Relicensed under GNU General Public License v3.0 (`GPL-3.0-or-later`).
+  - Your environment, your infrastructure, your code. Webbee protects user sovereignty: the model proposes, the kernel enforces, and the tool remains free and open for everyone.
+
+* **Native Multimodal Vision (`view_image`)**:
+  - Direct visual payload transmission (Base64 + MIME metadata) for vision-capable LLMs.
+  - Multimodal models inspect UI mockups, diagrams, screenshots, graphs, and app layouts with direct visual perception rather than blind text.
+  - Truthful fallback: automatically engages the platform's File Reader OCR and document context when operating with text-only models or offline sessions.
+
+* **Integrated Web Search in Terminal (`web_search` & `read_url`)**:
+  - First-class research tools directly within the terminal agent, powered by Imperal Cloud's system `web-search` extension.
+  - Zero API keys required on the local machine; results are token-budgeted and candidate-ranked.
+  - Clean web reader (`read_url`) renders external documentation and web pages into clean Markdown on demand.
+
+* **Universal Terminal Icon Alignment & Spacing**:
+  - Mathematically normalized 2-cell display width for all action and status icons (`📖`, `🔎`, `🗂️`, `✏️`, `🔧`, `⚡`, `🌐`, `📄`, `🖼️`).
+  - Perfect gutter and status indentation across macOS Terminal, iTerm2, Alacritty, Kitty, WezTerm, Linux console, and Windows Terminal.
+
+* **Enterprise Performance & Memory Management**:
+  - Configurable RAM limits in the Home view (256MB to 8GB) with intelligent LRU cache eviction.
+  - Zero-overhead granular lazy imports across all CLI and TUI subsystems for instant startup times.
+  - Non-blocking sudo and credentials prompts with seamless cross-platform clipboard support.
+
 ## 0.3.53
 
 **Documents and images are now readable — natively, on every OS.**

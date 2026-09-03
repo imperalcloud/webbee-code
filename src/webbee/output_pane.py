@@ -318,17 +318,22 @@ class OutputPane:
         """Plain text (ANSI stripped) covered by a drag. start/end are
         ABSOLUTE (line, col) pairs already resolved by the caller — no offset conversion happens here."""
         lines = self._plain_lines()
+        n = len(lines)
+        if n == 0:
+            return ""
         p1, p2 = (start, end) if start <= end else (end, start)
         (y1, x1), (y2, x2) = p1, p2
-        n = len(lines)
-        if not (0 <= y1 < n):
+        # Clamp line bounds cleanly so dragging past top (y1 < 0) or bottom (y2 >= n)
+        # seamlessly includes all lines up to the edge instead of returning empty.
+        y1 = max(0, min(y1, n - 1))
+        y2 = max(0, min(y2, n - 1))
+        if y1 > y2:
             return ""
-        y2 = min(y2, n - 1)
         if y1 == y2:
-            return lines[y1][x1:x2 + 1]
-        out = [lines[y1][x1:]]
+            return lines[y1][max(0, x1):min(len(lines[y1]), x2 + 1)]
+        out = [lines[y1][max(0, x1):]]
         out.extend(lines[y1 + 1:y2])
-        out.append(lines[y2][:x2 + 1])
+        out.append(lines[y2][:min(len(lines[y2]), x2 + 1)])
         return "\n".join(out)
 
     def _copy_selection(self, start_abs, end_abs) -> None:

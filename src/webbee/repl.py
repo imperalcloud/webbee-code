@@ -1776,6 +1776,11 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     home_view.data.new_tab_mode = m
                     home_view.notify()
 
+                def _set_ram_limit(val: str) -> None:
+                    state["ram_limit"] = val
+                    home_view.data.ram_limit = val
+                    home_view.notify()
+
                 def _set_tab_mode(idx: int, m: str) -> None:
                     if 0 <= idx < len(slots.slots):
                         set_slot_mode(slots.slots[idx], m)
@@ -1818,6 +1823,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     set_tab_mode=_set_tab_mode,
                     set_notify=_home_set_notify,
                     set_new_tab_mode=_set_new_tab_mode,
+                    set_ram_limit=_set_ram_limit,
                     top_up=_home_top_up,
                     open_security_docs=_home_security_docs,
                     sign_in=_home_sign_in,

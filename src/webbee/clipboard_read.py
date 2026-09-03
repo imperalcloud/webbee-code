@@ -23,11 +23,15 @@ class ClipboardItem:
     mime: str = ""
 
 
-def _run(cmd):
-    """Captured, bounded, never-raises subprocess. `capture_output=True` keeps
-    stdout/stderr OFF the dock's tty. Returns CompletedProcess or None."""
+def _run(cmd, timeout=2):
+    """Captured, bounded, never-raises subprocess.  keeps
+    stdout/stderr OFF the dock's tty, stdin=DEVNULL prevents interactive prompts
+    from hanging the process, and non-blocking timeout guarantees quick fail-soft."""
     try:
-        return subprocess.run(cmd, capture_output=True, timeout=2)
+        import os
+        env = os.environ.copy()
+        env.setdefault("COMMAND_MODE", "unix2003")
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, env=env)
     except Exception:
         return None
 

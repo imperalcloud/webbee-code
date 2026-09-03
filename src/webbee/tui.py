@@ -640,15 +640,23 @@ def _badge_click(pane, notice: str, forward):
     return _h
 
 
-def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event, buf=None) -> None:
+def _escape_action(sel: dict, turn: dict, is_busy, stop_turn, event, buf=None, sink=None) -> None:
     """Esc key binding (P5g). While a turn is running, STOP it — cancel the LOCAL
     turn task (what actually tears the turn down, same as Ctrl-C) AND ask the
     server to stop (so it stops spending). While idle, clear the step-selection.
+    If a consent or confirmation prompt is pending, cancel it safely without hanging.
 
     Phantom-Esc guard (2026-07-12): a mouse-report flood splits sequences —
     the ESC arrives as a lone Escape KEY and the tail lands in the input
     buffer. Residue in the buffer ⇒ this Escape is almost certainly a split
     report, not the user: clean the buffer and KEEP the turn running."""
+    if sink is not None:
+        cc = getattr(sink, "cancel_consent", None)
+        cp = getattr(sink, "consent_pending", None)
+        if callable(cp) and cp() and callable(cc):
+            cc("declined")
+            event.app.invalidate()
+            return
     if is_busy():
         if buf is not None and _MOUSE_RESIDUE.search(buf.text or ""):
             buf.text = scrub_mouse_residue(buf.text)
@@ -1516,7 +1524,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
 
     @kb.add("escape")
     def _step_clear(event):
-        _escape_action(sel, _a().turn, _busy_live, stop_turn, event, buf=buf)
+        _escape_action(sel, _a().turn, _busy_live, stop_turn, event, buf=buf, sink=getattr(_a(), "sink", None))
 
     _home_nav = Condition(lambda: _a().kind == "home" and not buf.text)
 

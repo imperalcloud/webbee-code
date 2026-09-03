@@ -1,4 +1,3 @@
-import difflib
 import os
 import re
 import subprocess
@@ -56,7 +55,8 @@ def _unified_diff(rel: str, before: str, after: str) -> str:
     silently dropped, never large enough to flood the transcript."""
     if before == after:
         return ""
-    lines = list(difflib.unified_diff(
+    from difflib import unified_diff
+    lines = list(unified_diff(
         before.splitlines(keepends=True), after.splitlines(keepends=True),
         fromfile=rel, tofile=rel, n=3))
     out = "".join(lines)
@@ -475,11 +475,52 @@ class LocalToolExecutor:
 
     def _t_bash(self, a: dict) -> dict:
         timeout = min(int(a.get("timeout", 120) or 120), 3600)
+        env = os.environ.copy()
+        # Fail-soft non-interactive environment: prevent password/sudo/pinentry prompt hangs
+        env.setdefault("DEBIAN_FRONTEND", "noninteractive")
+        env.setdefault("SUDO_ASKPASS", "/usr/bin/false")
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+
+        # Cross-platform PATH & Apple Silicon (M1-M4) vs Intel/Linux/Windows detection
+        import sys
+        if sys.platform == "darwin":
+            # Ensure both Apple Silicon (/opt/homebrew) and Intel (/usr/local) paths exist
+            paths = env.get("PATH", "").split(os.pathsep)
+            brew_paths = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/local/sbin"]
+            for bp in reversed(brew_paths):
+                if os.path.isdir(bp) and bp not in paths:
+                    paths.insert(0, bp)
+            env["PATH"] = os.pathsep.join(paths)
+        elif sys.platform.startswith("linux"):
+            paths = env.get("PATH", "").split(os.pathsep)
+            linux_paths = ["/home/linuxbrew/.linuxbrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+            for lp in reversed(linux_paths):
+                if os.path.isdir(lp) and lp not in paths:
+                    paths.insert(0, lp)
+            env["PATH"] = os.pathsep.join(paths)
+
+        # Force UTF-8 environment across all OS/locales
+        env.setdefault("LC_ALL", "en_US.UTF-8")
+        env.setdefault("LANG", "en_US.UTF-8")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+
         proc = subprocess.run(
             a["command"], shell=True, cwd=self.root,
-            capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=timeout,
+            env=env,
         )
-        out = (proc.stdout or "") + (proc.stderr or "")
+        # Robust multi-codec decode: UTF-8 -> cp1251 (Windows RU) -> latin-1 -> surrogateescape
+        raw = (proc.stdout or b"") + (proc.stderr or b"")
+        for enc in ("utf-8", "cp1251", "cp866", "latin-1"):
+            try:
+                out = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            out = raw.decode("utf-8", errors="replace")
+
         full = len(out)
         out = _truncated(out, _BASH_OUT_CAP)
         return {"ok": proc.returncode == 0,
@@ -649,3 +690,136 @@ class LocalToolExecutor:
         if verb == "orient":
             return query.orient(self.indexer, a.get("query", ""))
         return {"ok": False, "content": f"unknown cpc verb: {verb}"}
+
+    def _t_web_search(self, a: dict) -> dict:
+        """Search the web using Imperal's system web-search extension."""
+        query = str(a.get("query", "") or a.get("q", "")).strip()
+        if not query:
+            return {"ok": False, "content": "'query' argument is missing"}
+        if self.client_factory is None:
+            return {"ok": False, "content": "web search needs cloud reach, which this session cannot reach right now"}
+
+        num_results = min(max(int(a.get("num_results", 10) or 10), 1), 50)
+        params = {"query": query, "num_results": num_results}
+        if a.get("include_domains"):
+            params["include_domains"] = a["include_domains"]
+        if a.get("recency_days"):
+            params["recency_days"] = int(a["recency_days"])
+        if a.get("type"):
+            params["type"] = a["type"]
+        if a.get("category"):
+            params["category"] = a["category"]
+
+        import asyncio
+
+        async def _call():
+            client = self.client_factory()
+            return await client.run_tool("web-search", "web_search", params)
+
+        try:
+            resp = asyncio.run(_call())
+            data = resp.get("data") if isinstance(resp, dict) else getattr(resp, "data", None)
+            if not resp or (isinstance(resp, dict) and not resp.get("ok", True) and "data" not in resp):
+                msg = resp.get("error") or resp.get("message") or "Web search failed"
+                return {"ok": False, "content": f"Web search failed: {msg}"}
+
+            items = []
+            if isinstance(data, dict):
+                items = data.get("items") or data.get("results") or []
+            elif isinstance(data, list):
+                items = data
+
+            if not items:
+                return {"ok": True, "content": f"No web search results found for: {query}"}
+
+            formatted = [f"=== Web search results for '{query}' ==="]
+            for i, it in enumerate(items[:num_results], 1):
+                t = it.get("title") or "(Untitled)"
+                u = it.get("url") or ""
+                s = it.get("snippet") or it.get("description") or ""
+                formatted.append(f"{i}. {t}\n   URL: {u}\n   Snippet: {s}\n")
+            return {"ok": True, "content": "\n".join(formatted).strip()}
+        except Exception as e:
+            return {"ok": False, "content": f"Web search error: {type(e).__name__}: {e}"}
+
+    def _t_read_url(self, a: dict) -> dict:
+        """Read a web page into clean Markdown using Imperal's system web-search extension."""
+        url = str(a.get("url", "")).strip()
+        if not url:
+            return {"ok": False, "content": "'url' argument is missing"}
+        if self.client_factory is None:
+            return {"ok": False, "content": "reading web pages needs cloud reach, which this session cannot reach right now"}
+
+        params = {"url": url}
+        import asyncio
+
+        async def _call():
+            client = self.client_factory()
+            return await client.run_tool("web-search", "read_url", params)
+
+        try:
+            resp = asyncio.run(_call())
+            data = resp.get("data") if isinstance(resp, dict) else getattr(resp, "data", None)
+            if not resp or (isinstance(resp, dict) and not resp.get("ok", True) and "data" not in resp):
+                msg = resp.get("error") or resp.get("message") or "Failed to read URL"
+                return {"ok": False, "content": f"Read URL failed: {msg}"}
+
+            content = ""
+            if isinstance(data, dict):
+                content = data.get("content") or data.get("markdown") or data.get("text") or ""
+                title = data.get("title") or url
+            else:
+                content = str(data)
+                title = url
+
+            head = f"⟦ {title} · {url} ⟧"
+            return {"ok": True, "content": f"{head}\n{content}".strip()}
+        except Exception as e:
+            return {"ok": False, "content": f"Read URL error: {type(e).__name__}: {e}"}
+
+    def _t_view_image(self, a: dict) -> dict:
+        """View a local image file natively with Vision and fallback OCR/text."""
+        rel = self._rel(a)
+        p = self.resolve_in_workspace(rel)
+
+        if not os.path.exists(p):
+            return {"ok": False, "content": f"image file not found: {rel}"}
+
+        from webbee.native_files import classify, human_size
+        kind, mime = classify(rel)
+        if kind != "image":
+            # Best-effort extension guess
+            from webbee.native_files import guess_mime
+            mime = guess_mime(rel)
+
+        size = os.path.getsize(p)
+
+        import base64
+        try:
+            with open(p, "rb") as f:
+                raw_bytes = f.read()
+            b64_img = base64.b64encode(raw_bytes).decode("ascii")
+        except Exception as e:
+            return {"ok": False, "content": f"failed to read image: {e}"}
+
+        head = f"⟦ {rel} · {human_size(size)} · {mime or 'image'} ⟧"
+
+        fallback_text = ""
+        if self.client_factory is not None:
+            try:
+                from webbee.native_read import read_native
+                res = read_native(self.client_factory, p, rel)
+                if res.get("ok"):
+                    fallback_text = res.get("content", "")
+            except Exception:
+                pass
+
+        out = {
+            "ok": True,
+            "native_vision": True,
+            "mime_type": mime,
+            "image_data": b64_img,
+            "size": size,
+            "content": f"{head}\n[Native Vision Image Payload: {rel} ({human_size(size)}, {mime})]" + (f"\n\nOCR / Text Context:\n{fallback_text}" if fallback_text else "")
+        }
+        return out

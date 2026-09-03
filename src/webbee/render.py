@@ -72,8 +72,9 @@ def _clean(s) -> str:
     """Strip escape sequences + control bytes from untrusted display text."""
     return _CTRL.sub("", str(s or ""))
 
-_ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "✎",
-         "edit_file": "🔧", "bash": "⚡"}
+_ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "✏️",
+         "edit_file": "🔧", "bash": "⚡", "web_search": "🌐", "read_url": "📄",
+         "view_image": "🖼️"}
 _BEE = "yellow"       # bee-yellow brand accent — logo / 🐝 / notes / busy dot ONLY
 _ACCENT = "cyan"      # interactive chrome ONLY — live caret / mode / panel url
 
@@ -657,10 +658,16 @@ class RichSink:
                                       border_style=_BEE)))
         fut = self._arm_consent(label, sal)
         if fut is None:                       # non-tty / no running app
-            raw = self._input("     ")
+            try:
+                raw = self._input("     ")
+            except Exception:
+                raw = "declined"
         else:
             self._nudge()
-            raw = await fut
+            try:
+                raw = await fut
+            except (asyncio.CancelledError, Exception):
+                raw = "declined"
         self._consent = None
         self._consent_summary = ""
         raw = (raw or "").strip()
@@ -877,6 +884,12 @@ class RichSink:
         hands the RAW reply verbatim to the awaiting ask_consent (ICNLI)."""
         if self.consent_pending():
             self._consent.set_result(raw)
+
+    def cancel_consent(self, reason: str = "declined") -> None:
+        """Cancel or decline a pending consent prompt safely (e.g. Esc key pressed,
+        window closed, or cancelled by user). Prevents terminal freezes."""
+        if self.consent_pending():
+            self._consent.set_result(reason)
 
     # ---- internals ------------------------------------------------------
     def _arm_consent(self, label: str, summary: str):

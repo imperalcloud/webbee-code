@@ -34,6 +34,12 @@ def _local_copy_cmd() -> list[str] | None:
     SAME store every other tool here targets -- never PRIMARY by accident."""
     if sys.platform == "darwin":
         return ["pbcopy"] if shutil.which("pbcopy") else None
+    if sys.platform == "win32":
+        if shutil.which("clip.exe"):
+            return ["clip.exe"]
+        if shutil.which("powershell.exe"):
+            return ["powershell.exe", "-NoProfile", "-Command", "[Console]::Input.ReadToEnd() | Set-Clipboard"]
+        return None
     from webbee.clipboard_session import is_wayland_session
     if is_wayland_session():
         if shutil.which("wl-copy"):

@@ -95,7 +95,7 @@ def test_build_model_item_ids_and_order():
         "new-session",
         "tab-1", "tab-mode-1", "tab-close-1",
         "recent:/one", "recent:/two",
-        "set-newtab-mode", "set-notify", "top-up", "security-docs",
+        "set-newtab-mode", "set-ram-limit", "set-notify", "top-up", "security-docs",
     ]
 
 
@@ -133,7 +133,7 @@ def test_notify_disabled_and_skipped_by_nav_when_no_session():
     notify = [it for it in m.items if it.id == "set-notify"][0]
     assert notify.enabled is False
     # nav never lands on a disabled item
-    m.focus_id("set-newtab-mode")
+    m.focus_id("set-ram-limit")
     m.focus_next()   # would be set-notify, but it's disabled -> skip to top-up
     assert m.focused().id == "top-up"
     m.right()        # activating a skipped disabled control never dispatches
