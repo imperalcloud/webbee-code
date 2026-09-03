@@ -72,8 +72,8 @@ def _clean(s) -> str:
     """Strip escape sequences + control bytes from untrusted display text."""
     return _CTRL.sub("", str(s or ""))
 
-_ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️", "write_file": "✏️",
-         "edit_file": "🔧", "bash": "⚡", "web_search": "🌐", "read_url": "📄",
+_ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️ ", "write_file": "✏️",
+         "edit_file": "🔧", "bash": "⚡", "web_search": "🌐 ", "read_url": "📄",
          "view_image": "🖼️"}
 _BEE = "yellow"       # bee-yellow brand accent — logo / 🐝 / notes / busy dot ONLY
 _ACCENT = "cyan"      # interactive chrome ONLY — live caret / mode / panel url

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.1
+
+**Webbee v0.4.1: Cross-Platform Clipboard Resilience, Icon Gutter Alignment & Refined Terminal UX.**
+
+This release delivers critical fixes for cross-platform clipboard interaction across macOS and Linux (including Pop!_OS and Wayland/X11 sessions), perfect visual spacing for action icons, and smooth non-intrusive toolbar rotation.
+
+### Highlights & Improvements
+
+* **Icon Spacing & Gutter Alignment (`glob` & `web_search`)**:
+  - Fixed trailing spacing for `glob` (`🗂️ `) and `web_search` (`🌐 `) action icons in `render.py`.
+  - Action labels and status indicators no longer collide or display irregular gaps across diverse terminal font renderers.
+  - Consistent visual alignment verified across Apple Terminal, iTerm2, Pop!_OS terminal, Kitty, Alacritty, and GNOME Console.
+
+* **macOS Clipboard Screenshot & Image Paste Recovery**:
+  - Solved clipboard image reading failure where native macOS screenshots (`Cmd+Shift+4` / `Cmd+Ctrl+Shift+4`) store image data exclusively as `public.tiff` (`«class TIFF»`) rather than `«class PNGf»`.
+  - Added an automatic conversion bridge via native macOS `/usr/bin/sips` to transparently extract and convert TIFF to PNG byte streams without external dependencies.
+  - Direct paste of captured screenshots directly into the input buffer now functions reliably out of the box.
+
+* **Linux & Pop!_OS Clipboard Synchronization**:
+  - Unified session-type awareness between `clipboard.py` (copy out) and `clipboard_read.py` (read in) to eliminate selection mismatches between Wayland (`wl-clipboard`) and X11 (`xclip`/`xsel`).
+  - Added full fallback hierarchy preventing clipboard content isolation when multiple display protocols coexist.
+
+* **Calm Rotating Tips & Badge Stability**:
+  - Restructured rotating dock tips with unique leading key combinations (`Alt+↵`, `Ctrl+T`, `Ctrl+B`, `Esc`) on a calm 8-second cycle, ensuring tips remain visibly dynamic even on narrower terminal windows.
+  - Eliminated distracting strobing effects on the version freshness badge while retaining clean state transitions.
+
 ## 0.4.0
 
 **Webbee v0.4.0: GPLv3 Open-Source Milestone, Native Multimodal Vision & Integrated Web Search.**

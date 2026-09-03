@@ -144,3 +144,40 @@ def test_text_cmd_write_read_agree_on_xsel_only_box(monkeypatch):
     monkeypatch.setattr(cr.shutil, "which", only_xsel)
     assert cw._local_copy_cmd() == ["xsel", "--clipboard", "--input"]
     assert cr._text_cmd() == ["xsel", "--clipboard", "--output"]
+
+
+def test_mac_image_falls_back_from_png_to_native_tiff_and_sips(monkeypatch, tmp_path):
+    """macOS screenshots may expose public.tiff, not PNGf; native sips converts it."""
+    monkeypatch.setattr(cr.sys, "platform", "darwin")
+    monkeypatch.setattr(cr.shutil, "which", lambda name: "/usr/bin/" + name
+                        if name in {"osascript", "sips"} else None)
+
+    calls = []
+
+    def fake_tempfile(argv_for_path):
+        calls.append(argv_for_path("/tmp/item"))
+        return None if "PNGf" in calls[-1][-1] else b"TIFF"
+
+    monkeypatch.setattr(cr, "_read_via_tempfile", fake_tempfile)
+    monkeypatch.setattr(cr.tempfile, "mkstemp", lambda suffix: (99, str(tmp_path / ("in" + suffix))))
+    monkeypatch.setattr(cr.os, "close", lambda fd: None)
+    monkeypatch.setattr(cr.os.path, "getsize", lambda path: 1)
+    monkeypatch.setattr(cr, "_run", lambda cmd: _CP(0, b""))
+    monkeypatch.setattr("builtins.open", lambda path, mode: _Open(b"PNG") if "rb" in mode else _Open())
+
+    assert cr._mac_image() == b"PNG"
+    assert "PNGf" in calls[0][-1]
+    assert "TIFF" in calls[1][-1]
+
+
+class _Open:
+    def __init__(self, read=b""):
+        self._read = read
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+    def read(self):
+        return self._read
+    def write(self, data):
+        return len(data)

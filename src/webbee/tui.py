@@ -378,20 +378,26 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     # mid-word). `width=0` (unknown/headless) keeps the full line, which is
     # also what every pre-0.3.36 caller and test sees.
     used = sum(len(t) for _, t in frags)
-    # Rotating tips without blinking: calm 8-second cycle across useful platform tips,
-    # always preserving essential shortcuts (Alt+↵ newline & Shift + TAB: switch mode).
+    # Calm 8-second rotation. Each variant starts differently so it remains
+    # visibly alive even where a narrow terminal clips the tail of the hint.
     import time as _t_tips
     _tip_cycle = int(_t_tips.monotonic() // 8) % 4
     if _tip_cycle == 0:
-        full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · Ctrl+B: model tier"
+        full = "   ·   Tip: Alt+↵ adds a line · Shift + TAB: switch mode · Ctrl+B: model tier"
+        mid = "   ·   Tip: Alt+↵ adds a line · Shift + TAB: switch mode"
+        short = "   ·   Tip: Alt+↵ adds a line"
     elif _tip_cycle == 1:
-        full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · Ctrl+T: new tab"
+        full = "   ·   Tip: Ctrl+T opens a tab · Shift + TAB: switch mode · Alt+↵ adds a line"
+        mid = "   ·   Tip: Ctrl+T opens a tab · Shift + TAB: switch mode"
+        short = "   ·   Tip: Ctrl+T opens a tab"
     elif _tip_cycle == 2:
-        full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · /cost: spend"
+        full = "   ·   Tip: Ctrl+B changes model · Shift + TAB: switch mode · Alt+↵ adds a line"
+        mid = "   ·   Tip: Ctrl+B changes model · Shift + TAB: switch mode"
+        short = "   ·   Tip: Ctrl+B changes model"
     else:
-        full = "   ·   Alt+↵ newline · Shift + TAB: switch mode · /status: system"
-    mid = "   ·   Alt+↵ newline · Shift + TAB: switch mode"
-    short = "   ·   Alt+↵ newline"
+        full = "   ·   Tip: Esc stops a turn · Shift + TAB: switch mode · Alt+↵ adds a line"
+        mid = "   ·   Tip: Esc stops a turn · Shift + TAB: switch mode"
+        short = "   ·   Tip: Esc stops a turn"
 
     if not width or used + len(full) <= width:
         frags.append(("class:tb.dim", full))

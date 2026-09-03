@@ -10,8 +10,10 @@ UNVERIFIED (no Windows host to test on) — it fails soft to None."""
 from __future__ import annotations
 
 import shutil
+import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 
 
@@ -65,14 +67,52 @@ def _mac_image() -> "bytes | None":
             return p.stdout
     if not shutil.which("osascript"):
         return None
-    # osascript returns non-zero when the clipboard holds no «class PNGf» image.
-    def _argv(path):
+    # Try direct PNG class first
+    def _argv_png(path):
         script = ('set p to (POSIX file "%s")\n'
                   'set d to (the clipboard as «class PNGf»)\n'
                   'set fh to open for access p with write permission\n'
                   'write d to fh\nclose access fh' % path)
         return ["osascript", "-e", script]
-    return _read_via_tempfile(_argv)
+    data = _read_via_tempfile(_argv_png)
+    if data:
+        return data
+    # Native macOS screenshot utility and Preview put «class TIFF» into pasteboard.
+    # Read TIFF via osascript and convert to PNG via built-in /usr/bin/sips (zero dependencies).
+    def _argv_tiff(path):
+        script = ('set p to (POSIX file "%s")\n'
+                  'set d to (the clipboard as «class TIFF»)\n'
+                  'set fh to open for access p with write permission\n'
+                  'write d to fh\nclose access fh' % path)
+        return ["osascript", "-e", script]
+    tiff_data = _read_via_tempfile(_argv_tiff)
+    if not tiff_data:
+        return None
+    if not shutil.which("sips"):
+        return tiff_data
+    # Convert TIFF to PNG via sips
+    import os
+    import tempfile
+    fd_in, in_path = tempfile.mkstemp(suffix=".tiff")
+    fd_out, out_path = tempfile.mkstemp(suffix=".png")
+    os.close(fd_in)
+    os.close(fd_out)
+    try:
+        with open(in_path, "wb") as f:
+            f.write(tiff_data)
+        p_sips = _run(["sips", "-s", "format", "png", in_path, "--out", out_path])
+        if p_sips is not None and p_sips.returncode == 0 and os.path.getsize(out_path) > 0:
+            with open(out_path, "rb") as f:
+                return f.read()
+        return tiff_data
+    except Exception:
+        return tiff_data
+    finally:
+        for p in (in_path, out_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
 def _linux_image() -> "bytes | None":
