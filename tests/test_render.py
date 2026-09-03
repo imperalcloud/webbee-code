@@ -478,6 +478,15 @@ def test_progress_wraps_with_gutter():
     _assert_gutter(s.console.export_text())
 
 
+def test_thinking_uses_explicit_ultrasmart_hue():
+    """The visible thinking body must use the selected tier, never cyan chrome."""
+    s = _sink()
+    s.thinking("ultrasmart reasoning", tier="ultrasmart")
+    rendered = s.console.export_text(styles=True)
+    assert "255;95;215" in rendered or "#ff5fd7" in rendered
+    assert "ultrasmart reasoning" in rendered
+
+
 def test_thinking_wraps_with_gutter():
     s = _narrow_sink()
     s.thinking("bulk replace failed on repeated lines so a scripted targeted "

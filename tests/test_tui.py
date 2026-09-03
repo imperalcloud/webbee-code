@@ -2,7 +2,7 @@ import asyncio
 import re
 from types import SimpleNamespace
 
-from webbee.tui import next_mode, next_tier, build_toolbar
+from webbee.tui import next_mode, next_tier, previous_mode, previous_tier, build_toolbar
 
 
 def mk_slots(*, pane=None, sink=None, pending=None, turn=None, mode="default",
@@ -54,6 +54,26 @@ def ring_invariant(pane):
     this after any operation that touches the ring, the base, or a trim."""
     assert len(pane._all_lines()) == 1 + pane._ring_base_lines + sum(pane._record_lines)
 
+
+def test_previous_mode_cycles():
+    assert previous_mode("default") == "autopilot"
+    assert previous_mode("autopilot") == "plan"
+    assert previous_mode("plan") == "default"
+
+
+def test_previous_mode_unknown_resets():
+    assert previous_mode("weird") == "autopilot"
+
+
+def test_previous_tier_cycles():
+    assert previous_tier("webbeesmart") == "ultrasmart"
+    assert previous_tier("ultrasmart") == "supersmart"
+    assert previous_tier("supersmart") == "webbeesmart"
+
+
+def test_previous_tier_unknown_resets():
+    assert previous_tier("weird") == "ultrasmart"
+    assert previous_tier("") == "ultrasmart"
 
 def test_next_mode_cycles():
     assert next_mode("default") == "plan"
@@ -5406,13 +5426,20 @@ def test_home_nav_bindings_gated_on_home_and_empty_input():
         assert m in src
 
 
-def test_hover_scoping_present_and_home_only():
+def test_footer_interaction_and_hover_are_wired_for_session_tabs():
     import inspect
 
     from webbee import tui
     src = inspect.getsource(tui.run_session)
     assert "?1003h" in src and "?1003l" in src
-    assert "_sync_hover_mode" in src
+    assert '_a().kind in ("home", "session")' in src
+    for handler in ("_mode_mouse", "_tier_mouse", "_arrow_mode_prev",
+                    "_arrow_mode_next", "_arrow_tier_next", "_arrow_tier_prev"):
+        assert handler in src
+    assert 'kb.add("escape", "left", filter=_empty_session_input)' in src
+    assert 'kb.add("escape", "right", filter=_empty_session_input)' in src
+    assert 'kb.add("escape", "up", filter=_tier_active)' in src
+    assert 'kb.add("escape", "down", filter=_tier_active)' in src
 
 
 def test_tick_interval_fast_when_busy_slow_when_idle():

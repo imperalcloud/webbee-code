@@ -60,15 +60,35 @@ def _local_copy_cmd() -> list[str] | None:
 
 def _try_local_copy(text: str) -> bool:
     """Feed `text` to the local clipboard tool via stdin. True only on a
-    clean (returncode 0) run — never raises."""
+    clean (returncode 0) run — never raises.
+    On Linux desktop (Pop!_OS / GNOME / Cosmic), also mirrors to the primary
+    selection buffer so middle-click paste and Shift+Insert work seamlessly
+    alongside Ctrl+Shift+V."""
     cmd = _local_copy_cmd()
     if cmd is None:
         return False
+    payload = text.encode("utf-8", "replace")
+    success = False
     try:
-        proc = subprocess.run(cmd, input=text.encode("utf-8", "replace"), timeout=2)
-        return proc.returncode == 0
+        proc = subprocess.run(cmd, input=payload, timeout=2)
+        success = (proc.returncode == 0)
     except Exception:
-        return False
+        success = False
+
+    if success and sys.platform not in ("darwin", "win32"):
+        # Linux primary selection dual-write
+        try:
+            from webbee.clipboard_session import is_wayland_session
+            if is_wayland_session() and shutil.which("wl-copy"):
+                subprocess.run(["wl-copy", "--primary"], input=payload, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+            elif shutil.which("xclip"):
+                subprocess.run(["xclip", "-selection", "primary"], input=payload, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+            elif shutil.which("xsel"):
+                subprocess.run(["xsel", "--primary", "--input"], input=payload, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+        except Exception:
+            pass
+
+    return success
 
 
 def _osc52_emit(text: str) -> bool:

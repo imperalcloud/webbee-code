@@ -137,6 +137,10 @@ _STYLE_DICT = {
     "tb.mode.default": "#00afd7",        # default — cyan
     "tb.mode.plan": "#af87ff",           # plan — purple
     "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
+    "tb.mode.hover": "reverse bold #00afd7",  # interactive hover effect on mode chip
+    "tb.tier.hover": "reverse bold #ff5fd7",  # interactive hover effect on tier chip
+    "tb.btn": "#8a8a8a",                 # interactive button adornment (arrows/chevrons)
+    "tb.btn.hover": "#ffffff bold",      # hover adornment
     # webbee-code-tier-colors-v2: FIXED -- v1 accidentally reused the exact
     # mode colours (cyan/purple/yellow), so tiers were visually identical to
     # modes. Genuinely distinct palette now, same "calm -> bold" progression
@@ -282,6 +286,14 @@ def next_mode(mode: str) -> str:
         return _MODES[0]
 
 
+def previous_mode(mode: str) -> str:
+    """PURE. Reverse companion to :func:`next_mode`."""
+    try:
+        return _MODES[(_MODES.index(mode) - 1) % len(_MODES)]
+    except ValueError:
+        return _MODES[-1]
+
+
 def next_tier(tier: str) -> str:
     """PURE. Cycles webbeesmart -> supersmart -> ultrasmart -> webbeesmart. An unset/""
     tier (server admin default, never chosen) or any unrecognised value
@@ -291,6 +303,14 @@ def next_tier(tier: str) -> str:
         return _TIERS[(_TIERS.index(tier) + 1) % len(_TIERS)]
     except ValueError:
         return _TIERS[0]
+
+
+def previous_tier(tier: str) -> str:
+    """PURE. Reverse companion to :func:`next_tier`."""
+    try:
+        return _TIERS[(_TIERS.index(tier) - 1) % len(_TIERS)]
+    except ValueError:
+        return _TIERS[-1]
 
 
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
@@ -382,22 +402,20 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     # visibly alive even where a narrow terminal clips the tail of the hint.
     import time as _t_tips
     _tip_cycle = int(_t_tips.monotonic() // 8) % 4
+    # Rotation may change the *extra* discovery cue, never the baseline
+    # editing/navigation contract. In particular, narrow terminals must
+    # always retain Alt+Enter's newline reminder before optional hints.
+    base = "   ·   Tip: Alt+↵ newline · Shift + TAB: switch mode"
     if _tip_cycle == 0:
-        full = "   ·   Tip: Alt+↵ adds a line · Shift + TAB: switch mode · Ctrl+B: model tier"
-        mid = "   ·   Tip: Alt+↵ adds a line · Shift + TAB: switch mode"
-        short = "   ·   Tip: Alt+↵ adds a line"
+        full = base + " · Ctrl+B: model tier"
     elif _tip_cycle == 1:
-        full = "   ·   Tip: Ctrl+T opens a tab · Shift + TAB: switch mode · Alt+↵ adds a line"
-        mid = "   ·   Tip: Ctrl+T opens a tab · Shift + TAB: switch mode"
-        short = "   ·   Tip: Ctrl+T opens a tab"
+        full = base + " · Ctrl+T: new tab"
     elif _tip_cycle == 2:
-        full = "   ·   Tip: Ctrl+B changes model · Shift + TAB: switch mode · Alt+↵ adds a line"
-        mid = "   ·   Tip: Ctrl+B changes model · Shift + TAB: switch mode"
-        short = "   ·   Tip: Ctrl+B changes model"
+        full = base + " · ←/→: mode"
     else:
-        full = "   ·   Tip: Esc stops a turn · Shift + TAB: switch mode · Alt+↵ adds a line"
-        mid = "   ·   Tip: Esc stops a turn · Shift + TAB: switch mode"
-        short = "   ·   Tip: Esc stops a turn"
+        full = base + " · Esc: stop"
+    mid = base
+    short = "   ·   Tip: Alt+↵ newline"
 
     if not width or used + len(full) <= width:
         frags.append(("class:tb.dim", full))
@@ -914,7 +932,9 @@ def _restore_draft(buf, slot) -> None:
     buf.cursor_position = min(slot.draft_cursor, len(buf.text))
 
 
-async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav=None,
+async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
+                      on_cycle_prev=None, on_tier_cycle_prev=None,
+                      steps_nav=None,
                       stop_turn=None, queued_run=None, inject=None,
                       home_input=None, cancel_slot=None, ui_hooks=None,
                       on_switch=None, on_new=None, on_paste=None,
@@ -1260,17 +1280,35 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
 
     @kb.add("c-b", filter=Condition(lambda: on_tier_cycle is not None and _a().kind != "home"))
     def _tier_cycle(event):
-        # webbee-code-model-tier-slash-command-v1: Ctrl+B cycles the coding
-        # brain tier (webbeesmart -> supersmart -> ultrasmart -> webbeesmart), the exact
-        # keyboard-symmetric sibling of Shift+TAB's mode cycle above. NOT
-        # Ctrl+M: that's the same raw byte (\r, CR) as Enter on most
-        # terminals lacking CSI-u/Kitty-protocol support -- binding it would
-        # silently break message-send on the majority of real terminals.
-        # Gated off Home (no repo, nothing to persist a tier choice against)
-        # exactly like /model itself is gated (_HOME_GATED_ACTIONS).
         on_tier_cycle()
         event.app.invalidate()
 
+    # Directional arrow keys & Alt+Arrows for changing Mode & Model:
+    # 1. Left/Right: cycle mode backward / forward
+    _empty_session_input = Condition(lambda: bool(on_cycle) and _a().kind != "home" and not buf.text)
+    _tier_active = Condition(lambda: bool(on_tier_cycle) and _a().kind != "home")
+
+    @kb.add("escape", "left", filter=_empty_session_input)
+    @kb.add("left", filter=_empty_session_input)
+    def _arrow_mode_prev(event):
+        (on_cycle_prev or on_cycle)()
+        event.app.invalidate()
+
+    @kb.add("escape", "right", filter=_empty_session_input)
+    @kb.add("right", filter=_empty_session_input)
+    def _arrow_mode_next(event):
+        on_cycle()
+        event.app.invalidate()
+
+    @kb.add("escape", "up", filter=_tier_active)
+    def _arrow_tier_next(event):
+        on_tier_cycle()
+        event.app.invalidate()
+
+    @kb.add("escape", "down", filter=_tier_active)
+    def _arrow_tier_prev(event):
+        (on_tier_cycle_prev or on_tier_cycle)()
+        event.app.invalidate()
     @kb.add("c-c")
     def _interrupt(event):
         _interrupt_action(_a().turn, _busy_live, stop_turn, event)
@@ -1637,6 +1675,75 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
             return 0
         return max(1, w - len(_current_badge_text()))
 
+    _footer_hover = {"target": None}
+
+    def _mode_mouse(forward):
+        def _h(ev):
+            if forward(ev):
+                return None
+            from prompt_toolkit.mouse_events import MouseEventType
+            from prompt_toolkit.application import get_app_or_none
+            app = get_app_or_none()
+            if ev.event_type == MouseEventType.MOUSE_UP:
+                on_cycle()
+                if app:
+                    app.invalidate()
+                return None
+            elif ev.event_type == MouseEventType.SCROLL_UP:
+                on_cycle()
+                if app:
+                    app.invalidate()
+                return None
+            elif ev.event_type == MouseEventType.SCROLL_DOWN:
+                (on_cycle_prev or on_cycle)()
+                if app:
+                    app.invalidate()
+                return None
+            elif ev.event_type == MouseEventType.MOUSE_MOVE:
+                if _footer_hover["target"] != "mode":
+                    _footer_hover["target"] = "mode"
+                    if app:
+                        app.invalidate()
+                return None
+            return NotImplemented
+        return _h
+
+    def _tier_mouse(forward):
+        def _h(ev):
+            if forward(ev):
+                return None
+            from prompt_toolkit.mouse_events import MouseEventType
+            from prompt_toolkit.application import get_app_or_none
+            app = get_app_or_none()
+            if ev.event_type == MouseEventType.MOUSE_UP:
+                if on_tier_cycle is not None:
+                    on_tier_cycle()
+                if app:
+                    app.invalidate()
+                return None
+            elif ev.event_type == MouseEventType.SCROLL_UP:
+                if on_tier_cycle is not None:
+                    on_tier_cycle()
+                if app:
+                    app.invalidate()
+                return None
+            elif ev.event_type == MouseEventType.SCROLL_DOWN:
+                if on_tier_cycle_prev is not None:
+                    on_tier_cycle_prev()
+                elif on_tier_cycle is not None:
+                    on_tier_cycle()
+                if app:
+                    app.invalidate()
+                return None
+            elif ev.event_type == MouseEventType.MOUSE_MOVE:
+                if _footer_hover["target"] != "tier":
+                    _footer_hover["target"] = "tier"
+                    if app:
+                        app.invalidate()
+                return None
+            return NotImplemented
+        return _h
+
     def _toolbar():
         pane = _pane()
         f = pane.flash()
@@ -1669,21 +1776,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
                 _hint = "   ·   type a task to start · Alt/F-key+№ switch"
                 if not _w or sum(len(t) for _, t in frags) + len(_hint) <= _w:
                     frags.append(("class:tb.dim", _hint))
-        # W2 Task 8: the toolbar has no mouse handling of its own, so
-        # `_forwarding(None, pane)` is wrapped onto every fragment purely for
-        # drag-forwarding — a release that lands on the toolbar row while a
-        # pane selection is armed still completes the copy instead of
-        # sticking. `build_toolbar` itself stays untouched/2-tuple (its own
-        # unit tests unpack `for _, seg in frags`).
-        # 0.3.37: the version badge is pinned to the row's right edge HERE --
-        # one call, AFTER every state branch above has built its fragments, so
-        # idle/busy/consent/reconnecting/copy-flash/step-nav/Home all show it
-        # in the same fixed spot: the bottom-right corner of the window.
-        # 0.3.40: real, live-checked (not just displayed) + INTERACTIVE — a
-        # click on the badge flashes the upgrade command into the toolbar
-        # (via the pane's own copy-flash mechanism, reusing the exact same
-        # visual language a successful copy already uses) instead of the
-        # user having to go read the CHANGELOG to find it.
+
         us = update_state or {}
         pre_len = len(frags)
         frags = pin_version_right(frags, __version__,
@@ -1694,13 +1787,35 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
                                   text_override=_badge_cycle_text())
         fwd = _forwarding(None, pane)
         badge_appended = len(frags) > pre_len   # pin_version_right may drop it (no room)
+
+        # Build interactive toolbar fragments with mouse click, wheel, and hover
+        mode_handler = _mode_mouse(fwd)
+        tier_handler = _tier_mouse(fwd)
+
         out = []
-        for i, (style, text) in enumerate(frags):
+        in_tier = False
+        hover_tgt = _footer_hover.get("target")
+
+        for i, (style, text_val) in enumerate(frags):
             is_badge = badge_appended and i == len(frags) - 1
             if is_badge and us.get("notice"):
-                out.append((style, text, _badge_click(pane, us["notice"], fwd)))
+                out.append((style, text_val, _badge_click(pane, us["notice"], fwd)))
+            elif style.startswith("class:tb.mode."):
+                m_style = "class:tb.mode.hover" if hover_tgt == "mode" else style
+                m_text = f"◀ {text_val} ▶" if hover_tgt == "mode" else text_val
+                out.append((m_style, m_text, mode_handler))
+            elif text_val == " · model: ":
+                in_tier = True
+                out.append((style, text_val, fwd))
+            elif in_tier:
+                if style == "class:tb.dim" and text_val.startswith("   ·   "):
+                    in_tier = False
+                    out.append((style, text_val, fwd))
+                else:
+                    t_style = "class:tb.tier.hover" if hover_tgt == "tier" else style
+                    out.append((t_style, text_val, tier_handler))
             else:
-                out.append((style, text, fwd))
+                out.append((style, text_val, fwd))
         return out
 
     # Dynamic height: EXACTLY the rows the wrapped input needs (1→cap), so the
@@ -1877,15 +1992,16 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None, steps_nav
     _hover_on = {"v": None}
 
     def _sync_hover_mode() -> None:
-        # ?1003 (any-event mouse = hover) ONLY while Home is active; restore
-        # ?1002 (button-event) on leave. Idempotent: writes only on a state
-        # change. Teardown's own ?1003l (configure_mouse_modes._disable) is
-        # the belt-and-braces cleanup on exit.
+        # Hover is needed by both the Home cards and the session footer.
+        # Outside the dock we restore ?1002 button-event tracking; this keeps
+        # ordinary click, wheel, and drag-selection support without a stream
+        # of bare movement reports. The scrubber and teardown below remain
+        # the protection for terminals that split an escape report.
         from prompt_toolkit.application import get_app_or_none
         app = get_app_or_none()
         if app is None:
             return
-        want = (_a().kind == "home")
+        want = (_a().kind in ("home", "session"))
         if _hover_on["v"] == want:
             return
         out = app.output

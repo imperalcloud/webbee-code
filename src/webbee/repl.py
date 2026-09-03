@@ -12,7 +12,7 @@ from webbee.commands import CommandContext, dispatch
 from webbee.session import AgentSession
 from webbee.slots import (SessionSlot, SlotManager, WorkspaceResources,
                          auto_label, close_active, close_at, sanitize_label)
-from webbee.tui import _MODES, _TIER_DISPLAY, next_mode, next_tier
+from webbee.tui import _MODES, _TIER_DISPLAY, next_mode, next_tier, previous_mode, previous_tier
 
 
 async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
@@ -1111,6 +1111,21 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         slot = slots.active()
         set_slot_mode(slot, next_mode(slot.mode))
 
+    def _cycle_prev() -> None:
+        slot = slots.active()
+        set_slot_mode(slot, previous_mode(slot.mode))
+
+    def _tier_cycle_prev() -> None:
+        slot = slots.active()
+        new_tier = previous_tier(slot.model_tier)
+        set_slot_tier(slot, new_tier)
+        label = _TIER_DISPLAY.get(new_tier, new_tier)
+        _say(slot, f"🎛️ model tier → {label}")
+        pane = getattr(slot, "pane", None)
+        arm_glow = getattr(pane, "arm_tier_glow", None) if pane is not None else None
+        if arm_glow is not None:
+            arm_glow(new_tier)
+
     def _tier_cycle() -> None:
         # webbee-code-model-tier-slash-command-v1: Ctrl+B's keyboard sibling
         # of Shift+TAB's _cycle above -- same pattern, different store.
@@ -1927,6 +1942,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                     ok = await tui.run_session(
                         slots=slots, on_line=_on_line, on_cycle=_cycle,
                         on_tier_cycle=_tier_cycle,
+                        on_cycle_prev=_cycle_prev,
+                        on_tier_cycle_prev=_tier_cycle_prev,
                         steps_nav={
                             "count": lambda: len(getattr(slots.active().agent, "steps", [])),
                             "expand": lambda i, slot: _handle(f"/steps {i + 1}", slot),

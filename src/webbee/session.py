@@ -414,7 +414,18 @@ class AgentSession:
 
                 elif ftype == "thinking":  # system-driven reasoning -> the 💭 block
                     _text = _progress_text(frame)
-                    (getattr(sink, "thinking", None) or sink.progress)(_tag + _text if _text else "")
+                    thinking = getattr(sink, "thinking", None)
+                    if thinking is not None:
+                        # The selected tier belongs to THIS running AgentSession.
+                        # Passing it here keeps the visible reasoning colour in
+                        # lock-step with the model that produced the frame instead
+                        # of letting the renderer fall back to Smart's colour.
+                        try:
+                            thinking(_tag + _text if _text else "", tier=self.model_tier)
+                        except TypeError:
+                            thinking(_tag + _text if _text else "")
+                    else:
+                        sink.progress(_tag + _text if _text else "")
 
                 elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
                     _text = _progress_text(frame)
