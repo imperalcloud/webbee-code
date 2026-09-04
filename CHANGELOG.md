@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.2
+
+**Webbee v0.4.2: Universal `shell` Action Across Windows/macOS/Linux, Interactive TUI Modals, Cloud Voice STT & Complete Hover Engine.**
+
+This release introduces the cross-platform `shell` tool (replacing the platform-specific `bash` terminology for complete Windows, macOS, and Linux clarity), brings responsive modal dialogs (`Attach File`, `Voice Note`, `Session Menu`) with fluid mouse hover highlights and keyboard navigation, integrates zero-dependency cloud speech-to-text (STT) via `/v1/voice/stt`, and guarantees zero mouse escape garbage in the prompt.
+
+### Highlights & New Capabilities
+
+* **Universal Cross-Platform `shell` Tool**:
+  - Renamed the core command execution tool from `bash` to `shell` to accurately reflect universal execution across Windows (`cmd`/`PowerShell`), macOS (`zsh`), and Linux (`bash`/`sh`).
+  - Retains transparent backward compatibility for existing scripts, tests, and model tool calls with aliased dispatch.
+  - Automatic UTF-8 environment forcing, path resolution for Homebrew (Apple Silicon + Intel) and Linuxbrew, and fail-soft non-interactive safeguards against password prompt deadlocks.
+
+* **Interactive TUI Modals & Dialog System (`webbee.modals`)**:
+  - Responsive, centered modal dialogs for **File Attachment** (`📎`), **Voice Recording** (`🎤`), and **Session / Remote Routing** (`⋮`).
+  - Adaptive layout dynamically scaling to terminal dimensions (compact on 80-column terminals, comfortably expansive on ultra-wide screens).
+  - Native OS File Picker integration (macOS Finder, Linux Zenity/Kdialog, Windows PowerShell file dialog) with terminal list fallback.
+
+* **Fluid Mouse Hover Engine & Keyboard Navigation**:
+  - Full support for `?1003h` any-event mouse tracking during active interactive sessions.
+  - Distinct 3-tier visual hierarchy: idle controls (`class:button`), crisp white hover highlight on pointer hover (`class:button.hover`), and signature Imperal yellow keyboard focus (`class:button.focused`).
+  - Interactive hover support enabled across tabs, tab close buttons (`✕`), new tab button (`+`), prompt action icons (`📎`, `🎤`, `⋮`), and footer mode/tier chips.
+
+* **Cloud-Native Speech-To-Text (STT) Voice Notes**:
+  - In-terminal audio recording directly from default system microphones (Apple Silicon / Intel AVFoundation, Linux ALSA/PulseAudio, Windows DirectShow).
+  - Audio payloads sent to Imperal Core STT endpoint `/v1/voice/stt` and transcribed directly into clean conversational text in the input buffer before turn dispatch.
+
+* **Zero-Garbage Prompt Protection (`scrub_mouse_residue`)**:
+  - Hardened input buffer against stray VT100 / DEC escape sequence leaks (`[<...` mouse coordinates or `[I` / `[O` focus reports).
+  - Reactive `on_text_changed` filter and modal-close buffer sanitizer instantly scrub residue before rendering.
+
+---
+
 ## 0.4.1
 
 **Webbee v0.4.1: Cross-Platform Clipboard Resilience, Icon Gutter Alignment & Refined Terminal UX.**

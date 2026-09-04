@@ -73,7 +73,7 @@ def _clean(s) -> str:
     return _CTRL.sub("", str(s or ""))
 
 _ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️ ", "write_file": "✏️",
-         "edit_file": "🔧", "bash": "⚡", "web_search": "🌐 ", "read_url": "📄",
+         "edit_file": "🔧", "shell": "⚡", "bash": "⚡", "web_search": "🌐 ", "read_url": "📄",
          "view_image": "🖼️"}
 _BEE = "yellow"       # bee-yellow brand accent — logo / 🐝 / notes / busy dot ONLY
 _ACCENT = "cyan"      # interactive chrome ONLY — live caret / mode / panel url
@@ -366,7 +366,11 @@ class RichSink:
         # _pad (not a "  " prefix) so a wrapped line keeps the gutter — a bare
         # prefix indents only the first visual line and continuations hug the
         # screen edge.
-        self.console.print(_pad(Text(_clean(message), style=_BEE)))
+        t_now = time.strftime("%H:%M:%S")
+        self.console.print(_pad(Text.assemble(
+            (f"{t_now} ", "dim grey50"),
+            (_clean(message), _BEE),
+        )))
         self._nudge()
 
     def reconnecting(self, attempt: int, delay: float) -> None:
@@ -450,7 +454,11 @@ class RichSink:
         """Commit the just-sent user message as its own clearly-readable line
         with a background bar (NOT boxed like the live input) so it stands out
         as 'what I sent' in the scrollback."""
-        self.console.print(_pad(Text(" ❯ " + _clean(text) + " ", style="bold white on grey30")))
+        t_now = time.strftime("%H:%M:%S")
+        self.console.print(_pad(Text.assemble(
+            (f"{t_now} ", "dim grey50"),
+            (" ❯ " + _clean(text) + " ", "bold white on grey30"),
+        )))
         self._nudge()
 
     def remote_queued(self, origin: str, text: str, iid: str) -> None:
@@ -525,7 +533,11 @@ class RichSink:
         who = "you" if role == "user" else "🐝 webbee"
         surface = _clean(surface)
         tag = "" if surface in ("", "terminal") else f" [{surface}]"
-        self.console.print(_pad(Text(f"{who}{tag}: {_clean(text)}", style=_BEE)))
+        t_now = time.strftime("%H:%M:%S")
+        self.console.print(_pad(Text.assemble(
+            (f"{t_now} ", "dim grey50"),
+            (f"{who}{tag}: {_clean(text)}", _BEE),
+        )))
         self._nudge()
 
     def consent_dismissed(self, note: str) -> None:
@@ -600,7 +612,9 @@ class RichSink:
         # 2-col gutter (Valentin, live 2026-07-31: "клеится к самому левому
         # краю"). _pad() indents every wrapped row consistently, the same
         # fix note()/progress()/thinking() already got.
+        t_now = time.strftime("%H:%M:%S")
         self.console.print(_pad(Text.assemble(
+            (f"{t_now} ", "dim grey50"),
             (icon + " ", "dim"),
             (_clean(_tool), "dim"),
             (("  " + _clean(arg)[:trunc(w, 0.3, 40)]) if arg else "", "dim"),

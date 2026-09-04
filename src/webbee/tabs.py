@@ -1,7 +1,8 @@
 """The tab bar — THE visible piece of the browser-in-terminal (W4a Task 4;
 chip redesign 0.3.24 — Valentin: tabs were hard to notice and hard to
 control, needed clear separators and uniform spacing; precise hit-zones +
-✕/+ split + busy-close-confirm, 0.3.25, another live screenshot review).
+✕/+ split + busy-close-confirm, 0.3.25, another live screenshot review;
+neutral hover on tab chips, close buttons and new tab button, 0.4.2).
 `tab_fragments` is a PURE builder, queue_panel discipline (unit-tested
 without an Application, no prompt_toolkit import at module top — only
 inside the mouse handlers): it renders ONE row of padded CHIPS, each `"
@@ -37,11 +38,14 @@ single slot (Home alone) renders it; it IS the new look."""
 
 TAB_STYLE_ACTIVE = "class:tab.active"
 TAB_STYLE_IDLE = "class:tab"
+TAB_STYLE_HOVER = "class:tab.hover"
 TAB_STYLE_ALERT = "class:tab.alert"
 TAB_STYLE_CLOSE = "class:tab.close"
+TAB_STYLE_CLOSE_HOVER = "class:tab.close.hover"
 TAB_STYLE_CLOSE_ACTIVE = "class:tab.close.active"
 TAB_STYLE_SEP = "class:tab.sep"
 TAB_STYLE_NEW = "class:tab.new"
+TAB_STYLE_NEW_HOVER = "class:tab.new.hover"
 
 _SEP = " │ "
 _MIN_LABEL = 8
@@ -65,17 +69,23 @@ def _fit(label: str, max_len: int) -> str:
     return label[:head] + "…" + (label[-tail:] if tail > 0 else "")
 
 
-def _switch_handler(on_switch, idx: int, forward=None):
+def _forward_consumed(res) -> bool:
+    if res is NotImplemented:
+        return False
+    if res is False:
+        return False
+    return True
+
+
+def _switch_handler(on_switch, idx: int, forward=None, on_hover=None):
     def _h(mouse_event):
-        # FIX6: first refusal to a drag armed inside the output pane below
-        # (`forward` = `pane.forward_mouse(ev, clamp="top")`) -- a release
-        # that lands on the tab bar mid-drag completes the copy instead of
-        # firing a switch/close underneath it. Consumed -> None (same
-        # discipline as `tui._forwarding`); untouched -> fall through to
-        # this handler's own MOUSE_UP dispatch, unchanged.
-        if forward is not None and forward(mouse_event):
+        if forward is not None and _forward_consumed(forward(mouse_event)):
             return None
         from prompt_toolkit.mouse_events import MouseEventType
+        if mouse_event.event_type == MouseEventType.MOUSE_MOVE:
+            if on_hover is not None:
+                on_hover("tab", idx)
+            return None
         if mouse_event.event_type == MouseEventType.MOUSE_UP:
             on_switch(idx)
             return None
@@ -83,11 +93,15 @@ def _switch_handler(on_switch, idx: int, forward=None):
     return _h
 
 
-def _close_handler(on_close, idx: int, forward=None):
+def _close_handler(on_close, idx: int, forward=None, on_hover=None):
     def _h(mouse_event):
-        if forward is not None and forward(mouse_event):
+        if forward is not None and _forward_consumed(forward(mouse_event)):
             return None
         from prompt_toolkit.mouse_events import MouseEventType
+        if mouse_event.event_type == MouseEventType.MOUSE_MOVE:
+            if on_hover is not None:
+                on_hover("close", idx)
+            return None
         if mouse_event.event_type == MouseEventType.MOUSE_UP:
             on_close(idx)
             return None
@@ -95,11 +109,15 @@ def _close_handler(on_close, idx: int, forward=None):
     return _h
 
 
-def _new_handler(on_new, forward=None):
+def _new_handler(on_new, forward=None, on_hover=None):
     def _h(mouse_event):
-        if forward is not None and forward(mouse_event):
+        if forward is not None and _forward_consumed(forward(mouse_event)):
             return None
         from prompt_toolkit.mouse_events import MouseEventType
+        if mouse_event.event_type == MouseEventType.MOUSE_MOVE:
+            if on_hover is not None:
+                on_hover("new", None)
+            return None
         if mouse_event.event_type == MouseEventType.MOUSE_UP:
             if on_new is not None:
                 on_new()
@@ -118,24 +136,10 @@ def _padded_control(style: str, glyph: str, handler) -> list:
     return [(style, " "), (style, glyph, handler), (style, " ")]
 
 
-def tab_fragments(slots, *, on_switch, on_close, on_new=None, width: int = 0, forward=None):
-    """Render the row described in the module docstring. `slots` is a
-    `SlotManager` (or anything shaped like one — `.slots` + `.active_idx`);
-    slot 0 is always treated as Home. `width` (0 = unknown/no truncation —
-    headless or pre-first-render) is divided evenly across every SESSION
-    label after subtracting Home's own fixed chip text, the ` │ `
-    separators, each session tab's own marker/index/glyph/padding/close
-    overhead, and the trailing + chip's own reserved space, then each label
-    is `_fit` to its share. Returns [] only when `slots` has no slots at all
-    (never happens in practice — Home always occupies index 0). `forward`
-    (FIX6, optional — `None` preserves every existing caller's behavior
-    verbatim) is threaded into EVERY mouse handler this function hands out
-    (Home's own switch handler and the trailing + chip included) so a drag
-    armed in the output pane just below gets first refusal on every tab-bar
-    click. `on_new` (0.3.25, optional — `None` means a click on + does
-    nothing, same "no seam wired" contract as `forward`) fires with NO
-    args on a genuine click; the + chip itself is ALWAYS rendered, exactly
-    like a browser's own "open a new tab" button never disappears."""
+def tab_fragments(slots, *, on_switch, on_close, on_new=None, width: int = 0,
+                  forward=None, hover_target: str = "", hover_idx: "int | None" = None,
+                  on_hover=None):
+    """Render the row described in the module docstring with full hover support."""
     slot_list = slots.slots
     if not slot_list:
         return []
@@ -155,37 +159,53 @@ def tab_fragments(slots, *, on_switch, on_close, on_new=None, width: int = 0, fo
 
     budget = 0
     if width > 0 and pieces:
-        # Budget math treats every close control as its steady-state 3-char
-        # width (" ✕ ") regardless of the (rare, transient) armed "✕?" state
-        # -- a temporarily one-char-wider row while a busy-close confirm is
-        # armed is a non-issue, not worth complicating this arithmetic over.
         overhead = sum(len(p) + len(s) + 3 for _, _, p, s, _a in pieces)
         used = (len(home_text) + seps * len(_SEP) + overhead
                + len(_SEP) + len(_NEW_CHIP_TEXT))
         budget = max(0, width - used) // len(pieces)
 
     frags = []
-    home_style = TAB_STYLE_ACTIVE if active_idx == 0 else TAB_STYLE_IDLE
-    frags.append((home_style, home_text, _switch_handler(on_switch, 0, forward)))
+    is_home_active = (active_idx == 0)
+    is_home_hover = (hover_target == "tab" and hover_idx == 0 and not is_home_active)
+    home_style = TAB_STYLE_ACTIVE if is_home_active else (
+        TAB_STYLE_HOVER if is_home_hover else TAB_STYLE_IDLE)
+    frags.append((home_style, home_text, _switch_handler(on_switch, 0, forward, on_hover)))
 
     for idx, slot, prefix, suffix, armed in pieces:
         frags.append((TAB_STYLE_SEP, _SEP))
-        is_active = idx == active_idx
+        is_active = (idx == active_idx)
         glyph = suffix.strip()
         label = slot.label or ""
         if width > 0:
             label = _fit(label, budget)
-        style = TAB_STYLE_ACTIVE if is_active else (
-            TAB_STYLE_ALERT if glyph == "⚠" else TAB_STYLE_IDLE)
-        frags.append((style, f"{prefix}{label}{suffix}", _switch_handler(on_switch, idx, forward)))
+        is_tab_hover = (hover_target == "tab" and hover_idx == idx and not is_active)
+        if is_active:
+            style = TAB_STYLE_ACTIVE
+        elif is_tab_hover:
+            style = TAB_STYLE_HOVER
+        elif glyph == "⚠":
+            style = TAB_STYLE_ALERT
+        else:
+            style = TAB_STYLE_IDLE
+
+        frags.append((style, f"{prefix}{label}{suffix}", _switch_handler(on_switch, idx, forward, on_hover)))
+        
+        is_close_hover = (hover_target == "close" and hover_idx == idx)
         if armed:
             close_style, close_glyph = TAB_STYLE_ALERT, "✕?"
         else:
-            close_style = TAB_STYLE_CLOSE_ACTIVE if is_active else TAB_STYLE_CLOSE
+            if is_active:
+                close_style = TAB_STYLE_CLOSE_ACTIVE
+            elif is_close_hover:
+                close_style = TAB_STYLE_CLOSE_HOVER
+            else:
+                close_style = TAB_STYLE_CLOSE
             close_glyph = "✕"
-        frags.extend(_padded_control(close_style, close_glyph, _close_handler(on_close, idx, forward)))
+        frags.extend(_padded_control(close_style, close_glyph, _close_handler(on_close, idx, forward, on_hover)))
 
     frags.append((TAB_STYLE_SEP, _SEP))
-    frags.extend(_padded_control(TAB_STYLE_NEW, "+", _new_handler(on_new, forward)))
+    is_new_hover = (hover_target == "new")
+    new_style = TAB_STYLE_NEW_HOVER if is_new_hover else TAB_STYLE_NEW
+    frags.extend(_padded_control(new_style, "+", _new_handler(on_new, forward, on_hover)))
 
     return frags

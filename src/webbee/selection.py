@@ -84,6 +84,9 @@ def make_select_control(pane, FormattedTextControl, MouseEventType, MouseButton)
                 return None
             if et == MouseEventType.MOUSE_MOVE:
                 if self._down_abs is None:
+                    hook = getattr(pane, "on_mouse_move", None)
+                    if hook is not None:
+                        hook(ev)
                     return NotImplemented
                 pane._edge_ticks = 0                # a fresh MOUSE_MOVE means the pointer isn't parked
                 y = ev.position.y

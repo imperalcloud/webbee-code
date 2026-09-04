@@ -18,6 +18,7 @@ above the queue panel and tracks the current checklist live. Pure helpers
 Application is TTY/headless-smoke verified. Grounded in prompt_toolkit
 3.0.52."""
 import asyncio
+import os
 import re
 
 from webbee import __version__, sizing
@@ -112,73 +113,75 @@ _FOCUS_RESIDUE = re.compile(r"\x1b\[[IO]")
 
 
 def scrub_mouse_residue(text: str) -> str:
-    """PURE. Drop leaked mouse-report AND focus-report fragments (0.3.25);
-    everything else unchanged."""
-    text = _MOUSE_RESIDUE.sub("", text or "")
-    return _FOCUS_RESIDUE.sub("", text)
-
+    """Strip stray mouse/terminal escape sequence fragments from user text."""
+    if not text:
+        return text
+    # Strip full and partial mouse/focus escape sequences
+    t = _MOUSE_RESIDUE.sub("", text)
+    t = _FOCUS_RESIDUE.sub("", t)
+    # Strip any broken leading/trailing escape fragments
+    t = re.sub(r"\x1b\[[0-9;?<>=]*[a-zA-Z~]?", "", t)
+    t = re.sub(r"^\[<[0-9;]+[mM]", "", t)
+    return t
 
 _STYLE_DICT = {
     "frame.border": "#5f5f5f",           # muted grey chrome — furniture, not focus
     "prompt": "#00afd7 bold",            # cyan ❯ — the interactive accent
-    "tabbar": "bg:#262626",              # 0.3.25: the bar itself — a browser-look strip the chips sit on
-    "tab": "#9e9e9e",                    # idle chip — dim text, no bg (brightened a notch, 0.3.25, to read clearly on `tabbar`'s bg)
-    "tab.active": "bg:#e8a317 #1c1c1c bold",  # the ACTIVE chip — solid bee-yellow bg, dark text: unmistakable
-    "tab.alert": "#e8a317 bold",         # ⚠ consent waiting in a BACKGROUND tab — yellow text, no bg (only the active chip owns one); also the armed "✕?" busy-close-confirm glyph (0.3.25)
-    "tab.close": "#9e9e9e",              # the ✕ on a background tab — dim, closing is never the default action (brightened alongside `tab`)
-    "tab.close.active": "bg:#e8a317 #1c1c1c",  # the ✕ on the ACTIVE tab — same bg as its chip, reads as one contiguous block
-    "tab.new": "#e8a317 bold",            # 0.3.26: bee-yellow + prominent (was #6f6f6f)
-    "tab.sep": "#3a3a3a",                # the │ between tabs — dim, consistent, exactly one per pair, none at the ends
-    "tb.dim": "#8a8a8a",                 # idle chrome / secondary bits — dim
-    "tb.spin": "#e8a317 bold",           # animated spinner — bee-yellow, pops
-    "tb.working": "#e8a317",             # 'working' — yellow
-    "tb.action": "#00afd7",              # current action — cyan
-    "tb.consent": "#e8a317 bold",        # consent prompt line — yellow
+    "prompt.attach": "#9e9e9e",          # 📎 attach button
+    "prompt.attach.hover": "bg:#ffffff #181818 bold",  # 📎 attach hover
+    "prompt.mic": "#9e9e9e",             # 🎤 voice mic button
+    "prompt.mic.hover": "bg:#ffffff #181818 bold",     # 🎤 voice mic hover
+    "prompt.menu": "#9e9e9e",            # ⋮ session menu button
+    "prompt.menu.hover": "bg:#ffffff #181818 bold",    # ⋮ session menu hover
+    "tabbar": "bg:#262626",              # the bar itself
+    "tab": "#9e9e9e",                    # idle chip
+    "tab.active": "bg:#e8a317 #1c1c1c bold",  # the ACTIVE chip
+    "tab.hover": "bg:#3a3a3a #ffffff bold",   # tab hover
+    "tab.alert": "#e8a317 bold",         # ⚠ consent waiting in background tab
+    "tab.close": "#9e9e9e",              # the ✕ on a background tab
+    "tab.close.hover": "bg:#af0000 #ffffff bold",  # ✕ close hover
+    "tab.close.active": "bg:#e8a317 #1c1c1c",      # ✕ on ACTIVE tab
+    "tab.new": "#e8a317 bold",            # new tab chip
+    "tab.new.hover": "bg:#e8a317 #000000 bold",    # new tab hover
+    "tab.sep": "#3a3a3a",                # the │ between tabs
+    "tb.dim": "#8a8a8a",                 # idle chrome
+    "tb.spin": "#e8a317 bold",           # animated spinner
+    "tb.working": "#e8a317",             # 'working'
+    "tb.action": "#00afd7",              # current action
+    "tb.consent": "#e8a317 bold",        # consent prompt line
     "tb.mode.default": "#00afd7",        # default — cyan
     "tb.mode.plan": "#af87ff",           # plan — purple
-    "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow (auto-approving: caution)
-    "tb.mode.hover": "reverse bold #00afd7",  # interactive hover effect on mode chip
-    "tb.tier.hover": "reverse bold #ff5fd7",  # interactive hover effect on tier chip
-    "tb.btn": "#8a8a8a",                 # interactive button adornment (arrows/chevrons)
+    "tb.mode.autopilot": "#e8a317 bold", # autopilot — yellow
+    "tb.mode.hover": "bg:#ffffff #181818 bold",  # interactive crisp white hover on mode chip
+    "tb.tier.hover": "bg:#ffffff #222222 bold",  # interactive crisp white hover on tier chip
+    "tb.btn": "#8a8a8a",                 # interactive button adornment
     "tb.btn.hover": "#ffffff bold",      # hover adornment
-    # webbee-code-tier-colors-v2: FIXED -- v1 accidentally reused the exact
-    # mode colours (cyan/purple/yellow), so tiers were visually identical to
-    # modes. Genuinely distinct palette now, same "calm -> bold" progression
-    # but no shared hex with tb.mode.*: webbeesmart=teal-green (calm baseline),
-    # supersmart=soft blue-violet (a step up), ultrasmart=hot magenta bold
-    # (the top tier -- meant to pop, but pop DIFFERENTLY from autopilot's
-    # yellow caution so the two are never confusable at a glance).
     "tb.tier.webbeesmart": "#5fd7af",
     "tb.tier.supersmart": "#5f87ff",
     "tb.tier.ultrasmart": "#ff5fd7 bold",
-    "tb.version": "#5f5f5f",             # 0.3.37 bottom-right version badge — quietest thing on screen
-    "tb.fresh": "#5faf5f",               # 0.3.40 — badge: verified up to date (mirrors home.fresh)
-    "tb.fresh.bright": "#87ff87 bold",    # webbee-code-badge-breathe-v1 — the brighter half-beat
-                                           # of the "up to date" badge's breathing animation
-    "tb.update": "#e8a317 bold",         # 0.3.40 — badge: a newer release exists (mirrors home.update)
-    "qp.header": "#e8a317 bold",         # queue-panel header — bee-yellow, pops
-    "qp.item": "#8a8a8a italic",         # older queued rows — muted (echoes grey66)
-    "qp.last": "#e8a317",                # newest row — the one ↑ pulls
-    "qp.remote": "#af87ff italic",       # cross-surface rows — purple (not yours to pull)
-    "qp.drop": "#d75f5f",                # per-row ✕ remove button (0.3.37) — red, deliberate
-    "tb.live": "#5fd75f",                # live-session indicator (0.3.37) — green = a workflow is Running
-    "tp.header": "#e8a317 bold",         # todo-panel header — bee-yellow, pops
-    "tp.done": "#5faf5f",                # ✓ glyph — green
-    "tp.done.text": "#8a8a8a strike",    # completed text — dim + struck
-    "tp.now": "#e8a317 bold",            # ▶ current item — bee-yellow, always pops
-    "tp.item": "#8a8a8a",                # pending rows / overflow — muted
-    # W5 interactive Home dashboard
-    "home.header": "#e8a317 bold",
-    "home.value": "#ffffff bold",
-    "home.item": "#00afd7",
+    "tb.version": "#5f5f5f",             # bottom-right version badge
+    "tb.fresh": "#5faf5f",               # up-to-date badge beat 1
+    "tb.fresh.bright": "#87d787 bold",   # up-to-date badge beat 2 (breathing)
+    "home.brand": "#e8a317 bold",
+    "home.heading": "#ffffff bold",
+    "home.header": "#ffffff bold",
+    "home.value": "#e8a317 bold",
+    "home.item": "#d0d0d0",
     "home.dim": "#8a8a8a",
     "home.disabled": "#5f5f5f",
-    "home.focus": "bg:#e8a317 #1c1c1c bold",
-    "home.hint": "#00afd7",
-    "home.update": "#e8a317 bold",       # a newer release exists — bee-yellow, pops
-    "home.fresh": "#5faf5f",             # verified up to date — calm green
-    "home.spend": "#ffffff bold",        # session spend total — reads as a figure
-    "input.cont": "#5f5f5f",             # multi-line prompt continuation gutter
+    "home.focus": "bg:#e8a317 #000000 bold",
+    "home.hint": "#8a8a8a",
+    "home.action": "#00afd7",
+    "home.card": "#e8a317 bold",
+    "home.fresh": "#5faf5f",
+    "home.spend": "#ffffff bold",
+    "input.cont": "#5f5f5f",
+    "dialog": "bg:#1e1e1e #ffffff",
+    "dialog.body": "bg:#1e1e1e #cccccc",
+    "dialog.border": "#e8a317",
+    "button": "bg:#2e2e2e #ffffff",
+    "button.focused": "bg:#e8a317 #000000 bold",
+    "button.hover": "bg:#ffffff #000000 bold",
 }
 
 
@@ -633,6 +636,12 @@ def _tick_once(slots, app, is_busy, breathing=None) -> None:
         app.invalidate()
 
 
+def _forward_consumed(res) -> bool:
+    """Accepts bool or NotImplemented, returning True only when genuinely consumed.
+    Guards Python 3.14 where NotImplemented in a boolean context raises TypeError."""
+    return res is not None and res is not NotImplemented and bool(res)
+
+
 def _forwarding(handler, pane):
     """W2 Task 8: prompt_toolkit routes mouse events by pointer POSITION,
     not by who owns an in-progress drag, so a selection armed inside the
@@ -646,7 +655,12 @@ def _forwarding(handler, pane):
     NotImplemented when there's no wrapped handler at all — the toolbar's
     case, where forwarding is the ONLY behavior being added."""
     def _h(ev):
-        if pane.forward_mouse(ev):
+        from prompt_toolkit.mouse_events import MouseEventType
+        from prompt_toolkit.application import get_app_or_none
+        if ev.event_type == MouseEventType.MOUSE_MOVE:
+            # When mouse is anywhere outside mode or tier chips, clear hover instantly
+            pass
+        if _forward_consumed(pane.forward_mouse(ev)):
             return None
         if handler is None:
             return NotImplemented
@@ -666,7 +680,8 @@ def _badge_click(pane, notice: str, forward):
     happens to release on the badge must complete the copy, never fire the
     click instead."""
     def _h(ev):
-        if forward(ev):
+        res = forward(ev)
+        if res is not None and res is not NotImplemented and bool(res):
             return None
         from prompt_toolkit.mouse_events import MouseEventType
         if ev.event_type == MouseEventType.MOUSE_UP:
@@ -1055,7 +1070,17 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         s = _a().sink
         return getattr(s, name, default) if s is not None else default
 
-    buf = Buffer(multiline=False)
+    _active_modal = {"dialog": None}
+    _modal_active_cond = Condition(lambda: _active_modal.get("dialog") is not None)
+
+    def _on_buf_text_changed(b: Buffer) -> None:
+        if b.text and ("" in b.text or "[<" in b.text or ";35;" in b.text or ";0;" in b.text):
+            cleaned = scrub_mouse_residue(b.text)
+            if cleaned != b.text:
+                b.text = cleaned
+                b.cursor_position = len(cleaned)
+
+    buf = Buffer(multiline=False, read_only=_modal_active_cond, on_text_changed=_on_buf_text_changed)
 
     def _launch_inject(text):
         # Fire the fly-in as a background task (a key handler can't await):
@@ -1580,6 +1605,9 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
 
     @kb.add("escape")
     def _step_clear(event):
+        if _active_modal.get("dialog") is not None:
+            _close_modal()
+            return
         _escape_action(sel, _a().turn, _busy_live, stop_turn, event, buf=buf, sink=getattr(_a(), "sink", None))
 
     _home_nav = Condition(lambda: _a().kind == "home" and not buf.text)
@@ -1679,23 +1707,27 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
 
     def _mode_mouse(forward):
         def _h(ev):
-            if forward(ev):
+            if _forward_consumed(forward(ev)):
                 return None
             from prompt_toolkit.mouse_events import MouseEventType
             from prompt_toolkit.application import get_app_or_none
             app = get_app_or_none()
             if ev.event_type == MouseEventType.MOUSE_UP:
-                on_cycle()
+                if callable(on_cycle):
+                    on_cycle()
                 if app:
                     app.invalidate()
                 return None
             elif ev.event_type == MouseEventType.SCROLL_UP:
-                on_cycle()
+                if callable(on_cycle):
+                    on_cycle()
                 if app:
                     app.invalidate()
                 return None
             elif ev.event_type == MouseEventType.SCROLL_DOWN:
-                (on_cycle_prev or on_cycle)()
+                fn = on_cycle_prev or on_cycle
+                if callable(fn):
+                    fn()
                 if app:
                     app.invalidate()
                 return None
@@ -1710,27 +1742,27 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
 
     def _tier_mouse(forward):
         def _h(ev):
-            if forward(ev):
+            if _forward_consumed(forward(ev)):
                 return None
             from prompt_toolkit.mouse_events import MouseEventType
             from prompt_toolkit.application import get_app_or_none
             app = get_app_or_none()
             if ev.event_type == MouseEventType.MOUSE_UP:
-                if on_tier_cycle is not None:
+                if callable(on_tier_cycle):
                     on_tier_cycle()
                 if app:
                     app.invalidate()
                 return None
             elif ev.event_type == MouseEventType.SCROLL_UP:
-                if on_tier_cycle is not None:
+                if callable(on_tier_cycle):
                     on_tier_cycle()
                 if app:
                     app.invalidate()
                 return None
             elif ev.event_type == MouseEventType.SCROLL_DOWN:
-                if on_tier_cycle_prev is not None:
+                if callable(on_tier_cycle_prev):
                     on_tier_cycle_prev()
-                elif on_tier_cycle is not None:
+                elif callable(on_tier_cycle):
                     on_tier_cycle()
                 if app:
                     app.invalidate()
@@ -1796,26 +1828,59 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         in_tier = False
         hover_tgt = _footer_hover.get("target")
 
+        # Collect tier fragments to place ◀ ▶ once around the full tier label
+        tier_buffer = []
+
         for i, (style, text_val) in enumerate(frags):
             is_badge = badge_appended and i == len(frags) - 1
             if is_badge and us.get("notice"):
                 out.append((style, text_val, _badge_click(pane, us["notice"], fwd)))
             elif style.startswith("class:tb.mode."):
                 m_style = "class:tb.mode.hover" if hover_tgt == "mode" else style
-                m_text = f"◀ {text_val} ▶" if hover_tgt == "mode" else text_val
-                out.append((m_style, m_text, mode_handler))
+                if hover_tgt == "mode":
+                    out.append(("class:tb.dim", "◀ ", mode_handler))
+                    out.append((m_style, text_val, mode_handler))
+                    out.append(("class:tb.dim", " ▶", mode_handler))
+                else:
+                    out.append((m_style, text_val, mode_handler))
             elif text_val == " · model: ":
                 in_tier = True
-                out.append((style, text_val, fwd))
+                def _clear_fwd(ev):
+                    if _footer_hover.get("target") is not None:
+                        _footer_hover["target"] = None
+                        _invalidate()
+                    return fwd(ev)
+                out.append((style, text_val, _clear_fwd))
+                tier_buffer = []
             elif in_tier:
                 if style == "class:tb.dim" and text_val.startswith("   ·   "):
                     in_tier = False
+                    if tier_buffer:
+                        if hover_tgt == "tier":
+                            out.append(("class:tb.dim", "◀ ", tier_handler))
+                            tier_label = "".join(t for _, t in tier_buffer)
+                            out.append(("class:tb.tier.hover", tier_label, tier_handler))
+                            out.append(("class:tb.dim", " ▶", tier_handler))
+                        else:
+                            for t_style, t_char in tier_buffer:
+                                out.append((t_style, t_char, tier_handler))
+                        tier_buffer = []
                     out.append((style, text_val, fwd))
                 else:
-                    t_style = "class:tb.tier.hover" if hover_tgt == "tier" else style
-                    out.append((t_style, text_val, tier_handler))
+                    tier_buffer.append((style, text_val))
             else:
                 out.append((style, text_val, fwd))
+
+        if in_tier and tier_buffer:
+            if hover_tgt == "tier":
+                out.append(("class:tb.dim", "◀ ", tier_handler))
+                tier_label = "".join(t for _, t in tier_buffer)
+                out.append(("class:tb.tier.hover", tier_label, tier_handler))
+                out.append(("class:tb.dim", " ▶", tier_handler))
+            else:
+                for t_style, t_char in tier_buffer:
+                    out.append((t_style, t_char, tier_handler))
+
         return out
 
     # Dynamic height: EXACTLY the rows the wrapped input needs (1→cap), so the
@@ -1833,10 +1898,148 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         width = getattr(ri, "window_width", None) if ri is not None else None
         return input_rows(buf.text, width or (cols - 4), sizing.input_height_cap(rows))
 
+    _prompt_hover = {"target": None}
+
+    def _set_prompt_hover(target: str | None) -> None:
+        if _prompt_hover["target"] != target:
+            _prompt_hover["target"] = target
+            from prompt_toolkit.application import get_app_or_none
+            app = get_app_or_none()
+            if app is not None:
+                app.invalidate()
+
     def _prompt_fragments():
-        # The ❯ takes the CURRENT mode's colour (same classes the toolbar uses)
-        # so the mode is obvious from the input line itself, not just the toolbar.
-        return [(f"class:tb.mode.{_a().mode}", "❯ ")]
+        # Composer buttons: 📎 (Attach) | 🎤 (Voice) | ⋮ (Menu) | ❯ (Prompt indicator)
+        target = _prompt_hover.get("target")
+        return [
+            ("class:prompt.attach.hover" if target == "attach" else "class:prompt.attach", " 📎  "),
+            ("class:prompt.mic.hover" if target == "mic" else "class:prompt.mic", " 🎤  "),
+            ("class:prompt.menu.hover" if target == "menu" else "class:prompt.menu", " ⋮  "),
+            (f"class:tb.mode.{_a().mode}", "❯ "),
+        ]
+
+    def _invalidate():
+        from prompt_toolkit.application import get_app_or_none
+        app = get_app_or_none()
+        if app is not None:
+            app.invalidate()
+
+    def _set_modal_active(dialog):
+        _active_modal["dialog"] = dialog
+        from prompt_toolkit.application import get_app_or_none
+        app = get_app_or_none()
+        if app is not None and hasattr(app.output, "write_raw"):
+            try:
+                # Maintain ?1003h mouse tracking so modal buttons receive smooth hover highlights
+                app.output.write_raw("\x1b[?1003h\x1b[?1006h")
+                app.output.flush()
+            except Exception:
+                pass
+        _invalidate()
+
+    def _close_modal():
+        _active_modal["dialog"] = None
+        _hover_on["v"] = None
+        # Guarantee buffer is 100% clean of any mouse escape residue on modal close
+        buf.text = scrub_mouse_residue(buf.text)
+        buf.cursor_position = len(buf.text)
+        from prompt_toolkit.application import get_app_or_none
+        app = get_app_or_none()
+        if app is not None and hasattr(app.output, "write_raw"):
+            try:
+                # Re-sync clean hover mode without leaking mouse residue
+                app.output.write_raw("\x1b[?1003h\x1b[?1006h")
+                app.output.flush()
+            except Exception:
+                pass
+        _invalidate()
+
+    def _open_file_picker(mouse_event=None):
+        from prompt_toolkit.mouse_events import MouseEventType
+        if mouse_event is not None and mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return NotImplemented
+        from webbee.modals import create_file_picker_dialog
+        def _attach(filename: str):
+            cur = buf.text
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in (".pdf",):
+                icon = "📄"
+            elif ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                icon = "🖼️"
+            elif ext in (".docx", ".doc", ".xlsx", ".csv", ".txt", ".md"):
+                icon = "📝"
+            else:
+                icon = "📎"
+            chip = f"[{icon} @{filename}]"
+            if cur and not cur.endswith(" "):
+                buf.text = f"{cur} {chip} "
+            else:
+                buf.text = f"{cur}{chip} "
+            buf.cursor_position = len(buf.text)
+        _set_modal_active(create_file_picker_dialog(
+            workspace_path=".", on_attach=_attach, on_close=_close_modal
+        ))
+        return None
+
+    def _open_mic(mouse_event=None):
+        from prompt_toolkit.mouse_events import MouseEventType
+        if mouse_event is not None and mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return NotImplemented
+        from webbee.modals import create_mic_dialog
+        def _transcribe(text: str):
+            cur = buf.text
+            if cur and not cur.endswith(" "):
+                buf.text = f"{cur} {text} "
+            else:
+                buf.text = f"{cur}{text} "
+            buf.cursor_position = len(buf.text)
+        def _send_direct(text: str):
+            _transcribe(text)
+            _close_modal()
+            from prompt_toolkit.application import get_app_or_none
+            app = get_app_or_none()
+            if app is not None and buf.text.strip():
+                # Submit line
+                slot = _a()
+                t = _rewrap_pulled(slot.pulled, scrub_mouse_residue(buf.text))
+                buf.reset()
+                slot.draft = ""
+                slot.draft_cursor = 0
+                if t.strip():
+                    _start_turn(t)
+        _set_modal_active(create_mic_dialog(
+            on_transcribe=_transcribe, on_send_direct=_send_direct, on_close=_close_modal
+        ))
+        return None
+
+    def _open_menu(mouse_event=None):
+        from prompt_toolkit.mouse_events import MouseEventType
+        if mouse_event is not None and mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return NotImplemented
+        from webbee.modals import create_session_menu_dialog
+        def _set_rem(mode: str):
+            import asyncio
+            try:
+                slot = _a()
+                if slot and hasattr(slot, "cfg") and hasattr(slot, "session_id"):
+                    from webbee.remote import set_remote
+                    asyncio.create_task(set_remote(slot.cfg, getattr(slot, "token_provider", lambda: ""), slot.session_id, mode))
+            except Exception:
+                pass
+        cur_remote = "off"
+        try:
+            cur_remote = getattr(_a(), "remote_state", "off")
+        except Exception:
+            pass
+        def _on_reset():
+            slot = _a()
+            if slot and hasattr(slot, "session_id"):
+                slot.session_id = None
+            _close_modal()
+        _set_modal_active(create_session_menu_dialog(
+            current_remote=cur_remote, on_set_remote=_set_rem, on_reset_conversation=_on_reset, on_close=_close_modal
+        ))
+        return None
 
     def _pull_at(index: int) -> None:
         """Mouse pull (a panel row's MOUSE_UP handler, queue_panel._item_handler):
@@ -1967,21 +2170,43 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
     _orig_input_mouse_handler = _input_control.mouse_handler
 
     def _input_mouse_handler(ev):
-        # webbee-code-right-click-everywhere-v1: right-click must paste
-        # EVERYWHERE, including the prompt input box itself -- BufferControl's
-        # own mouse_handler only understands the LEFT button (click / drag
-        # to select / double-click), so a right-click on the input field used
-        # to silently do nothing at all (Valentin, live 2026-07-31: "правый
-        # клик обязан работать ... даже в поле ввода промпта"). This wraps
-        # the stock handler: RIGHT MOUSE_DOWN is intercepted for the SAME
-        # _right_paste already wired to the output pane (one paste
-        # implementation, now three entry points: pane, prompt, and
-        # Ctrl+V) -- click / drag / cursor placement / double-click all
-        # still go straight to prompt_toolkit's own handler, untouched.
         from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+        pos = getattr(ev, "position", None)
+
+        if pos is not None and getattr(pos, "y", -1) == 0:
+            x = getattr(pos, "x", -1)
+            if ev.event_type == MouseEventType.MOUSE_MOVE:
+                if 0 <= x < 5:
+                    _set_prompt_hover("attach")
+                elif 5 <= x < 10:
+                    _set_prompt_hover("mic")
+                elif 10 <= x < 14:
+                    _set_prompt_hover("menu")
+                else:
+                    _set_prompt_hover(None)
+            elif ev.event_type == MouseEventType.MOUSE_UP and ev.button == MouseButton.LEFT:
+                if 0 <= x < 5:
+                    return _open_file_picker(ev)
+                elif 5 <= x < 10:
+                    return _open_mic(ev)
+                elif 10 <= x < 14:
+                    return _open_menu(ev)
+        else:
+            if ev.event_type == MouseEventType.MOUSE_MOVE:
+                _set_prompt_hover(None)
+
+        if _active_modal.get("dialog") is not None:
+            return None
+
         if ev.event_type == MouseEventType.MOUSE_DOWN and ev.button == MouseButton.RIGHT:
             _right_paste()
             return None
+
+        # Clear footer hover when mouse is in composer/input area
+        if _footer_hover.get("target") is not None:
+            _footer_hover["target"] = None
+            _invalidate()
+
         return _orig_input_mouse_handler(ev)
 
     input_win = Window(
@@ -1992,16 +2217,12 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
     _hover_on = {"v": None}
 
     def _sync_hover_mode() -> None:
-        # Hover is needed by both the Home cards and the session footer.
-        # Outside the dock we restore ?1002 button-event tracking; this keeps
-        # ordinary click, wheel, and drag-selection support without a stream
-        # of bare movement reports. The scrubber and teardown below remain
-        # the protection for terminals that split an escape report.
+        # Enable ?1003h any-event mouse tracking for fluid hover highlights across tabs, buttons, and chips.
         from prompt_toolkit.application import get_app_or_none
         app = get_app_or_none()
         if app is None:
             return
-        want = (_a().kind in ("home", "session"))
+        want = (_a().kind in ("home", "session") and _active_modal.get("dialog") is None)
         if _hover_on["v"] == want:
             return
         out = app.output
@@ -2012,8 +2233,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
             if want:
                 out.write_raw("\x1b[?1003h")
             else:
-                out.write_raw("\x1b[?1003l")
-                out.write_raw("\x1b[?1002h")
+                out.write_raw("\x1b[?1003l\x1b[?1002h")
             out.flush()
         except Exception:
             pass
@@ -2165,18 +2385,22 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         # awaits the coroutine directly when no dock is present.
         ui_hooks["start_attach_in"] = _start_attach_in
 
+    _tab_hover = {"target": "", "idx": None}
+
+    def _set_tab_hover(target: str, idx: int | None = None) -> None:
+        if _tab_hover["target"] != target or _tab_hover["idx"] != idx:
+            _tab_hover["target"] = target
+            _tab_hover["idx"] = idx
+            _invalidate()
+
     def _tab_fragments_live():
-        # Live like _toolbar/_queue_fragments: re-invoked every redraw, so a
-        # status_glyph flip (consent armed in a background tab) or an
-        # active-slot change repaints the bar at once. forward=pane.
-        # forward_mouse(clamp="top") (FIX6): first refusal on every tab-bar
-        # click so a drag armed in the pane just below can still be
-        # extended/completed once it releases up here, mirroring the
-        # queue/todo panels' own forward=pane.forward_mouse below the pane.
         cols, _rows = sizing.get_size(get_app_or_none())
         return tab_fragments(slots, on_switch=_switch_to, on_close=_close_tab_click,
                              on_new=_new_tab_click, width=cols,
-                             forward=lambda ev: _pane().forward_mouse(ev, clamp="top"))
+                             forward=lambda ev: _pane().forward_mouse(ev, clamp="top"),
+                             hover_target=_tab_hover.get("target", ""),
+                             hover_idx=_tab_hover.get("idx"),
+                             on_hover=_set_tab_hover)
 
     # The tab bar — pinned at the very TOP, fixed height 1, NEVER hidden
     # (unlike the queue/todo panels below it): it IS the new look, even with
@@ -2197,8 +2421,16 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
     # switch repaints a different slot's transcript with no stale reference
     # left over anywhere in the tree.
     pane_container = DynamicContainer(lambda: _pane().window)
+    def _get_active_modal():
+        d = _active_modal.get("dialog")
+        if d is not None:
+            return d
+        return Window(height=0)
+
+    modal_container = DynamicContainer(_get_active_modal)
+
     root = HSplit([tab_bar, tab_bar_spacer, pane_container, todo_panel, queue_panel,
-                   Frame(input_win), toolbar])
+                   modal_container, Frame(input_win), toolbar])
     style = Style.from_dict(_STYLE_DICT)
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,
                       full_screen=True, mouse_support=True, style=style)

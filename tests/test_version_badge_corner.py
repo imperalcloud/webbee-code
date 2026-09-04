@@ -152,3 +152,24 @@ def test_badge_click_ignores_non_click_events():
     ev = MouseEvent(position=None, event_type=MouseEventType.MOUSE_DOWN,
                     button=MouseButton.LEFT, modifiers=frozenset())
     assert handler(ev) is NotImplemented
+
+
+def test_badge_click_accepts_notimplemented_from_unhandled_forwarding():
+    """An unhandled toolbar forwarding wrapper returns NotImplemented.
+    Python 3.14 rejects its boolean coercion, so the badge must fall through
+    to its own click action without crashing the input event loop."""
+    from webbee.tui import _badge_click
+    from prompt_toolkit.mouse_events import MouseEvent, MouseEventType, MouseButton
+
+    calls = []
+
+    class _FakePane:
+        def flash_note(self, msg, secs=4.0):
+            calls.append((msg, secs))
+
+    handler = _badge_click(_FakePane(), "upgrade available",
+                           forward=lambda ev: NotImplemented)
+    ev = MouseEvent(position=None, event_type=MouseEventType.MOUSE_UP,
+                    button=MouseButton.LEFT, modifiers=frozenset())
+    assert handler(ev) is None
+    assert calls == [("upgrade available", 6.0)]

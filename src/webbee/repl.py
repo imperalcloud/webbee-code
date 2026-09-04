@@ -1987,7 +1987,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                             await shared_client.aclose()
                         except Exception:
                             pass
-        except Exception:
+        except Exception as e:
+            import traceback
+            with open("/tmp/dock_boot_error.log", "w") as f:
+                traceback.print_exc(file=f)
             ok = False
         finally:
             # Restore the real fd 2 BEFORE the transcript dump / any later

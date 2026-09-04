@@ -1,11 +1,11 @@
 [project]
 name = "webbee"
-version = "0.4.1"
+version = "0.4.2"
 description = "Webbee 🐝 — the Imperal Cloud coding agent in your terminal"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 authors = [{ name = "Imperal, Inc.", email = "hello@imperal.io" }]
 dependencies = [
     "imperal-mcp>=0.5.0",
@@ -41,9 +41,12 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
     "Topic :: Software Development",
     "Topic :: Utilities",

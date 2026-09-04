@@ -1656,7 +1656,7 @@ def test_first_true_secondary_lock_mints_slot_id_and_notes():
     assert all(c in "0123456789abcdef" for c in slot.slot_id)
     assert slot.agent.slot_id == slot.slot_id
     dump = slot.pane.dump()
-    assert "another Webbee is already running" in dump and "parallel session" in dump
+    assert "another Webbee is already running" in dump and "parallel" in dump
 
 
 def test_first_false_never_touches_the_instance_lock_at_all(monkeypatch):

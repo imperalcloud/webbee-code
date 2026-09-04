@@ -73,7 +73,7 @@ Inside the interactive terminal:
 | 📖 | `read_file` | Read text and source files byte-exact, with offset/limit paging |
 | ✏️ | `write_file` | Create or overwrite files atomically with snapshot tracking |
 | 🔧 | `edit_file` / `multi_edit` | Precise find-and-replace edits across one or multiple files |
-| ⚡ | `bash` | Execute shell commands in the workspace root with real-time streaming |
+| ⚡ | `shell` | Execute shell/terminal commands across Windows, macOS and Linux with streaming |
 | 🔎 | `grep` / `glob` | Fast regex code search and workspace file pattern matching |
 | 🌐 | `web_search` / `read_url` | Search the web and read web documentation in clean Markdown |
 | 🖼️ | `view_image` | Inspect images with native multimodal vision + OCR fallback |

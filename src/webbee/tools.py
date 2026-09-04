@@ -7,7 +7,7 @@ from datetime import datetime
 
 # Tools that MUTATE the workspace -> auto-checkpoint before each run
 # (mirrors the kernel write tier; rollback snapshots itself, so not listed).
-_WRITE_TIER = {"write_file", "edit_file", "multi_edit", "bash"}
+_WRITE_TIER = {"write_file", "edit_file", "multi_edit", "shell", "bash"}
 
 # Informational stale-view warning appended to a SUCCESSFUL edit/write when
 # the on-disk file is newer than the agent's last read (external edit under
@@ -473,7 +473,14 @@ class LocalToolExecutor:
                     "rollback requires 'checkpoint' (an id, cp-N or N -- see diff/checkpoint output)"}
         return self.shadow.rollback(to)
 
+    def _t_shell(self, a: dict) -> dict:
+        return self._execute_shell(a)
+
     def _t_bash(self, a: dict) -> dict:
+        # Backward-compatible alias for shell
+        return self._execute_shell(a)
+
+    def _execute_shell(self, a: dict) -> dict:
         timeout = min(int(a.get("timeout", 120) or 120), 3600)
         env = os.environ.copy()
         # Fail-soft non-interactive environment: prevent password/sudo/pinentry prompt hangs
