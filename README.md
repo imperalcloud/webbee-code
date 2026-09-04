@@ -42,7 +42,17 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install webbee
 ```
 
-> **Note**: Python 3.11+ is required.
+### 🐍 Supported Python Versions
+
+Webbee is officially tested and supported on:
+* **Python 3.9**
+* **Python 3.10**
+* **Python 3.11**
+* **Python 3.12**
+* **Python 3.13**
+* **Python 3.14**
+
+> **Compatibility**: Requires Python `>=3.9`. Works natively across **macOS** (Apple Silicon M1–M4 & Intel), **Linux** (x86_64, aarch64), and **Windows** (PowerShell, Windows Terminal).
 
 ---
 
