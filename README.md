@@ -1,7 +1,7 @@
 # Webbee 🐝 — The Open-Source ICNLI Coding Agent
 
 [![PyPI](https://img.shields.io/pypi/v/webbee)](https://pypi.org/project/webbee/)
-[![Python](https://img.shields.io/pypi/pyversions/webbee)](https://pypi.org/project/webbee/)
+[![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776ab?logo=python&logoColor=white)](https://pypi.org/project/webbee/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-imperal.io-00afd7)](https://docs.imperal.io)
 
@@ -41,18 +41,6 @@ Or install in a Python virtual environment:
 python3 -m venv .venv && source .venv/bin/activate
 pip install webbee
 ```
-
-### 🐍 Supported Python Versions
-
-Webbee is officially tested and supported on:
-* **Python 3.9**
-* **Python 3.10**
-* **Python 3.11**
-* **Python 3.12**
-* **Python 3.13**
-* **Python 3.14**
-
-> **Compatibility**: Requires Python `>=3.9`. Works natively across **macOS** (Apple Silicon M1–M4 & Intel), **Linux** (x86_64, aarch64), and **Windows** (PowerShell, Windows Terminal).
 
 ---
 
