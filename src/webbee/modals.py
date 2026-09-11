@@ -237,7 +237,7 @@ def get_system_audio_capture_args(output_path: str) -> List[str]:
     return ["ffmpeg", "-y", "-i", "default", output_path]
 
 
-def transcribe_audio_file(audio_path: str) -> str:
+def transcribe_audio_file(audio_path: str, api_url: str = "", token: str = "") -> str:
     """Transcribe audio file via Imperal Cloud System Voice STT endpoint (/v1/voice/stt).
 
     Works on ANY OS (macOS, Linux, Windows) seamlessly without local dependencies.
@@ -249,16 +249,25 @@ def transcribe_audio_file(audio_path: str) -> str:
     try:
         import json, urllib.request, urllib.error, uuid
 
-        cred_path = os.path.expanduser("~/.imperal/credentials.json")
-        token = ""
-        if os.path.exists(cred_path):
+        if not token:
             try:
-                data = json.load(open(cred_path))
-                token = data.get("access_token", "")
+                from webbee.config import Config
+                cfg = Config.from_env()
+                cred_path = getattr(cfg, "credentials_file", "") or os.path.expanduser("~/.imperal/credentials.json")
+                if os.path.exists(cred_path):
+                    data = json.load(open(cred_path))
+                    token = data.get("access_token", "")
             except Exception:
                 pass
 
-        api_url = os.environ.get("IMPERAL_API_URL", "https://auth.imperal.io").rstrip("/")
+        if not api_url:
+            try:
+                from webbee.config import Config
+                api_url = Config.from_env().api_url
+            except Exception:
+                api_url = os.environ.get("IMPERAL_API_URL", "https://auth.imperal.io")
+
+        api_url = api_url.rstrip("/")
         url = f"{api_url}/v1/voice/stt"
 
         with open(audio_path, "rb") as f:
@@ -367,10 +376,22 @@ def create_mic_dialog(
     on_transcribe: Callable[[str], None],
     on_send_direct: Callable[[str], None],
     on_close: Callable[[], None],
+    *,
+    api_url: str = "",
+    token: str = "",
+    voice_dir: str = "",
+    on_status: Optional[Callable[[str], None]] = None,
 ) -> Dialog:
     """Create Voice Recording (STT) dialog matching standard modal design with exactly 2 buttons: [▶ Send] and [✕ Cancel]."""
+    import threading
     start_time = time.time()
-    voice_dir = os.path.expanduser("~/.webbee/voice")
+    if not voice_dir:
+        try:
+            from webbee.config import Config
+            cfg = Config.from_env()
+            voice_dir = getattr(cfg, "voice_dir", "") or os.path.expanduser("~/.webbee/voice")
+        except Exception:
+            voice_dir = os.path.expanduser("~/.webbee/voice")
     os.makedirs(voice_dir, exist_ok=True)
     voice_filename = f"voice_{int(time.time())}.wav"
     voice_path = os.path.join(voice_dir, voice_filename)
@@ -410,13 +431,55 @@ def create_mic_dialog(
     def _handle_send():
         rec_seconds = _stop_rec()
         on_close()
-        # Direct STT via Imperal Cloud STT: transcribe audio into plain text instruction
-        text = transcribe_audio_file(voice_path)
-        if text and text.strip() and text.strip().lower() not in ("you", "thank you", "silence", "."):
-            on_send_direct(text.strip())
-        else:
-            # If STT returns empty or silence, send informative turn
-            on_send_direct(f"🎙️ [Voice note: {rec_seconds}s audio — {text.strip() if text else 'audio recorded'}]")
+
+        if on_status is not None:
+            try:
+                on_status("🎙️ transcribing voice note…")
+            except Exception:
+                pass
+
+        def _worker():
+            try:
+                text = transcribe_audio_file(voice_path, api_url=api_url, token=token)
+                def _apply():
+                    if on_status is not None:
+                        try:
+                            on_status("")
+                        except Exception:
+                            pass
+                    if text and text.strip() and text.strip().lower() not in ("you", "thank you", "silence", "."):
+                        on_send_direct(text.strip())
+                    else:
+                        desc = text.strip() if text else "audio recorded"
+                        on_send_direct(f"🎙️ [Voice note: {rec_seconds}s audio — {desc}]")
+
+                app = get_app_or_none()
+                if app is not None and hasattr(app, "loop") and app.loop is not None and app.loop.is_running():
+                    app.loop.call_soon_threadsafe(_apply)
+                else:
+                    _apply()
+            except Exception:
+                app = get_app_or_none()
+                def _fail():
+                    if on_status is not None:
+                        try:
+                            on_status("")
+                        except Exception:
+                            pass
+                    on_send_direct(f"🎙️ [Voice note: {rec_seconds}s audio — transcription unavailable]")
+                if app is not None and hasattr(app, "loop") and app.loop is not None and app.loop.is_running():
+                    app.loop.call_soon_threadsafe(_fail)
+                else:
+                    _fail()
+            finally:
+                try:
+                    if os.path.exists(voice_path):
+                        os.remove(voice_path)
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
 
     def _handle_cancel():
         _stop_rec()

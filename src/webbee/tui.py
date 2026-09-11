@@ -266,20 +266,30 @@ def enable_csi_u_newline() -> bool:
     return True
 
 
-def input_rows(text: str, cols: int, cap: int) -> int:
+def input_rows(text: str, cols: int, cap: int, prompt_cols: int = 0, cont_cols: int = 0) -> int:
     """PURE row-wrap estimator behind `_input_height` (module-level so tests
     drive it directly with an injected size, mirroring repl._gate_busy).
-    Same wrap math as before the W2 proportional-sizing pass: `cols` is the
-    usable wrap width (frame + prompt already subtracted by the caller,
-    floored at 10 so a tiny/misreported width never collapses every line to
-    1-char rows); `cap` bounds growth (was: hardcoded 10, now the caller's
-    live `sizing.input_height_cap(rows)` — the box may grow to at most a
-    PROPORTION of the screen, not a fixed character count)."""
+    Accounts for prompt prefix width (BeforeInput buttons/gutter), continuation
+    prefix width, explicit newlines, and true display-cell widths (CWidth / Unicode).
+    Floored at 10 so a tiny/misreported width never collapses lines; `cap` bounds
+    growth proportionally to screen height."""
     if not text:
         return 1
     cols = max(10, cols)
-    rows = sum(max(1, -(-len(ln) // cols)) for ln in text.split("\n"))
-    return min(cap, max(1, rows))
+    from prompt_toolkit.utils import get_cwidth
+    total_rows = 0
+    for idx, ln in enumerate(text.split("\n")):
+        ln_w = sum(get_cwidth(c) for c in ln)
+        p_cols = prompt_cols if idx == 0 else 0
+        usable_first = max(10, cols - p_cols)
+        usable_cont = max(10, cols - cont_cols)
+        if ln_w <= usable_first:
+            total_rows += 1
+        else:
+            rem = ln_w - usable_first
+            cont = -(-rem // usable_cont)
+            total_rows += 1 + cont
+    return min(cap, max(1, total_rows))
 
 
 def next_mode(mode: str) -> str:
@@ -1896,7 +1906,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         cols, rows = sizing.get_size(get_app_or_none())
         ri = getattr(input_win, "render_info", None)
         width = getattr(ri, "window_width", None) if ri is not None else None
-        return input_rows(buf.text, width or (cols - 4), sizing.input_height_cap(rows))
+        return input_rows(buf.text, width or (cols - 4), sizing.input_height_cap(rows), prompt_cols=16, cont_cols=2)
 
     _prompt_hover = {"target": None}
 
@@ -2007,8 +2017,20 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
                 slot.draft_cursor = 0
                 if t.strip():
                     _start_turn(t)
+        pane = _pane()
+        def _mic_status(msg: str):
+            if pane is not None and hasattr(pane, "flash_note"):
+                pane.flash_note(msg, secs=10.0 if msg else 0.0)
+            from prompt_toolkit.application import get_app_or_none
+            app = get_app_or_none()
+            if app is not None:
+                app.invalidate()
+
         _set_modal_active(create_mic_dialog(
-            on_transcribe=_transcribe, on_send_direct=_send_direct, on_close=_close_modal
+            on_transcribe=_transcribe,
+            on_send_direct=_send_direct,
+            on_close=_close_modal,
+            on_status=_mic_status,
         ))
         return None
 

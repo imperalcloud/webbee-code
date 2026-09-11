@@ -7,6 +7,8 @@ class Config:
     panel_url: str
     intel_enabled: bool = True   # off switch for the on-disk index/watcher (env IMPERAL_INTEL=false)
     cache_dir: str = ""          # "" -> IntelService's own default (~/.cache/webbee/intel)
+    voice_dir: str = ""          # "" -> ~/.webbee/voice
+    credentials_file: str = ""   # "" -> ~/.imperal/credentials.json
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -15,4 +17,6 @@ class Config:
             panel_url=os.environ.get("IMPERAL_PANEL_URL", "https://panel.imperal.io").rstrip("/"),
             intel_enabled=os.environ.get("IMPERAL_INTEL", "true") != "false",
             cache_dir=os.environ.get("IMPERAL_INTEL_CACHE_DIR", ""),
+            voice_dir=os.environ.get("IMPERAL_VOICE_DIR", ""),
+            credentials_file=os.environ.get("IMPERAL_CREDENTIALS_FILE", ""),
         )

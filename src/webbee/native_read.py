@@ -184,9 +184,9 @@ async def read_native_async(client, abs_path: str, rel: str, *,
     if size > MAX_UPLOAD_BYTES:
         return {"ok": False, "native": True, "kind": kind,
                 "content": (f"⟦ {rel} · {human_size(size)} · {kind} ⟧\n"
-                            f"Too large to read inline (limit {human_size(MAX_UPLOAD_BYTES)}). "
-                            f"Upload it in the panel's File Reader and read it by file_id, "
-                            f"or point me at a smaller export.")}
+                            f"File size exceeds inline buffer limit ({human_size(MAX_UPLOAD_BYTES)}). "
+                            f"To prevent memory bloat and payload limits, use windowed reading with offset/limit, "
+                            f"inspect metadata via shell, or upload in the panel's File Reader to read by file_id.")}
 
     with open(abs_path, "rb") as f:
         data = f.read()
@@ -253,13 +253,33 @@ def _shape(item: dict, *, rel: str, kind: str, size: int, file_id: str,
             "truncated": has_more, "total_chars": total}
 
 
+def _run_sync(coro):
+    """Run a coroutine to completion synchronously in a worker thread.
+
+    Fully compatible across Python 3.6 - 3.14+:
+      * Python 3.7 - 3.14+: uses standard asyncio.run().
+      * Python 3.6 fallback: creates a new event loop and runs until complete.
+    """
+    if hasattr(asyncio, "run"):
+        return asyncio.run(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            loop.close()
+        finally:
+            asyncio.set_event_loop(None)
+
+
 def read_native(client_factory, abs_path: str, rel: str, *,
                 offset: int = 0, limit: int = 0) -> dict:
     """Synchronous entry point for LocalToolExecutor (which runs in a worker
     thread, never on the event loop -- so a fresh loop here is safe and cannot
     deadlock the REPL).
 
-    ``client_factory`` is a zero-arg callable returning an ImperalClient; it is
+    client_factory is a zero-arg callable returning an ImperalClient; it is
     a factory (not a client) so a plain local run with no cloud reach simply
     has none, and this whole path degrades to one honest sentence.
     """
@@ -275,8 +295,8 @@ def read_native(client_factory, abs_path: str, rel: str, *,
             f"which this session cannot reach right now.")}
     try:
         client = client_factory()
-        return asyncio.run(read_native_async(client, abs_path, rel,
-                                             offset=offset, limit=limit))
+        return _run_sync(read_native_async(client, abs_path, rel,
+                                           offset=offset, limit=limit))
     except Exception as e:  # noqa: BLE001 -- a read must never crash the turn
         return {"ok": False, "native": True, "kind": kind, "content": (
             f"⟦ {rel} · {human_size(size)} · {kind} ⟧\n"

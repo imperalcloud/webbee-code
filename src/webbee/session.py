@@ -132,13 +132,41 @@ class AgentSession:
         its own event loop, so the client must be built there, not shared from
         here. Returns None when this session has no cloud config -- the read
         then degrades to one honest sentence instead of a crash.
+
+        Threadsafe Loop-Bridge (Python 3.6 - 3.14+):
+        token_provider is bound to the main event loop's lock. We bridge it across
+        thread boundaries via asyncio.run_coroutine_threadsafe so worker event loops
+        never raise RuntimeError: Lock is bound to a different event loop.
         """
         cfg, token_provider = self.cfg, self.token_provider
         if cfg is None or token_provider is None:
             return None
 
+        import asyncio
+
+        try:
+            main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                main_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                main_loop = None
+
         def _make():
             from imperal_mcp.client import ImperalClient
+
+            if main_loop is not None and main_loop.is_running():
+                async def _bridged_token_provider() -> str:
+                    try:
+                        current_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        current_loop = None
+                    if current_loop is main_loop:
+                        return await token_provider()
+                    fut = asyncio.run_coroutine_threadsafe(token_provider(), main_loop)
+                    return await asyncio.wrap_future(fut)
+                return ImperalClient(cfg, _bridged_token_provider)
+
             return ImperalClient(cfg, token_provider)
 
         return _make

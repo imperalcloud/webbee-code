@@ -1800,6 +1800,21 @@ def test_input_rows_floors_a_tiny_or_zero_width():
     assert input_rows("x" * 30, 0, 10) == 3             # cols floored at 10 -> ceil(30/10)
 
 
+def test_input_rows_accounts_for_prompt_prefix_and_cwidth():
+    """Guarantees that input_rows accurately accounts for BeforeInput prompt buttons
+    (16 columns) and continuation prefix (2 columns) as well as wide characters,
+    preventing composer text from overflowing 2-4 words before growing."""
+    from webbee.tui import input_rows
+    # Inside 78-col frame, prompt takes 16 cols -> line 1 usable width is 62 cols.
+    # 60 chars fit on line 1 -> 1 row
+    assert input_rows("a" * 60, 78, 10, prompt_cols=16, cont_cols=2) == 1
+    # 65 chars overflow line 1 by 3 chars -> wraps to 2 rows
+    assert input_rows("a" * 65, 78, 10, prompt_cols=16, cont_cols=2) == 2
+    # Unicode / wide characters (e.g. 35 emojis with display width 2 each = 70 cols)
+    assert input_rows("🐝" * 30, 78, 10, prompt_cols=16, cont_cols=2) == 1  # 60 cols
+    assert input_rows("🐝" * 35, 78, 10, prompt_cols=16, cont_cols=2) == 2  # 70 cols
+
+
 # ── P5g: Esc/Ctrl-C stop the SERVER turn, not just the local task ────────────
 # Previously Ctrl-C only cancelled the local asyncio task while the cloud
 # brain kept running server-side; Esc did nothing while busy. Both key

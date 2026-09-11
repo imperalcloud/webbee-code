@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.3
+
+**Webbee v0.4.3: Non-Blocking Voice STT, Cross-Event-Loop Token Bridge, Dynamic Composer Geometry & Config Hardening.**
+
+This release makes voice notes truly seamless by decoupling modal teardown from transcription (zero TUI freezes), adds a thread-safe cross-event-loop token bridge for worker-thread file reading across Python 3.6 - 3.14+, accurately aligns multi-line composer wrap bounds to prevent prompt overflow, and eliminates filesystem path hardcoding.
+
+### Highlights & New Capabilities
+
+* **Non-Blocking Background Voice STT (`webbee.modals`)**:
+  - The voice recording dialog now dismisses immediately upon clicking `[▶ Send]`, releasing the UI modal lock with zero delay.
+  - Displays a clean transient status note (`🎙️ transcribing voice note…`) in the output pane while background audio decoding executes.
+  - Audio transcription via `/v1/voice/stt` runs asynchronously in a worker thread and safely schedules its result back to prompt_toolkit via `loop.call_soon_threadsafe`.
+
+* **Cross-Event-Loop Token Bridge for Native File Reads (`webbee.session`, `webbee.native_read`)**:
+  - Resolved `RuntimeError: Task attached to a different loop` when background worker threads invoke `read_native` with the session client.
+  - Implemented an `asyncio.run_coroutine_threadsafe` bridge for token provider acquisition across thread boundaries.
+  - Universal `_run_sync` helper supporting Python 3.6 through 3.14+ seamlessly.
+
+* **Accurate Composer Geometry & Proactive Wrap Calculation (`webbee.tui`)**:
+  - Refactored `input_rows` to strictly account for `BeforeInput` prefix buttons (`📎 🎤 ⋮ ❯ `, 16 display columns) and line continuation gutters (`┊ `, 2 display columns).
+  - Uses true display-cell widths (`get_cwidth` / `wcwidth`) for Unicode and emojis, ensuring the multi-line input box dynamically grows the exact moment text reaches the frame border rather than hiding behind a 2-4 word scroll lag.
+
+* **Configuration & Credential Storage Hardening (`webbee.config`)**:
+  - Added dedicated `voice_dir` and `credentials_file` configuration hooks to `Config` with environment overrides (`IMPERAL_VOICE_DIR`, `IMPERAL_CREDENTIALS_FILE`).
+  - Removed hardcoded filesystem paths across modals and voice components, respecting session configuration and OS cache directories.
+
 ## 0.4.2
 
 **Webbee v0.4.2: Universal `shell` Action Across Windows/macOS/Linux, Interactive TUI Modals, Cloud Voice STT & Complete Hover Engine.**
