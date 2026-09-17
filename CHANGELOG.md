@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.4
+
+**Webbee v0.4.4: Clean Tool Rendering, Real-Time Action Cost Estimation & Terminal Robustness.**
+
+This release streamlines the Terminal Coding Experience (TUI) with modernized action indicators, integrates real-time credit cost previews for system and connector actions, passes rich tool invocation arguments directly to stream frames, and polishes CLI/REPL startup and execution ergonomics.
+
+### Highlights & New Capabilities
+
+* **Streamlined Tool & Action Rendering (`webbee.render`)**:
+  - Replaced legacy multi-step badges with unified, high-contrast action indicators (`SSH Exec`, `Read File`, `Edit File`, `Run Shell`, `Web Search`, etc.).
+  - Added dedicated styling and icons for remote connector calls (`conn-ssh`, `wordpress-hub`, `stripe-connector`, `mail`, `tasks`, etc.).
+  - Clean tool start/finish status feedback without redundant UI step wrappers.
+
+* **Real-Time Action Cost Transparency (`webbee.pricing_constants`)**:
+  - Introduced transparent action cost estimation for external and cloud operations directly in the terminal interface.
+  - Zero-credit badge display for local disk and memory operations (`0.00 cr`), with accurate pricing for remote server execution and marketplace connectors.
+
+* **Rich Frame Argument Propagation (`webbee.frames`)**:
+  - Enhanced `handle_step_started` to forward invocation parameters (`args`) into tool lifecycle hooks, providing instant visibility into file paths, target hosts, and search queries.
+
+* **CLI & Module Execution Polish (`webbee.cli`, `webbee.__main__`)**:
+  - Added native `python -m webbee` execution entry point via `__main__.py`.
+  - Added direct execution guard to `cli.py` for streamlined standalone launches.
+
 ## 0.4.3
 
 **Webbee v0.4.3: Non-Blocking Voice STT, Cross-Event-Loop Token Bridge, Dynamic Composer Geometry & Config Hardening.**
