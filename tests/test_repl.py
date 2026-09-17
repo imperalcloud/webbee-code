@@ -1592,7 +1592,7 @@ def test_make_session_slot_shares_resources_bundle_on_same_workspace(monkeypatch
 
 # ── W4b T5 item 1: slot_id minting -- tab-1 legacy id vs later short hex ────
 
-def test_make_session_slot_first_true_keeps_slot_id_empty():
+def test_make_session_slot_first_true_mints_unique_slot_id():
     async def _drive():
         return await _make_session_slot(
             _mk_cfg(), _noop_token_provider, os.getcwd(), "default",
@@ -1602,8 +1602,9 @@ def test_make_session_slot_first_true_keeps_slot_id_empty():
             shadow_factory=lambda cfg, ws: None, first=True)
 
     slot = asyncio.run(_drive())
-    assert slot.slot_id == ""
-    assert slot.agent.slot_id == ""
+    assert slot.slot_id and len(slot.slot_id) == 6
+    assert all(c in "0123456789abcdef" for c in slot.slot_id)
+    assert slot.agent.slot_id == slot.slot_id
 
 
 # ── 0.3.25 Part C: per-repo instance lock wiring in _make_session_slot ─────
@@ -1617,7 +1618,7 @@ class _FakeLock:
         self.closed = True
 
 
-def test_first_true_primary_lock_keeps_legacy_slot_id_and_rides_on_the_slot(monkeypatch):
+def test_first_true_primary_lock_mints_slot_id_and_rides_on_the_slot(monkeypatch):
     import webbee.instance_lock as IL
     lock = _FakeLock(held=False)
     monkeypatch.setattr(IL, "acquire", lambda repo_key: lock)
@@ -1631,7 +1632,8 @@ def test_first_true_primary_lock_keeps_legacy_slot_id_and_rides_on_the_slot(monk
             shadow_factory=lambda cfg, ws: None, first=True)
 
     slot = asyncio.run(_drive())
-    assert slot.slot_id == ""                # primary keeps the legacy id
+    assert slot.slot_id and len(slot.slot_id) == 6
+    assert all(c in "0123456789abcdef" for c in slot.slot_id)
     assert slot.instance_lock is lock         # rides on the slot for later teardown
     assert "already running" not in slot.pane.dump()
 

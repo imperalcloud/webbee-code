@@ -127,3 +127,7 @@ def _maybe_print_update_notice() -> None:
             print(notice)
     except Exception:
         pass  # update-check must never block or crash startup
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

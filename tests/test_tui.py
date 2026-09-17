@@ -2240,20 +2240,18 @@ def test_up_arrow_with_text_present_pulls_history_not_steps():
 
 
 def test_up_arrow_during_step_nav_still_navigates_steps():
-    # Idle + empty input + steps present = EXACTLY today's step-navigation.
+    # Legacy step-navigation on arrow keys is removed: sel['i'] stays None, history handles it.
     from prompt_toolkit.buffer import Buffer
 
     from webbee.tui import _arrow_down_action, _arrow_up_action
 
-    buf = Buffer(multiline=False)                     # empty input, no history touch
+    buf = Buffer(multiline=False)
     sel = {"i": None}
     event = _FakeEvent()
     _arrow_up_action(event, buf, sel, 3, False)
-    assert sel["i"] == 2 and buf.text == ""           # selection moves, no history pull
-    _arrow_up_action(event, buf, sel, 3, False)
-    assert sel["i"] == 1
+    assert sel["i"] is None
     _arrow_down_action(event, buf, sel, 3, False)
-    assert sel["i"] == 2
+    assert sel["i"] is None
     assert event.app.invalidated is True
 
 
@@ -5643,11 +5641,10 @@ def test_badge_style_override_breathes_only_when_confirmed_up_to_date():
 
 
 # --------------------------------------------------------------------------
-# webbee-code-click-to-expand-v1: a plain mouse click on a printed tool_result
-# line expands that step's detail card -- the SAME reveal /steps N (and
-# Up/Down + Enter) already give, one gesture shorter, never a new surface.
+# Legacy click-to-expand is removed: a click on a printed tool_result line is
+# now a plain no-op -- the pane hook still exists, it just expands nothing.
 # --------------------------------------------------------------------------
-def test_clicking_a_tool_result_line_expands_its_step():
+def test_clicking_a_tool_result_line_is_a_noop():
     from prompt_toolkit.application import create_app_session, get_app
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.input import create_pipe_input
@@ -5685,7 +5682,7 @@ def test_clicking_a_tool_result_line_expands_its_step():
                 # absolute line 1, not 0, in a freshly-booted pane at offset 0.
                 pane.on_line_click(1)
                 await asyncio.sleep(0.02)
-                assert expanded == [0]              # step 1 -> steps_nav index 0
+                assert expanded == []               # no expansion, no crash
                 pipe.send_text("\x04")
                 ok = await asyncio.wait_for(task, 5)
         assert ok is True

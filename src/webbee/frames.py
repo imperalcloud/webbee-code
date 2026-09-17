@@ -87,7 +87,7 @@ def handle_step_started(frame: dict, sink, started: set, step_labels: dict, loca
     if sid:
         step_labels[sid] = label
     if _first_time(sid, started):
-        sink.tool_start(label, {})
+        sink.tool_start(label, frame.get("args") or {})
 
 
 def handle_step_finished(frame: dict, sink, finished: set, step_labels: dict, steps: list,

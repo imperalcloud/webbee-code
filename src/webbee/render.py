@@ -11,6 +11,7 @@ from rich.text import Text
 
 from webbee.banner_art import WEBBEE_CODE
 from webbee.sizing import trunc
+from webbee.pricing_constants import estimate_action_cost
 
 _GUTTER = 2   # left margin (cols) — the single consistent transcript gutter.
               # Chrome lines prefix a 2-space string ("  "); block renderables
@@ -75,6 +76,33 @@ def _clean(s) -> str:
 _ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️ ", "write_file": "✏️",
          "edit_file": "🔧", "shell": "⚡", "bash": "⚡", "web_search": "🌐 ", "read_url": "📄",
          "view_image": "🖼️"}
+def _tool_meta(tool: str) -> tuple[str, str]:
+    t = (tool or "").strip()
+    if t.startswith("conn-ssh"):
+        return "🌐", "SSH Exec"
+    if t in ("read_file", "read_document"):
+        return "📖", "Read File"
+    if t in ("edit_file", "multi_edit"):
+        return "🔧", "Edit File"
+    if t == "write_file":
+        return "✏️", "Write File"
+    if t in ("grep", "search_code"):
+        return "🔎", "Search Code"
+    if t in ("glob", "list_dir"):
+        return "🗂️", "List Files"
+    if t in ("bash", "shell"):
+        return "⚡", "Shell Exec"
+    if t in ("web_search", "read_url", "read_url_rendered"):
+        return "🌐", "Web Search"
+    if t.startswith("tasks"):
+        return "⚡", "Tasks"
+    if t.startswith("notes"):
+        return "📝", "Notes"
+    if t.startswith("mail"):
+        return "✉️", "Mail"
+    return "⚡", t
+
+
 _BEE = "yellow"       # bee-yellow brand accent — logo / 🐝 / notes / busy dot ONLY
 _ACCENT = "cyan"      # interactive chrome ONLY — live caret / mode / panel url
 
@@ -588,46 +616,44 @@ class RichSink:
         self._nudge()  # the completed line is printed in tool_result
 
     def tool_result(self, tool: str, ok: bool, summary: str) -> None:
-        # One calm dim line: icon + tool (+arg), then the ✓/✗ RIGHT NEXT TO the
-        # action (not pinned to the far right), then a dim summary. Only the
-        # ✓/✗ carries colour — the rest recedes (dim). Truncation lengths are
-        # a PROPORTION of the live console width (W2 front-2), floored at the
-        # old hardcoded counts so a narrow terminal never sees an empty line.
-        # DEFERRED (W2 final-review): the clip is baked into the recorded
-        # Text at PRINT time, not re-derived live — after a WIDEN, pre-resize
-        # history keeps its OLD (narrower) clip; cosmetic only, and always
-        # shrink-safe (a shrink still never overflows the new width).
-        # A render-time clipping renderable (re-clips from the live width on
-        # every redraw instead of baking it in) remains a future polish.
         _tool, arg = self._pending if self._pending[0] else (tool, "")
-        icon = _ICON.get(_tool, "⚡")
+        icon, category = _tool_meta(_tool)
         mark = "✓" if ok else "✗"
+        mark_color = "bold green" if ok else "bold red"
         w = self.console.width
-        # webbee-code-tool-result-gutter-v1: this is the MOST frequently
-        # printed line in the whole transcript (one per action), and on a
-        # narrow terminal (mobile SSH client, a slim tmux pane) the summary
-        # regularly wraps to a second visual row -- without _pad() that
-        # continuation line hugged column 0 with no left margin at all, an
-        # ugly seam against every OTHER line in the feed, which all keep the
-        # 2-col gutter (Valentin, live 2026-07-31: "клеится к самому левому
-        # краю"). _pad() indents every wrapped row consistently, the same
-        # fix note()/progress()/thinking() already got.
-        t_now = time.strftime("%H:%M:%S")
-        self.console.print(_pad(Text.assemble(
-            (f"{t_now} ", "dim grey50"),
-            (icon + " ", "dim"),
-            (_clean(_tool), "dim"),
-            (("  " + _clean(arg)[:trunc(w, 0.3, 40)]) if arg else "", "dim"),
-            ("   ", ""),
-            (mark + " ", "green" if ok else "red"),
-            (_clean(summary)[:trunc(w, 0.35, 50)], "dim"),
-        )))
+        duration_ms = 0
+        if hasattr(self, "_pending_start") and self._pending_start > 0:
+            duration_ms = max(0, int((self._clock() - self._pending_start) * 1000))
         self._pending = ("", "")
-        # webbee-code-click-to-expand-v1: tag the record JUST printed as
-        # "step N" (1-based, matching /steps' own numbering) -- record_count()
-        # already reflects this print (Rich prints synchronously), so the
-        # index this line landed at is exactly len(pane_records) - 1.
+        self._pending_start = 0.0
+        cost_cr = estimate_action_cost(_tool)
+        dur_str = f"{duration_ms}ms" if duration_ms > 0 else "<1ms"
+        cost_str = f"{cost_cr:.2f} cr"
         self._step_index += 1
+        idx = self._step_index
+        line = Text()
+        line.append(f"{idx}. ", style="dim")
+        line.append(f"{icon}  ")
+        line.append(f"{category:<12} ", style="bold white" if cost_cr > 0 else "none")
+        prefix_len = len(f"{idx}. ") + 4 + 13 + _GUTTER
+        right_len = 8 + 9 + 3 + len(_tool)
+        available_arg = max(16, w - prefix_len - right_len - 2)
+        arg_clean = _clean(arg).strip()
+        if len(arg_clean) > available_arg:
+            arg_disp = arg_clean[:available_arg - 1] + "…"
+        else:
+            arg_disp = arg_clean
+        line.append(f"{arg_disp:<{available_arg}} ", style="cyan" if cost_cr > 0 else "none")
+        line.append(f"{dur_str:>6}  ", style="dim")
+        line.append(f"{cost_str:>7}  ", style="cyan" if cost_cr > 0 else "dim")
+        line.append(f"{mark}  ", style=mark_color)
+        line.append(f"{_tool}", style="dim grey50")
+        clean_summary = _clean(summary).strip()
+        if clean_summary:
+            line.append(chr(10))
+            line.append("   └─ ", style="dim grey50")
+            line.append(clean_summary, style="dim")
+        self.console.print(_pad(line))
         rc = getattr(self.console, "record_count", None)
         if callable(rc):
             self._step_records[rc() - 1] = self._step_index

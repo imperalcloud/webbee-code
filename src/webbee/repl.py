@@ -838,7 +838,9 @@ async def _make_session_slot(cfg, token_provider, workspace, mode, *, resources:
 
     auto_slot_id = slot_id is None
     if auto_slot_id:
-        slot_id = "" if first else uuid4().hex[:6]
+        # Every terminal session receives a unique slot_id (hex[:6]) so its
+        # session ID is isolated and never collides with or leaks into old tasks.
+        slot_id = uuid4().hex[:6]
 
     repo_key_task = None
     if first:

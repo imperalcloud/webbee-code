@@ -895,10 +895,8 @@ def _arrow_up_action(event, buf, sel: dict, n: int, busy: bool, pending=None,
             pulled["text"], pulled["iid"] = str(item), getattr(item, "iid", "")
         event.app.invalidate()
         return
-    if n and not buf.text and not busy:
-        sel["i"] = (n - 1) if sel["i"] is None else max(0, sel["i"] - 1)
-        event.app.invalidate()
-        return
+    # Legacy step-navigation on Up arrow completely removed:
+    # Up always recalls command history readline-style (or pulls from queue).
     buf.history_backward()
     event.app.invalidate()
 
@@ -906,10 +904,8 @@ def _arrow_up_action(event, buf, sel: dict, n: int, busy: bool, pending=None,
 def _arrow_down_action(event, buf, sel: dict, n: int, busy: bool) -> None:
     """Down key — mirror of _arrow_up_action: step-nav on the same exact
     gate, otherwise cycle history forward."""
-    if n and not buf.text and not busy:
-        sel["i"] = 0 if sel["i"] is None else min(n - 1, sel["i"] + 1)
-        event.app.invalidate()
-        return
+    # Legacy step-navigation on Down arrow completely removed:
+    # Down always cycles command history forward.
     buf.history_forward()
     event.app.invalidate()
 
@@ -1243,10 +1239,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
             if rc:
                 rc(text)                       # ICNLI: relay the raw reply verbatim
             return
-        if not text.strip() and sel["i"] is not None and steps_nav and not _busy_live():
-            idx, sel["i"] = sel["i"], None
-            event.app.create_background_task(steps_nav["expand"](idx, slot))
-            return
+
         if not text.strip():
             return
         if _is_queue_command(text):
@@ -1431,51 +1424,9 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         get_app().create_background_task(_do_right_paste())
 
     def _line_click(abs_line: int) -> None:
-        """webbee-code-click-to-expand-v1: a PLAIN click on a transcript line
-        (see selection.py's `on_line_click` hook) asks \"what happened here?\"
-        without touching the keyboard at all -- the exact same reveal /steps
-        N (and Up/Down + Enter) already show, just one gesture shorter. A
-        click resolves to a RECORD via the pane's own reflow-anchoring math
-        (`_record_at_line`, already used for reflow + scroll-anchoring), then
-        to a step number via the sink's `step_for_record` (set right after
-        each tool_result print, see render.py) -- so a click on a banner,
-        a progress line, or blank space (no step there) is a harmless no-op,
-        never an error. Busy mid-turn is ALSO a no-op (steps_nav reflects the
-        LAST finished turn only -- clicking during a live one would expand
-        stale data), same gate Enter's own steps_nav path already uses.
-        Compact by construction: dispatches through steps_nav[\"expand\"],
-        the SAME `/steps N` -> step_detail bordered panel Enter already
-        shows -- never a new UI surface, never full-screen, nothing to
-        keep in sync twice."""
-        if not steps_nav or _busy_live():
-            return
-        slot = _a()
-        sink = slot.sink
-        step_fn = getattr(sink, "step_for_record", None) if sink is not None else None
-        if step_fn is None:
-            return
-        pane = _pane()
-        record_idx = pane._record_at_line(abs_line)
-        step_no = step_fn(record_idx)
-        if not step_no:
-            return
-        # webbee-code-step-toggle-v1: a SECOND click on the SAME already-open
-        # step line folds the detail panel back away instead of re-printing
-        # it -- a plain flash_note toast (same mechanism as copy-confirm)
-        # says so out loud, tool-agnostic (works identically whether the
-        # step was bash/read_file/write_file/anything else): raising and
-        # lowering the detail is now a real, visible round-trip, not a
-        # one-way reveal.
-        if slot.expanded_steps.get(step_no):
-            slot.expanded_steps.pop(step_no, None)
-            pane.flash_note(f"▸ step {step_no} collapsed")
-            get_app_or_none() and get_app_or_none().invalidate()
-            return
-        slot.expanded_steps[step_no] = True
-        event = get_app_or_none()
-        if event is None:
-            return
-        event.create_background_task(steps_nav["expand"](step_no - 1, slot))
+        # Clicking lines is a no-op: legacy step expansion removed.
+        # Kept as a stub because _pane() still wires pane.on_line_click.
+        pass
 
     @kb.add("c-v")
     def _paste_key(event):
@@ -1791,8 +1742,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         f = pane.flash()
         if f:
             frags = [("class:tb.working", "  " + f)]   # transient copy confirmation
-        elif sel["i"] is not None and steps_nav:
-            frags = [("class:tb.dim", f"  step {sel['i'] + 1}/{_nav_count()} · Enter to expand · Esc to cancel")]
+
         else:
             st_fn = _sink_attr("status")
             if callable(st_fn):
