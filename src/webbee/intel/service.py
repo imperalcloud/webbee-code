@@ -54,12 +54,41 @@ def _is_virtualenv(path: str) -> bool:
     return os.path.exists(os.path.join(path, "pyvenv.cfg"))
 
 
+def skipped_dir(parent: str, name: str) -> bool:
+    """The ONE rule for what the index never reads (the full walk and the watcher alike):
+    every dotted directory (.git, .next build output, .venv, caches, .webbee), the
+    dependency caches, and any virtualenv by its marker."""
+    return name.startswith(".") or name in _SKIP_DIRS or _is_virtualenv(os.path.join(parent, name))
+
+
+def ignored_path(root: str, path: str) -> bool:
+    """True when ``path`` (absolute or root-relative) lies under a directory skipped_dir skips.
+    Normalized to forward slashes so Windows paths filter too."""
+    p = path.replace("\\", "/").replace(os.sep, "/")
+    rel = p
+    for r in dict.fromkeys([root, os.path.realpath(root)] if root else []):
+        r = r.replace(os.sep, "/").rstrip("/")
+        if p.startswith(r + "/"):
+            rel = p[len(r) + 1:]
+            break
+    else:
+        if root and os.path.isabs(path):
+            root = ""           # outside the workspace: judged by its own directory names only
+    parts = [x for x in rel.split("/") if x][:-1]          # the directories, not the file itself
+    parent = root or ""
+    for name in parts:
+        if name in (".", ".."):
+            continue
+        if skipped_dir(parent, name) if root else (name.startswith(".") or name in _SKIP_DIRS):
+            return True
+        parent = os.path.join(parent, name)
+    return False
+
+
 def _walk(root: str, limit: int = 20000) -> list[str]:
     out = []
     for dp, dns, fns in os.walk(root):
-        dns[:] = [d for d in dns
-                  if d != ".git" and not d.startswith(".") and d not in _SKIP_DIRS
-                  and not _is_virtualenv(os.path.join(dp, d))]
+        dns[:] = [d for d in dns if not skipped_dir(dp, d)]
         for fn in fns:
             out.append(os.path.relpath(os.path.join(dp, fn), root))
             if len(out) >= limit:
@@ -75,6 +104,7 @@ class IntelService:
         self.index: ProjectIndex | None = None
         self.graph: CodeGraph | None = None
         self.git_ref = ""
+        self.fresh = False
         self.vectors: VectorStore | None = None
         self.vectors_ready = False
         self._backend = "__unset__"          # sentinel -- distinct from a real None result
@@ -122,6 +152,7 @@ class IntelService:
                     pass
         self.index = idx
         self.graph = CodeGraph(idx)
+        self.fresh = True
         self._embed_build(idx)
 
     def _embed_build(self, idx: ProjectIndex) -> None:
@@ -264,7 +295,9 @@ class IntelService:
             "symbol_kinds": dict(kinds),
             "top_symbols": top,               # capped at _MAX_PROFILE_SAMPLE
             "test_hint_files": hints,
-            "index_fresh": bool(self.git_ref),
+            # fresh = the index reflects the files on disk: built this session (or loaded for this
+            # HEAD) and every change the watcher or the agent's own writes reported applied
+            "index_fresh": self.index is not None and self.fresh,
             "git_ref": self.git_ref[:12],
             "embedded_chunks": embedded_chunks,
             "vectors_ready": vectors_ready,

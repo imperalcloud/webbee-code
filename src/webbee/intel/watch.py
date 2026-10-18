@@ -6,14 +6,15 @@ import asyncio
 import os
 
 
-def _ignored(path: str) -> bool:
-    """PURE. True for VCS/vendor churn. Normalized to forward slashes so the
-    filter works on Windows too (watchfiles yields backslash paths there --
-    unfiltered .git churn re-indexed the repo on every checkpoint)."""
-    p = path.replace(os.sep, "/").replace("\\", "/")
-    # `.webbee/` = our own per-workspace scratch (pasted images, gitignore) —
-    # never re-index/checkpoint on a paste (W3).
-    return "/.git/" in p or "/node_modules/" in p or "/.webbee/" in p
+def _ignored(path: str, root: str = "") -> bool:
+    """True for paths the index never reads -- the SAME rule as the full walk
+    (service.skipped_dir: every dotted directory incl. .git, .next build output
+    and our own .webbee/ scratch, dependency caches, virtualenvs). Before, the
+    watcher skipped only .git/node_modules/.webbee, so a `next build` fed
+    .next/static/chunks into the index as "schemas". Normalized to forward
+    slashes so the filter works on Windows too."""
+    from webbee.intel.service import ignored_path
+    return ignored_path(root, path)
 
 
 async def watch_workspace(root: str, on_change) -> None:
@@ -26,7 +27,7 @@ async def watch_workspace(root: str, on_change) -> None:
     async for changes in awatch(root):
         rels = set()
         for _chg, path in changes:
-            if _ignored(path):
+            if _ignored(path, root):
                 continue
             try:
                 rels.add(os.path.relpath(path, root))

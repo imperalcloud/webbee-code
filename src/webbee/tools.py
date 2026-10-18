@@ -32,6 +32,11 @@ _DIFF_CAP = 4000
 _BASH_OUT_CAP = 30000          # chars of combined stdout+stderr
 _GREP_HIT_CAP = 200            # matching lines
 _READ_LINE_CAP = 2000          # lines per read_file call without explicit limit
+# A code file longer than this, read without a window, answers with its OUTLINE first
+# (CPC outline/read_symbol): live, a 1459-line declarative screen was read in 40-120
+# line windows ~190 times. The outline names every part with its lines; read_symbol
+# reads one part whole; offset/limit still reads any window (limit reads it whole).
+_OUTLINE_FIRST_LINES = 600
 
 
 def _truncated(text: str, cap: int, unit: str = "chars") -> str:
@@ -238,6 +243,11 @@ class LocalToolExecutor:
             end = _READ_LINE_CAP
         end = min(end, n)
 
+        if not partial and n > _OUTLINE_FIRST_LINES:
+            first = self._outline_first(os.path.relpath(p, self.root), text, n, st)
+            if first is not None:
+                return first
+
         # Byte-exact when the whole file is returned: splitlines()+join drops a
         # trailing newline, which would corrupt edit_file's exact-match contract
         # and rewrite files without their final newline. Only a genuine WINDOW
@@ -258,6 +268,66 @@ class LocalToolExecutor:
                 "total_lines": n, "modified": int(st.st_mtime),
                 "modified_iso": datetime.fromtimestamp(st.st_mtime)
                                         .astimezone().isoformat(timespec="seconds")}
+
+    def _outline_first(self, rel: str, text: str, n: int, st) -> dict | None:
+        """The OUTLINE answer to a whole read of a big code file, or None (not code / no parser /
+        too few parts to be a map). Never the read_file card: the kernel must not take the map
+        for the file's lines."""
+        from webbee.intel import outline as ol
+        try:
+            nodes = ol.outline(rel, text)
+        except Exception:
+            nodes = None
+        if not nodes or len(nodes) < 3:
+            return None
+        return {"ok": True, "content": ol.render_outline(rel, nodes, n)
+                + f"\n(read_file with offset/limit reads any window; limit={n} reads the whole file)",
+                "outline": True, "total_lines": n, "modified": int(st.st_mtime)}
+
+    def _code_text(self, a: dict):
+        rel = self._rel(a)
+        p = self.resolve_in_workspace(rel)
+        with open(p, "r", encoding="utf-8") as f:
+            return os.path.relpath(p, self.root), f.read()
+
+    def _t_outline(self, a: dict) -> dict:
+        from webbee.intel import outline as ol
+        try:
+            rel, text = self._code_text(a)
+        except (OSError, UnicodeDecodeError) as e:
+            return {"ok": False, "content": f"outline: cannot read {a.get('path')}: {e}"}
+        nodes = ol.outline(rel, text)
+        if nodes is None:
+            return {"ok": False, "content": f"outline: {rel} is not Python/TS/JS code (or the parser is "
+                                            "not installed) -- read it with read_file"}
+        return {"ok": True, "content": ol.render_outline(rel, nodes, len(text.split("\n"))),
+                "nodes": nodes}
+
+    def _t_read_symbol(self, a: dict) -> dict:
+        from webbee.intel import outline as ol
+        try:
+            rel, text = self._code_text(a)
+        except (OSError, UnicodeDecodeError) as e:
+            return {"ok": False, "content": f"read_symbol: cannot read {a.get('path')}: {e}"}
+        part = ol.read_symbol(rel, text, str(a.get("name") or ""))
+        if part is None:
+            return {"ok": False, "content": f"read_symbol: no part named {a.get('name')!r} in {rel} -- "
+                                            "outline(path) lists them"}
+        p = self.resolve_in_workspace(rel)
+        self._read_mtimes[p] = os.stat(p).st_mtime_ns
+        total = len(text.split("\n"))
+        return {"ok": True, "content": ol.read_card(rel, total, part["start"], part["end"], part["body"]),
+                "shown_from": part["start"], "shown_to": part["end"], "total_lines": total,
+                "symbol": part["name"], "kind": part["kind"]}
+
+    def _reindex(self, rel: str) -> None:
+        """A file this executor wrote is re-indexed at once (CPC freshness): the code map never
+        answers from the text before the agent's own change. Advisory -- never fails a write."""
+        try:
+            if self.indexer is not None and getattr(self.indexer, "ready", False):
+                self.indexer.apply_changes([rel])
+        except Exception:
+            pass
 
     def _file_header(self, rel: str, total_lines: int, mtime: float) -> str:
         lines = "1 line" if total_lines == 1 else f"{total_lines} lines"
@@ -330,6 +400,7 @@ class LocalToolExecutor:
         with open(p, "w", encoding="utf-8") as f:
             f.write(after)
         self._note_own_write(p)
+        self._reindex(os.path.relpath(p, self.root))
         out = {"ok": True, "content": f"wrote {rel}" + stale}
         diff = _unified_diff(rel, before, after)
         if diff:
@@ -360,6 +431,7 @@ class LocalToolExecutor:
         with open(p, "w", encoding="utf-8") as f:
             f.write(after)
         self._note_own_write(p)
+        self._reindex(os.path.relpath(p, self.root))
         note = f" ({n} occurrences)" if replace_all and n > 1 else ""
         out = {"ok": True, "content": f"edited {rel}{note}" + stale}
         diff = _unified_diff(rel, text, after)
@@ -432,6 +504,8 @@ class LocalToolExecutor:
                 f.write(text.replace(old, new, 1))
             self._note_own_write(p)
             applied.append(rel)
+        for rel in dict.fromkeys(applied):
+            self._reindex(os.path.relpath(self.resolve_in_workspace(rel), self.root))
         stale = ("\n⚠ changed on disk since you last read: " + ", ".join(stale_rels)
                  + " — re-read to be safe") if stale_rels else ""
         diffs = []
