@@ -320,6 +320,15 @@ class LocalToolExecutor:
                 "shown_from": part["start"], "shown_to": part["end"], "total_lines": total,
                 "symbol": part["name"], "kind": part["kind"]}
 
+    def _t_inspect_page(self, a: dict) -> dict:
+        """The page in the local browser (CDP, port 9222): boxes, roles and colors per width and a
+        screenshot -- the kernel measures them (truth-loop stage 10, webbee.browser)."""
+        from webbee import browser
+        widths = a.get("widths") if isinstance(a.get("widths"), list) else None
+        return browser.inspect_page(url=str(a.get("url") or ""), tab=str(a.get("tab") or ""), widths=widths,
+                                    screenshot=a.get("screenshot", True) is not False,
+                                    port=int(os.environ.get("WEBBEE_CDP_PORT") or browser.DEFAULT_PORT))
+
     def _reindex(self, rel: str) -> None:
         """A file this executor wrote is re-indexed at once (CPC freshness): the code map never
         answers from the text before the agent's own change. Advisory -- never fails a write."""
