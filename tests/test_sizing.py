@@ -11,8 +11,9 @@ def test_get_size_prefers_pt_output():
 
 
 def test_get_size_falls_back_without_app(monkeypatch):
+    import os
     import shutil
-    monkeypatch.setattr(shutil, "get_terminal_size", lambda fb: type("S", (), {"columns": 91, "lines": 22})())
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda *args, **kwargs: os.terminal_size((91, 22)))
     assert get_size(None) == (91, 22)
 
 

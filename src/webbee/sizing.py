@@ -12,12 +12,20 @@ def get_size(app=None) -> tuple[int, int]:
     if out is not None and hasattr(out, "get_size"):
         try:
             s = out.get_size()
-            return int(s.columns), int(s.rows)
+            cols = int(getattr(s, "columns", 0))
+            rows = int(getattr(s, "rows", 0))
+            if cols > 0 and rows > 0:
+                return max(40, cols), max(10, rows)
         except Exception:
             pass
     import shutil
-    s = shutil.get_terminal_size((100, 24))
-    return int(s.columns), int(getattr(s, "lines", 24))
+    try:
+        s = shutil.get_terminal_size((100, 24))
+        cols = int(getattr(s, "columns", 100))
+        rows = int(getattr(s, "lines", 24))
+        return max(40, cols if cols > 0 else 100), max(10, rows if rows > 0 else 24)
+    except Exception:
+        return 100, 24
 
 
 def input_height_cap(rows: int) -> int:

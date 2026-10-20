@@ -627,7 +627,10 @@ class LocalToolExecutor:
         pat = re.compile(a["pattern"])
         base = self.resolve_in_workspace(a.get("path", "."))
         hits = []
-        for dp, dns, fns in os.walk(base):
+        # a single file is searched itself: os.walk() yields nothing for a file, so every grep on
+        # one file answered "(no matches)" (live 2026-10-20: 30 of 34 single-file greps were false)
+        walk = [(os.path.dirname(base), [], [os.path.basename(base)])] if os.path.isfile(base) else os.walk(base)
+        for dp, dns, fns in walk:
             if _is_git_dir(dp):
                 dns[:] = []
                 continue

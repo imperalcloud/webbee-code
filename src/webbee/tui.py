@@ -21,6 +21,8 @@ import asyncio
 import os
 import re
 
+from prompt_toolkit.layout.dimension import Dimension
+
 from webbee import __version__, sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
 from webbee.queue_panel import (drop_item, one_line, pull_item, queue_fragments,
@@ -1047,7 +1049,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import (ConditionalContainer, DynamicContainer,
-                                          HSplit, Layout, Window)
+                                          HSplit, Layout, Window, Dimension)
         from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.layout.processors import BeforeInput
         from prompt_toolkit.styles import Style
@@ -2367,6 +2369,16 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
 
     def _tab_fragments_live():
         cols, _rows = sizing.get_size(get_app_or_none())
+        cols = max(cols, 20)
+        # INVARIANT: tab_bar Window must NEVER scroll vertically.
+        # If vertical_scroll ever reaches 1, prompt_toolkit renders line 1 (empty),
+        # which makes the entire top tab bar disappear or get 'eaten' by the screen.
+        if "tab_bar" in locals() and tab_bar is not None:
+            try:
+                tab_bar.vertical_scroll = 0
+                tab_bar.horizontal_scroll = 0
+            except Exception:
+                pass
         return tab_fragments(slots, on_switch=_switch_to, on_close=_close_tab_click,
                              on_new=_new_tab_click, width=cols,
                              forward=lambda ev: _pane().forward_mouse(ev, clamp="top"),
@@ -2381,12 +2393,14 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
     # every chip on its own solid bar (`"tabbar": "bg:#262626"` in the Style
     # dict below) — a browser look, visually separated from the transcript
     # above/below it instead of floating directly on the terminal's own bg.
-    tab_bar = Window(FormattedTextControl(_tab_fragments_live, focusable=False),
-                     height=1, always_hide_cursor=True, style="class:tabbar")
-    # ONE blank row of breathing room between the bar and the transcript —
-    # deliberately bare (no style at all): it renders as plain terminal
-    # background, transparent-looking, never a second colored stripe.
-    tab_bar_spacer = Window(height=1)
+    # CRITICAL FIX (top bar disappearing): wrap_lines=False, always_hide_cursor=True,
+    # and dont_extend_height=True prevent prompt_toolkit from scrolling
+    # vertically or wrapping tabs into line 2, which caused the entire top bar
+    # to disappear or get 'eaten' during tab switching, resize or mouse wheel scroll.
+    tab_bar = Window(FormattedTextControl(_tab_fragments_live, focusable=False, show_cursor=False),
+                     height=Dimension.exact(1), always_hide_cursor=True,
+                     wrap_lines=False, style="class:tabbar", dont_extend_height=True)
+    tab_bar_spacer = Window(height=Dimension.exact(1), dont_extend_height=True)
     # The single most structural change of the W4a wave (map §3): the pane
     # slot in the root layout is a DynamicContainer, not a bound window —
     # it re-resolves `slots.active().pane.window` on EVERY redraw, so a tab

@@ -37,6 +37,15 @@ def test_grep(tmp_path):
     assert r["ok"] and "a.py" in r["content"]
 
 
+def test_grep_on_a_single_file(tmp_path):
+    """live 2026-10-20: every grep whose path was one file answered "(no matches)"."""
+    ex = _ex(tmp_path)
+    ex.run("write_file", {"path": "app/writers.py", "content": "x = 1\n@writer\ndef save():\n    pass\n"})
+    r = ex.run("grep", {"pattern": "@writer", "path": "app/writers.py"})
+    assert r["ok"] and r["match_count"] == 1 and r["content"] == os.path.join("app", "writers.py") + ":2:@writer"
+    assert ex.run("grep", {"pattern": "nothing", "path": "app/writers.py"})["content"] == "(no matches)"
+
+
 def test_grep_skips_git_dir(tmp_path):
     # Real regression coverage on this (posix) host: a matching file sitting
     # inside .git/ must never surface in results.
