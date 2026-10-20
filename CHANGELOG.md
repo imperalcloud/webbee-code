@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+**Security fixes for the remote and local code sync.**
+
+* The system-`sftp` fallback refuses a remote path with a control character: a file name from a server can
+  no longer start a second batch command (sftp's `!` runs a local shell).
+* The local sync never reads a symlink or a path that resolves outside the workspace.
+
 ## 0.5.0
 
 **Webbee v0.5.0: one code graph for every source.**

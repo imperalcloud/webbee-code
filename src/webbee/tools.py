@@ -1012,7 +1012,12 @@ class SystemSftp:
 
     @staticmethod
     def _quote(path: str) -> str:
-        return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+        # one batch line per command: a control character in a path (a newline names a second command,
+        # and sftp's "!" runs a LOCAL shell) is refused -- names come from the server's listing
+        p = str(path)
+        if any(ord(c) < 32 or ord(c) == 127 for c in p):
+            raise OSError("refused: a control character in a remote path")
+        return '"' + p.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
     def _mtime(self, mon: str, day: str, when: str) -> float:
         import datetime

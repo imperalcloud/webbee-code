@@ -869,3 +869,21 @@ def test_system_sftp_answers_lstat_and_realpath_from_the_server():
     asyncio.run(s.realpath("/r/a.py"))
     asyncio.run(s.lstat("/r/a.py"))
     assert len(calls) == n                                    # cached: no new sftp process
+
+
+def test_system_sftp_refuses_a_control_character_in_a_remote_path():
+    """Security review of 0.5.0: a newline would start a second sftp batch command ("!" runs a local shell)."""
+    import asyncio
+    import pytest
+    from webbee.tools import SystemSftp
+    ran = []
+
+    async def batch(cmds):
+        ran.append(cmds)
+        return ""
+    s = SystemSftp("h")
+    s._batch = batch
+    for bad in ("/r/a.py\n!touch /tmp/pwned", "/r/a\rb", "/r/\x00x"):
+        with pytest.raises(OSError):
+            asyncio.run(s.readdir(bad))
+    assert ran == []

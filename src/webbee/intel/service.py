@@ -291,9 +291,15 @@ class IntelService:
 
                 async def read(paths):
                     got = {}
+                    base = os.path.realpath(self.root)
                     for p in paths:
+                        full = os.path.join(self.root, p)
+                        # never a link, never a path that resolves outside the workspace
+                        real = os.path.realpath(full)
+                        if os.path.islink(full) or not (real == base or real.startswith(base + os.sep)):
+                            continue
                         try:
-                            with open(os.path.join(self.root, p), "rb") as f:
+                            with open(full, "rb") as f:
                                 got[p] = f.read(indexer.MAX_FILE_BYTES + 1)
                         except OSError:
                             continue

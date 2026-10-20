@@ -270,3 +270,20 @@ def test_the_build_sync_carries_the_history_links(tmp_path, monkeypatch):
     svc.build()
     svc.attach_vault(lambda: cloud)
     assert cloud.calls[-1][1]["measured"][0]["dst_path"] == "b.py"
+
+
+def test_a_link_leading_out_of_the_workspace_is_never_read(tmp_path, monkeypatch):
+    """Security review of 0.5.0: the local sync reads no symlink and nothing that resolves outside the root."""
+    import os
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+    outside.write_text("SECRET = 'outside the workspace'\n")
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    os.symlink(outside, tmp_path / "leak.py")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    _synced(svc, monkeypatch)
+    cloud = _Cloud()
+    svc.build()
+    svc.attach_vault(lambda: cloud)
+    sent = [c[1] for c in cloud.calls if "files" in c[1]]
+    assert sent and all(f["path"] != "leak.py" for c in sent for f in c["files"])
+    assert "outside the workspace" not in repr(cloud.calls)
