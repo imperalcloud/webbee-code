@@ -9,7 +9,7 @@ import json
 import os
 from dataclasses import asdict
 
-from webbee.intel.models import ProjectIndex, FileIndex, Symbol
+from imperal_sdk.code_index import ProjectIndex, FileIndex, Symbol
 
 # numpy is NOT imported at module scope: this module is imported eagerly by
 # service.py, but numpy is declared only in the intel-embed* extras, not the

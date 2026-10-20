@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import defaultdict
 
-from webbee.intel.models import ProjectIndex, Symbol
+from imperal_sdk.code_index import ProjectIndex, Symbol
 
 
 class CodeGraph:

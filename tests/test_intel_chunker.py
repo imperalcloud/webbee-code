@@ -1,5 +1,5 @@
-from webbee.intel.models import ProjectIndex, FileIndex, Symbol
-from webbee.intel import chunker
+from imperal_sdk.code_index import ProjectIndex, FileIndex, Symbol
+from imperal_sdk import code_index as chunker
 
 
 def _idx(tmp_path):
@@ -41,5 +41,5 @@ def test_content_hash_stable_across_line_shift(tmp_path):
     idx = _idx(tmp_path)
     c1 = next(c for c in chunker.chunk_index(str(tmp_path), idx) if c.symbol == "alpha")
     # same text at a different span => same hash (incremental-skip relies on this)
-    assert chunker._hash("def alpha(x):\n    return x + 1") == chunker._hash("def alpha(x):\n    return x + 1")
+    assert chunker._chunk_hash("def alpha(x):\n    return x + 1") == chunker._chunk_hash("def alpha(x):\n    return x + 1")
     assert len(c1.content_hash) == 64

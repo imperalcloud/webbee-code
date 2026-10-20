@@ -6,7 +6,8 @@ mode: a bare `import numpy` inside embed.py/store.py with numpy absent)."""
 import pytest
 pytest.importorskip("tree_sitter")
 from webbee.intel.service import IntelService
-from webbee.intel import query, embed as embed_mod
+from webbee.intel import query
+from imperal_sdk import code_index as embed_mod
 
 
 def test_intel_only_degrades_to_lexical_graph_when_embed_import_fails(tmp_path, monkeypatch):

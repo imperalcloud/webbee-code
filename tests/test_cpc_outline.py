@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("tree_sitter")
 
 from webbee.intel import outline as ol            # noqa: E402
-from webbee.intel.contracts import extract_contracts  # noqa: E402
+from imperal_sdk.code_index import extract_contracts  # noqa: E402
 from webbee.intel.service import IntelService, _walk, ignored_path  # noqa: E402
 from webbee.intel.watch import _ignored          # noqa: E402
 from webbee.tools import LocalToolExecutor        # noqa: E402

@@ -470,7 +470,7 @@ def test_read_header_enriched_with_graph_context(tmp_path):
     # .graph) when present -- FACTS only: the symbols the file defines and the
     # files whose refs point at them. No tree-sitter needed here: the header
     # reads the same models/graph objects a real IntelService holds.
-    from webbee.intel.models import ProjectIndex, FileIndex, Symbol
+    from imperal_sdk.code_index import ProjectIndex, FileIndex, Symbol
     from webbee.intel.graph import CodeGraph
 
     (tmp_path / "a.py").write_text("class Alpha:\n    pass\n\ndef helper():\n    pass\n")
@@ -690,3 +690,182 @@ def test_list_dir_on_a_file_is_an_honest_error(tmp_path):
     ex = LocalToolExecutor(str(tmp_path))
     r = ex.run("list_dir", {"path": "a.py"})
     assert r["ok"] is False and "not a directory" in r["content"]
+
+
+# ── code graph everywhere (plan 3 Task 5): the user's own SSH feeds the vault's graph ──
+
+class _E:
+    def __init__(self, name, kind, size=10):
+        self.filename = name
+        self.attrs = type("A", (), {"type": kind, "size": size, "mtime": 3.0})()
+
+
+class _F:
+    def __init__(self, data):
+        self.data = data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def read(self, n=-1):
+        return self.data
+
+
+class _Sftp:
+    def __init__(self, tree, files):
+        self.tree, self.files, self.reads = tree, files, []
+
+    async def readdir(self, p):
+        if p not in self.tree:
+            raise OSError(p)
+        return self.tree[p]
+
+    def open(self, p, mode="rb"):
+        self.reads.append(p)
+        if p not in self.files:
+            raise OSError(p)
+        return _F(self.files[p])
+
+
+class _Cloud:
+    def __init__(self):
+        self.calls = []
+
+    async def _request(self, method, path, json=None, timeout=60):
+        self.calls.append((path, json))
+        if path.endswith("/sync/plan"):
+            return {"repo_key": "rk-remote", "changed": [i["path"] for i in json["listing"]], "removed": [],
+                    "have_blobs": []}
+        return {"files": len(json["files"])}
+
+
+WIN_TREE = {"/C:/u/proj": [_E(".git", 2), _E("Pkg", 2), _E(".env", 1), _E("setup.py", 1)],
+            "/C:/u/proj/Pkg": [_E("Foo.py", 1), _E("Bar.py", 1)]}
+WIN_FILES = {"/C:/u/proj/Pkg/Foo.py": b"def foo():\r\n    pass\r\n", "/C:/u/proj/Pkg/Bar.py": b"def foo():\n    pass\n",
+             "/C:/u/proj/.git/HEAD": b"ref: refs/heads/main\n", "/C:/u/proj/.env": b"S=1", "/C:/u/proj/setup.py": b"x"}
+
+
+def _remote(monkeypatch, sftp, fps=("SHA256:win",), why=""):
+    import webbee.tools as t
+
+    async def fake_open(host):
+        return (sftp if not why else None), None, list(fps), why
+    monkeypatch.setattr(t, "_open_sftp", fake_open)
+    cloud = _Cloud()
+    ex = LocalToolExecutor("/tmp", client_factory=lambda: cloud)
+    return ex, cloud
+
+
+def test_a_windows_server_repo_syncs_with_canonical_paths_and_one_blob(monkeypatch):
+    sftp = _Sftp(WIN_TREE, WIN_FILES)
+    ex, cloud = _remote(monkeypatch, sftp)
+    res = ex.run("intel_sync_remote", {"host": "winbox", "root": "/C:/u/proj/Pkg"})
+    assert res["ok"] and res["content"]["repo_key"] == "rk-remote"
+    plan = cloud.calls[0][1]
+    assert plan["meta"]["os"] == "windows" and plan["meta"]["root"] == "/C:/u/proj"
+    assert plan["meta"]["source"] == "system_ssh" and plan["meta"]["ref"] == "winbox"
+    assert plan["meta"]["machine"]["fingerprints"] == ["SHA256:win"]
+    assert sorted(i["path"] for i in plan["listing"]) == ["Pkg/Bar.py", "Pkg/Foo.py"]
+    applied = cloud.calls[1][1]
+    assert len(applied["blobs"]) == 1 and len(applied["files"]) == 2              # CRLF == LF: one version
+    assert not any(p.endswith(("setup.py", ".env")) for p in sftp.reads)          # never read
+
+
+def test_a_passphrase_key_without_a_master_says_needs_interactive_login_without_prompting(monkeypatch):
+    import asyncssh
+    import webbee.tools as t
+    monkeypatch.setattr(t, "master_open", lambda host: False)
+
+    async def refuse(host, **kw):
+        assert kw.get("passphrase") is None                                      # never asks
+        raise asyncssh.KeyEncryptionError("passphrase required")
+    monkeypatch.setattr(asyncssh, "connect", refuse)
+    cloud = _Cloud()
+    res = LocalToolExecutor("/tmp", client_factory=lambda: cloud).run("intel_sync_remote", {"host": "h", "root": "/r"})
+    assert res["ok"] is False and res["content"]["partial_reason"] == "needs interactive login" and not cloud.calls
+
+
+def test_the_ssh_config_alias_and_proxyjump_go_to_asyncssh(tmp_path, monkeypatch):
+    import asyncssh
+    import webbee.tools as t
+    (tmp_path / ".ssh").mkdir()
+    cfg = tmp_path / ".ssh" / "config"
+    cfg.write_text("Host whm-jump\n  HostName 10.0.0.5\n  User root\n  ProxyJump bastion\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(t, "master_open", lambda host: False)
+    seen = {}
+
+    async def connect(host, **kw):
+        seen.update(kw, host=host)
+        raise OSError("stop here")
+    monkeypatch.setattr(asyncssh, "connect", connect)
+    LocalToolExecutor("/tmp", client_factory=lambda: _Cloud()).run("intel_sync_remote", {"host": "whm-jump"})
+    assert seen["host"] == "whm-jump" and seen["config"] == [str(cfg)]
+    opts = asyncssh.SSHClientConnectionOptions(config=[str(cfg)], host="whm-jump")
+    assert opts.host == "10.0.0.5" and opts.username == "root"                     # the alias resolves to the real host
+
+
+def test_an_open_master_connection_reads_over_the_system_sftp_batch(monkeypatch):
+    import webbee.tools as t
+    monkeypatch.setattr(t, "master_open", lambda host: True)
+    monkeypatch.setattr(t, "known_fingerprints", lambda host: ["SHA256:m"])
+    batches = []
+
+    async def batch(self, commands):
+        batches.append(commands)
+        if commands.startswith("ls -la"):
+            return {'ls -la "/r"\n': "drwxr-xr-x 3 u u 96 Jan 2 10:00 /r/.git\n-rw-r--r-- 1 u u 9 Jan 2 10:00 /r/a.py\n"}\
+                .get(commands, "")
+        local = commands.rsplit('"', 2)[-2]
+        with open(local, "wb") as f:
+            f.write(b"x = 1\n")
+        return ""
+    monkeypatch.setattr(t.SystemSftp, "_batch", batch)
+    cloud = _Cloud()
+    res = LocalToolExecutor("/tmp", client_factory=lambda: cloud).run("intel_sync_remote", {"host": "h", "root": "/r"})
+    assert res["ok"] and any(b.startswith("get ") for b in batches)
+    assert cloud.calls[0][1]["meta"]["machine"]["fingerprints"] == ["SHA256:m"]
+
+
+def test_the_sync_verb_is_a_read_the_client_never_prompts_for():
+    import asyncio
+    from webbee.consent import handle_confirm_request
+    asked = []
+
+    async def ask(*a):
+        asked.append(a)
+        return "no"
+    out = asyncio.run(handle_confirm_request({"req_id": "r1", "tool": "intel_sync_remote", "args": {}}, "ask", ask))
+    assert out["result"] == {"approved": True} and not asked
+
+
+def test_system_sftp_answers_lstat_and_realpath_from_the_server():
+    """Security (sdk 6.3.1): the sdk's reads check lstat + realpath -- the sftp -b adapter answers both
+    (a link from its directory listing, the resolved path from the server's cd + pwd), cached per path."""
+    import asyncio
+    from webbee.tools import SystemSftp
+    calls = []
+
+    async def batch(cmds):
+        calls.append(cmds)
+        if cmds.startswith("ls -la"):
+            return ("drwxr-xr-x  3 u u 4096 Oct 19 10:00 .\n"
+                    "lrwxrwxrwx  1 u u   11 Oct 19 10:00 cfg.toml -> /etc/passwd\n"
+                    "-rw-r--r--  1 u u   10 Oct 19 10:00 a.py\n")
+        if '"/r/out"' in cmds:
+            return "Remote working directory: /etc\n"
+        if '"/r/a.py"' in cmds:
+            raise OSError("not a directory")
+        return "Remote working directory: /r\n"
+    s = SystemSftp("whm-jump")
+    s._batch = batch
+    assert asyncio.run(s.lstat("/r/cfg.toml")).type == 3 and asyncio.run(s.lstat("/r/a.py")).type == 1
+    assert asyncio.run(s.realpath("/r/out")) == "/etc"
+    assert asyncio.run(s.realpath("/r/a.py")) == "/r/a.py"
+    n = len(calls)
+    asyncio.run(s.realpath("/r/a.py"))
+    asyncio.run(s.lstat("/r/a.py"))
+    assert len(calls) == n                                    # cached: no new sftp process

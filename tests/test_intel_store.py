@@ -4,7 +4,8 @@ import os
 import numpy as np
 import pytest
 pytest.importorskip("tree_sitter")
-from webbee.intel import store, indexer
+from webbee.intel import store
+from imperal_sdk import code_index as indexer
 
 
 def test_roundtrip(tmp_path):

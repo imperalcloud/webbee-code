@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 pytest.importorskip("model2vec")
-from webbee.intel import embed
+from imperal_sdk import code_index as embed
 
 
 def test_model2vec_backend_embeds():

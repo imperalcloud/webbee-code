@@ -1,4 +1,4 @@
-from webbee.intel.models import ProjectIndex, FileIndex, Symbol
+from imperal_sdk.code_index import ProjectIndex, FileIndex, Symbol
 from webbee.intel.graph import CodeGraph
 
 

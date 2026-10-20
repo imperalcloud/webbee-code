@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from webbee.frames import _is_foreign_frame, render_foreign_frame
 
 
+# Verbs that only read: the kernel never asks consent for them (a verified read, core.action_effect); a
+# confirm_request naming one is answered yes here without a prompt (code graph spec §4.8: index reads
+# never ask -- intel_sync_remote lists and reads a repo over SFTP, writes nothing, runs nothing there).
+READ_VERBS = frozenset({"intel_sync_remote"})
+
+
 async def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
     """ICNLI consent path. The client does NOT interpret consent words — it
     relays the user's RAW reply; the kernel brain interprets intent
@@ -17,7 +23,7 @@ async def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:
     `ask_consent(app_id, tool, args)` is an async coroutine returning the raw
     reply (resolved through the pinned dock, or a sync fallback reader)."""
     req_id = frame["req_id"]
-    if mode == "autopilot":
+    if mode == "autopilot" or (not frame.get("app_id") and frame.get("tool") in READ_VERBS):
         return {"req_id": req_id, "result": {"approved": True}}
     if mode == "plan":
         return {"req_id": req_id, "result": {"approved": False, "reason": "plan_mode"}}

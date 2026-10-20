@@ -174,3 +174,99 @@ def test_profile_carries_content_addressed_contract_summary(tmp_path):
     assert prof["contract_evidence_complete"] is True
     assert prof["endpoints"][0]["route"] == "/v1/items"
     assert prof["schemas"][0]["name"] == "Item"
+
+
+# ── code graph everywhere (plan 3 Tasks 7, 9): the local workspace in the vault's graph ──
+
+class _Cloud:
+    """The gateway's /v1/memory/code/sync/* as a fake: records what the client sends."""
+
+    def __init__(self, have=()):
+        self.calls = []
+        self.have = set(have)
+
+    async def _request(self, method, path, json=None, timeout=60):
+        self.calls.append((path, json))
+        if path.endswith("/sync/plan"):
+            return {"repo_key": json["meta"]["local_key"], "removed": [], "have_blobs": [],
+                    "changed": [i["path"] for i in json["listing"] if i["path"] not in self.have]}
+        return {"files": len(json["files"]), "links": 0}
+
+
+def _synced(svc, monkeypatch):
+    monkeypatch.setattr(type(svc), "sync_vault", lambda self, rels=None: self._sync_vault(rels))
+
+
+def test_a_build_syncs_every_indexable_file_and_a_change_only_itself(tmp_path, monkeypatch):
+    from webbee.repo import compute_repo_key
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    (tmp_path / "b.ts").write_text("export function beta(){}\n")
+    (tmp_path / ".env").write_text("SECRET=1\n")
+    (tmp_path / "setup.py").write_text("x\n")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    _synced(svc, monkeypatch)
+    cloud = _Cloud()
+    svc.build()
+    svc.attach_vault(lambda: cloud)
+    plan = cloud.calls[0][1]
+    assert sorted(i["path"] for i in plan["listing"]) == ["a.py", "b.ts"]          # never .env / setup.py
+    assert plan["meta"]["local_key"] == compute_repo_key(str(tmp_path)) and plan["meta"]["source"] == "local"
+    assert plan["meta"]["machine"]["machine_id"] and plan["meta"]["listing_complete"] is True
+    applied = cloud.calls[1][1]
+    assert sorted(f["path"] for f in applied["files"]) == ["a.py", "b.ts"] and applied["blobs"][0]["facts"]["defs"]
+    cloud.calls.clear()
+    (tmp_path / "a.py").write_text("def alpha():\n    return 2\n")
+    svc.apply_changes(["a.py"])
+    plan = cloud.calls[0][1]
+    assert [i["path"] for i in plan["listing"]] == ["a.py"] and plan["meta"]["listing_complete"] is False
+    assert [f["path"] for f in cloud.calls[1][1]["files"]] == ["a.py"]
+
+
+def test_no_cloud_no_sync_and_a_cloud_outage_never_touches_the_local_index(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    _synced(svc, monkeypatch)
+    svc.build()
+    assert svc._sync_vault() == {}
+
+    class Down:
+        async def _request(self, *a, **kw):
+            raise OSError("gateway down")
+    svc.attach_vault(lambda: Down())
+    assert svc.ready and svc.last_sync == {}
+
+
+def test_git_history_gives_changed_together_pairs_weighted_by_how_often(tmp_path, monkeypatch):
+    import subprocess
+    from webbee.intel import service as svc_mod
+
+    def git(*a):
+        subprocess.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True)
+    git("init", "-q")
+    git("config", "user.email", "t@t"), git("config", "user.name", "t")
+    for i, files in enumerate((("a.py", "b.py"), ("a.py", "b.py", "c.py"))):
+        for f in files:
+            (tmp_path / f).write_text(f"x = {i}\n")
+        git("add", "-A")
+        git("commit", "-qm", f"c{i}")
+    pairs = {(e["src_path"], e["dst_path"]): e["confidence"] for e in svc_mod.co_change_pairs(str(tmp_path))}
+    assert pairs[("a.py", "b.py")] > pairs[("a.py", "c.py")] and pairs[("b.py", "a.py")] == pairs[("a.py", "b.py")]
+    assert all(e["origin"] == "changed together" for e in svc_mod.co_change_pairs(str(tmp_path)))
+
+    def no_git(*a, **kw):
+        raise FileNotFoundError("git")
+    monkeypatch.setattr(svc_mod.subprocess, "run", no_git)
+    assert svc_mod.co_change_pairs(str(tmp_path)) == []
+
+
+def test_the_build_sync_carries_the_history_links(tmp_path, monkeypatch):
+    from webbee.intel import service as svc_mod
+    (tmp_path / "a.py").write_text("x = 1\n")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    _synced(svc, monkeypatch)
+    monkeypatch.setattr(svc_mod, "co_change_pairs", lambda root: [{"src_path": "a.py", "dst_path": "b.py",
+                                                                   "confidence": 0.4, "origin": "changed together"}])
+    cloud = _Cloud()
+    svc.build()
+    svc.attach_vault(lambda: cloud)
+    assert cloud.calls[-1][1]["measured"][0]["dst_path"] == "b.py"

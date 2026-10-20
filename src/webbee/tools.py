@@ -105,6 +105,9 @@ class LocalToolExecutor:
         self.root = os.path.realpath(workspace_root)
         self.indexer = indexer  # IntelService (or None on a base install) -- Task 5's _t_<verb> shims read this
         self.shadow = shadow    # ShadowGit (or None) -- the reversibility time machine
+        if indexer is not None and client_factory is not None and hasattr(indexer, "attach_vault"):
+            # code graph everywhere: the workspace's index is a source of the vault's one graph
+            indexer.attach_vault(client_factory)
         # Zero-arg callable -> ImperalClient, used ONLY to reach the system
         # file-reader extension when read_file meets a document or an image
         # (native-document-read-v1). A factory, not a client, so a session with
@@ -781,6 +784,24 @@ class LocalToolExecutor:
             return query.orient(self.indexer, a.get("query", ""))
         return {"ok": False, "content": f"unknown cpc verb: {verb}"}
 
+    def _t_intel_sync_remote(self, a: dict) -> dict:
+        """Sync a repo on a server the USER reaches with their own ssh into the vault's code graph
+        (code graph spec §4.7, plan 3 Task 5): ``{host, root, paths?}``. SFTP only -- no exec channel,
+        nothing written on the server, nothing but indexable files read; never prompts: a key that
+        needs a passphrase, a hardware touch or 2FA -> ``partial_reason = "needs interactive login"``
+        unless an open master connection (``ssh -O check``) carries it."""
+        host = str(a.get("host") or "").strip()
+        if not host:
+            return {"ok": False, "content": "intel_sync_remote: host is required"}
+        if self.client_factory is None:
+            return {"ok": False, "content": "intel_sync_remote: this session cannot reach the cloud"}
+        try:
+            out = _run_async(remote_sync(self.client_factory(), host, str(a.get("root") or "."),
+                                         [str(p) for p in a.get("paths") or []]))
+        except Exception as e:
+            return {"ok": False, "content": f"intel_sync_remote: {type(e).__name__}: {e}"}
+        return {"ok": bool(out.get("repo_key")), "content": out}
+
     def _t_web_search(self, a: dict) -> dict:
         """Search the web using Imperal's system web-search extension."""
         query = str(a.get("query", "") or a.get("q", "")).strip()
@@ -913,3 +934,237 @@ class LocalToolExecutor:
             "content": f"{head}\n[Native Vision Image Payload: {rel} ({human_size(size)}, {mime})]" + (f"\n\nOCR / Text Context:\n{fallback_text}" if fallback_text else "")
         }
         return out
+
+
+# ── code graph everywhere (plan 3 Task 5): the user's own SSH feeds the vault's graph ───────────────
+
+def _run_async(coro):
+    """The executor runs in a worker thread: a fresh event loop for one call."""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def ssh_config_paths() -> list:
+    p = os.path.expanduser("~/.ssh/config")
+    return [p] if os.path.exists(p) else []
+
+
+def master_open(host: str) -> bool:
+    """An open OpenSSH master connection to ``host`` (``ssh -O check``) -- the user is already logged in."""
+    import subprocess
+    try:
+        r = subprocess.run(["ssh", "-O", "check", host], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def known_fingerprints(host: str) -> list:
+    """The host key fingerprints the user's known_hosts holds for the real host an alias resolves to
+    (``ssh -G`` for HostName / Port, ``ssh-keygen -lF``) -- local files only."""
+    import subprocess
+    try:
+        g = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=10)
+        conf = dict(ln.split(" ", 1) for ln in g.stdout.splitlines() if " " in ln)
+        name, port = conf.get("hostname", host), conf.get("port", "22")
+        key = name if port == "22" else f"[{name}]:{port}"
+        r = subprocess.run(["ssh-keygen", "-lF", key], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return sorted({w for ln in r.stdout.splitlines() for w in ln.split() if w.startswith("SHA256:")})
+
+
+class _Attrs:
+    def __init__(self, type_: int, size: int, mtime: float) -> None:
+        self.type, self.size, self.mtime = type_, size, mtime
+
+
+class _Entry:
+    def __init__(self, filename: str, attrs: _Attrs) -> None:
+        self.filename, self.attrs = filename, attrs
+
+
+class SystemSftp:
+    """The SFTP surface the sdk's walk needs (``readdir`` / ``open``), over the user's system ``sftp``
+    in batch mode through an open master connection -- no prompt, no exec channel."""
+
+    _MONTHS = {m: i for i, m in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+                                            "Nov", "Dec"), start=1)}
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+        self._dirs: dict = {}        # dir -> its entries (lstat answers from the parent's listing)
+        self._real: dict = {}        # dir -> the server's resolved path of it
+
+    async def _batch(self, commands: str) -> str:
+        import asyncio
+        proc = await asyncio.create_subprocess_exec(
+            "sftp", "-q", "-b", "-", "-o", "BatchMode=yes", self.host, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await proc.communicate(commands.encode("utf-8"))
+        if proc.returncode != 0:
+            raise OSError(err.decode("utf-8", "replace").strip()[:200] or "sftp failed")
+        return out.decode("utf-8", "replace")
+
+    @staticmethod
+    def _quote(path: str) -> str:
+        return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def _mtime(self, mon: str, day: str, when: str) -> float:
+        import datetime
+        try:
+            if ":" in when:
+                year = datetime.date.today().year
+                hh, mm = when.split(":")
+                dt = datetime.datetime(year, self._MONTHS[mon], int(day), int(hh), int(mm))
+            else:
+                dt = datetime.datetime(int(when), self._MONTHS[mon], int(day))
+            return dt.timestamp()
+        except (KeyError, ValueError):
+            return 0.0
+
+    async def readdir(self, path: str) -> list:
+        out = await self._batch(f"ls -la {self._quote(path)}\n")
+        entries = []
+        for ln in out.splitlines():
+            parts = ln.split(None, 8)
+            if len(parts) < 9 or parts[0][:1] not in "-dl":
+                continue
+            name = parts[8].split(" -> ", 1)[0] if parts[0][0] == "l" else parts[8]
+            name = name.rsplit("/", 1)[-1]
+            kind = {"d": 2, "l": 3}.get(parts[0][0], 1)
+            entries.append(_Entry(name, _Attrs(kind, int(parts[4]) if parts[4].isdigit() else 0,
+                                               self._mtime(parts[5], parts[6], parts[7]))))
+        return entries
+
+    async def lstat(self, path: str):
+        """The entry's own attributes (a symlink is type 3), from its directory's listing."""
+        import posixpath
+        d, b = posixpath.split(str(path).rstrip("/") or "/")
+        if d not in self._dirs:
+            self._dirs[d] = {e.filename: e.attrs for e in await self.readdir(d or "/")}
+        if b not in self._dirs[d]:
+            raise OSError(path)
+        return self._dirs[d][b]
+
+    async def realpath(self, path: str) -> str:
+        """Where the server resolves ``path`` (``cd`` + ``pwd``: the links on the way resolved) -- the sdk
+        keeps every read under the repo root by it. A file resolves through its directory."""
+        import posixpath
+        p = str(path).rstrip("/") or "/"
+        if p not in self._real:
+            try:
+                out = await self._batch(f"cd {self._quote(p)}\npwd\n")
+                line = next((ln for ln in out.splitlines() if ln.startswith("Remote working directory:")), "")
+                if not line:
+                    raise OSError(path)
+                self._real[p] = line.split(":", 1)[1].strip()
+            except OSError:
+                d, b = posixpath.split(p)
+                if not b or d == p:
+                    raise
+                self._real[p] = posixpath.join(await self.realpath(d or "/"), b)
+        return self._real[p]
+
+    def open(self, path: str, mode: str = "rb"):
+        sftp = self
+
+        class _Reader:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+            async def read(self_inner, n: int = -1) -> bytes:
+                import tempfile
+                with tempfile.TemporaryDirectory() as d:
+                    local = os.path.join(d, "f")
+                    await sftp._batch(f"get {sftp._quote(path)} {sftp._quote(local)}\n")
+                    with open(local, "rb") as f:
+                        return f.read() if n is None or n < 0 else f.read(n)
+        return _Reader()
+
+
+async def _open_sftp(host: str):
+    """``(sftp, conn, fingerprints, why)``: asyncssh over the user's ssh config, agent and known_hosts
+    (never a prompt), else the system sftp over an open master connection, else ``why``."""
+    if master_open(host):
+        return SystemSftp(host), None, known_fingerprints(host), ""
+    try:
+        import asyncssh
+    except ImportError:
+        return None, None, [], "asyncssh is not installed"
+    try:
+        conn = await asyncssh.connect(host, config=ssh_config_paths(), passphrase=None, connect_timeout=20)
+    except (asyncssh.PermissionDenied, asyncssh.KeyImportError, asyncssh.KeyEncryptionError):
+        return None, None, [], "needs interactive login"
+    except Exception as e:      # unreachable, refused, a host key that changed: said, never guessed past
+        return None, None, [], f"{type(e).__name__}: {e}"
+    key = conn.get_server_host_key()
+    return await conn.start_sftp_client(), conn, ([key.get_fingerprint("sha256")] if key else []), ""
+
+
+async def remote_sync(client, host: str, root: str, paths: list) -> dict:
+    """List and read the repo holding ``root`` on ``host`` over SFTP (the sdk's one walk: .gitignore,
+    secrets and dependency trees skipped), extract and embed here, and sync it into the vault through
+    the gateway (the sdk's one sync). ``paths``: only these files changed (a partial listing)."""
+    import posixpath
+    import time
+
+    from imperal_sdk import code_index as ci
+    from webbee.intel.service import vault_sync
+    t0 = time.monotonic()
+    sftp, conn, fps, why = await _open_sftp(host)
+    if sftp is None:
+        return {"repo_key": "", "partial_reason": why, "content": f"{host}: {why}"}
+    try:
+        repo_root = await ci.sftp_repo_root(sftp, root)
+        meta_files = (await ci.sftp_read_meta(sftp, repo_root))["files"]
+        if paths:
+            listing = []
+            for p in paths:
+                rel = p[len(repo_root) + 1:] if p.startswith(repo_root.rstrip("/") + "/") else p
+                try:
+                    st = await sftp.stat(posixpath.join(repo_root, rel)) if hasattr(sftp, "stat") else None
+                    listing.append({"path": rel, "size": int(getattr(st, "size", 0) or 0),
+                                    "mtime": float(getattr(st, "mtime", 0) or 0)} if st else {"path": rel, "size": 0,
+                                                                                             "mtime": time.time()})
+                except Exception:
+                    listing.append({"path": rel, "size": -1, "mtime": 0.0})
+            tree = {"items": listing, "partial": "", "os": ci.sftp_os(repo_root)}
+        else:
+            tree = await ci.sftp_list_tree(sftp, repo_root)
+        meta = {"machine": {"fingerprints": fps,
+                            "machine_id": meta_files.get("/etc/machine-id", b"").decode("utf-8", "replace").strip(),
+                            "label": host},
+                "root": repo_root, "root_path": repo_root, "os": tree["os"], "source": "system_ssh", "ref": host,
+                "machine_kind": "ssh", "git": ci.git_identity(meta_files), "listing_complete": not paths}
+        if tree.get("partial"):
+            meta["partial_listing"] = tree["partial"]
+
+        async def read(ps):
+            got, todo = {}, list(ps)
+            for _ in range(64):
+                if not todo:
+                    break
+                ans = await ci.sftp_read_many(sftp, repo_root, todo)
+                got.update(ans["files"])
+                todo = list(ans["rest"])
+            return got
+        out = await vault_sync(client, meta, tree["items"], read)
+    finally:
+        if conn is not None:
+            conn.close()
+    log_line = (f"code sync repo={out.get('repo_key')} source=system_ssh listed={out.get('listed')} "
+                f"changed={out.get('changed')} read_bytes={out.get('read_bytes')} new_blobs={out.get('new_blobs')} "
+                f"extract_ms={out.get('extract_ms')} links+={out.get('links_added')} links-={out.get('links_removed')} "
+                f"unresolved={out.get('unresolved')} partial={out.get('partial_reason') or '-'} "
+                f"ms={int((time.monotonic() - t0) * 1000)}")
+    import logging
+    logging.getLogger("webbee.intel").info(log_line)
+    return {**out, "root": repo_root, "host": host}

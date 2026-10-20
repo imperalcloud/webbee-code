@@ -4,15 +4,22 @@ cold path (cache-load or full index) off the event loop, `.apply_changes()`
 does the cheap incremental re-parse the watcher drives, and `.repo_profile()`
 is the bounded summary handed to the brain."""
 from __future__ import annotations
+import asyncio
 import hashlib
+import logging
 import os
 import subprocess
 import threading
+import time
+import uuid
 from collections import Counter
 
-from webbee.intel import indexer, store
+from imperal_sdk import code_index as indexer
+from imperal_sdk.code_index import ProjectIndex
+from webbee.intel import store
 from webbee.intel.graph import CodeGraph
-from webbee.intel.models import ProjectIndex
+
+log = logging.getLogger("webbee.intel")
 
 _MAX_PROFILE_SAMPLE = 20
 _MAX_CONTRACT_EVIDENCE = 5000
@@ -114,21 +121,24 @@ class IntelService:
         # repo_profile() read -- without it, a worker thread can resize
         # self.index.files mid-iteration on the reader's side.
         self._lock = threading.Lock()
+        # code graph everywhere (plan 3 Task 7): the client is a source of the vault's graph -- a zero-arg
+        # factory of the cloud client (set by the tool executor); None = no cloud, nothing is synced
+        self.vault_client_factory = None
+        self._sync_lock = threading.Lock()
+        self.last_sync: dict = {}
 
     def _get_backend(self):
         # Lazy + cached: the model load is expensive (and may be unavailable
         # entirely), so it happens at most once per service instance. A
         # None result is cached too -- unavailable stays unavailable rather
-        # than retrying the load on every call. The import itself is guarded
-        # too: an intel-only install (`webbee[intel]`, no embed extra) has no
-        # numpy/model2vec, so `from webbee.intel import embed` (its
-        # module-level `import numpy`) can raise here -- that must degrade to
-        # "no backend", not crash build() and disable intel entirely.
+        # than retrying the load on every call. The load is guarded too: an
+        # install without numpy/model2vec (the sdk's embedder,
+        # ``imperal_sdk.code_index.load_backend``) must degrade to "no
+        # backend", not crash build() and disable intel entirely.
         if self._backend != "__unset__":
             return self._backend
         try:
-            from webbee.intel import embed
-            self._backend = embed.load_backend()
+            self._backend = indexer.load_backend()
         except Exception:
             self._backend = None
         return self._backend
@@ -154,6 +164,7 @@ class IntelService:
         self.graph = CodeGraph(idx)
         self.fresh = True
         self._embed_build(idx)
+        self.sync_vault()                 # code graph everywhere: the whole repo into the vault
 
     def _embed_build(self, idx: ProjectIndex) -> None:
         # Off-loop already (build() is called via asyncio.to_thread from the
@@ -161,7 +172,7 @@ class IntelService:
         # git_ref+model_id match; a miss chunks+embeds+saves. Fail-soft --
         # no backend means self.vectors stays None and search_code (F5)
         # falls back to lexical+graph instead of raising.
-        from webbee.intel import chunker, store as _store
+        from webbee.intel import store as _store
         b = self._get_backend()
         if b is None:
             self.vectors = None
@@ -177,7 +188,7 @@ class IntelService:
             ids, mat = cached
             vs = VectorStore.from_arrays(b.dim, ids, mat)
         else:
-            chunks = chunker.chunk_index(self.root, idx)
+            chunks = indexer.chunk_index(self.root, idx)
             vs = VectorStore(b.dim)
             if chunks:
                 vecs = b.embed([c.text for c in chunks])
@@ -222,14 +233,13 @@ class IntelService:
         fresh_vecs = None
         current_ids: dict[str, set] = {}   # edited rel -> its FULL current chunk-id set
         if embed_ready:
-            from webbee.intel import chunker
             b = self._get_backend()
             fresh_chunks = []
             for rel, fi in updates.items():
                 if fi is None:
                     continue  # deleted -- current_ids[rel] stays absent, so ALL its
                               # ids are caught as stale below
-                chunks = chunker.chunk_file(self.root, fi)
+                chunks = indexer.chunk_file(self.root, fi)
                 current_ids[rel] = {c.id for c in chunks}
                 for c in chunks:
                     if self._chunk_hashes.get(c.id) != c.content_hash:
@@ -240,6 +250,7 @@ class IntelService:
                 for c in fresh_chunks:
                     self._chunk_hashes[c.id] = c.content_hash
 
+        self.sync_vault(list(updates))    # only the changed files go to the vault
         with self._lock:
             for rel, fi in updates.items():
                 if fi is None:
@@ -266,6 +277,60 @@ class IntelService:
                         self._chunk_hashes.pop(i, None)
                 if fresh_ids:
                     self.vectors.add(fresh_ids, fresh_vecs)
+
+    def _sync_vault(self, rels=None) -> dict:
+        """The workspace (``rels=None``: every indexable file, with the git history's co-change links) or the
+        changed files into the vault. Fail-soft: a cloud outage never touches the local index."""
+        factory = self.vault_client_factory
+        if factory is None:
+            return {}
+        with self._sync_lock:
+            t0 = time.monotonic()
+            try:
+                from webbee.repo import compute_repo_key
+
+                async def read(paths):
+                    got = {}
+                    for p in paths:
+                        try:
+                            with open(os.path.join(self.root, p), "rb") as f:
+                                got[p] = f.read(indexer.MAX_FILE_BYTES + 1)
+                        except OSError:
+                            continue
+                    return got
+                meta = {"machine": {"machine_id": machine_id()}, "root": self.root, "root_path": self.root,
+                        "os": "windows" if os.name == "nt" else "posix", "source": "local", "ref": "",
+                        "machine_kind": "local", "git": local_git_identity(self.root),
+                        "local_key": compute_repo_key(self.root), "listing_complete": rels is None}
+                listing = _local_listing(self.root, rels)
+                measured = co_change_pairs(self.root) if rels is None else None
+                out = asyncio.run(vault_sync(factory(), meta, listing, read, measured))
+            except Exception as exc:
+                log.warning("code sync to the vault failed: %s", exc)
+                return {}
+            self.last_sync = out
+            log.info("code sync repo=%s source=local listed=%d changed=%d read_bytes=%d new_blobs=%d extract_ms=%d "
+                     "links+=%d links-=%d unresolved=%d partial=%s ms=%d", out.get("repo_key"), out.get("listed", 0),
+                     out.get("changed", 0), out.get("read_bytes", 0), out.get("new_blobs", 0), out.get("extract_ms", 0),
+                     out.get("links_added", 0), out.get("links_removed", 0), out.get("unresolved", 0),
+                     out.get("partial_reason") or "-", int((time.monotonic() - t0) * 1000))
+            return out
+
+
+    def sync_vault(self, rels=None) -> None:
+        """Off the caller's thread: the build and the watcher never wait for the cloud."""
+        if self.vault_client_factory is None:
+            return
+        threading.Thread(target=self._sync_vault, args=(rels,), name="webbee-code-sync", daemon=True).start()
+
+
+    def attach_vault(self, client_factory) -> None:
+        """The tool executor gives the service its cloud client: the first time, the built repo syncs."""
+        if client_factory is None or self.vault_client_factory is not None:
+            return
+        self.vault_client_factory = client_factory
+        if self.index is not None:
+            self.sync_vault()
 
     def repo_profile(self) -> dict:
         # Snapshot under the lock, then compute everything from the
@@ -312,3 +377,92 @@ class IntelService:
             "endpoints": endpoints[:_MAX_CONTRACT_EVIDENCE],
             "schemas": schemas[:_MAX_CONTRACT_EVIDENCE],
         }
+
+
+# ── code graph everywhere (plan 3 Tasks 7, 9): the local workspace in the vault's one graph ─────────
+
+def machine_id() -> str:
+    """This machine's id for the code catalog (the vault separates two checkouts of one repo by it)."""
+    try:
+        with open("/etc/machine-id", encoding="utf-8") as f:
+            mid = f.read().strip()
+            if mid:
+                return mid
+    except OSError:
+        pass
+    return hashlib.sha256(f"webbee|{uuid.getnode()}".encode()).hexdigest()[:32]
+
+
+def local_git_identity(root: str) -> dict:
+    """``{remote, branch, commit}`` read from the repo's own .git files (no git binary needed)."""
+    meta: dict = {}
+    for rel in (".git/HEAD", ".git/config", ".git/packed-refs"):
+        try:
+            with open(os.path.join(root, rel), "rb") as f:
+                meta[rel] = f.read(262144)
+        except OSError:
+            continue
+    head = meta.get(".git/HEAD", b"").decode("utf-8", "replace")
+    if head.startswith("ref:"):
+        ref = head.split(":", 1)[1].strip()
+        try:
+            with open(os.path.join(root, ".git", *ref.split("/")), "rb") as f:
+                meta[f".git/{ref}"] = f.read(4096)
+        except OSError:
+            pass
+    return indexer.git_identity(meta)
+
+
+def co_change_pairs(root: str, commits: int = 500, max_files: int = 30) -> list:
+    """Files changed together in the repo's own git history (``git log --name-only``, run on the LOCAL
+    disk only -- never on a server): ``changed together`` links both ways, confidence from how often.
+    No git binary or no history -> []."""
+    try:
+        r = subprocess.run(["git", "-C", root, "log", "--name-only", f"-n{int(commits)}", "--format=%x00"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    counts: dict = {}
+    for block in r.stdout.split("\x00"):
+        files = sorted({ln.strip() for ln in block.splitlines() if ln.strip() and indexer.indexable(ln.strip()) == "code"})
+        if len(files) < 2 or len(files) > max_files:
+            continue
+        for i, a in enumerate(files):
+            for b in files[i + 1:]:
+                counts[(a, b)] = counts.get((a, b), 0) + 1
+    out = []
+    for (a, b), n in sorted(counts.items(), key=lambda kv: -kv[1])[:1000]:
+        conf = round(min(1.0, 0.2 * n), 2)
+        out += [{"src_path": a, "dst_repo": "", "dst_path": b, "confidence": conf, "origin": "changed together"},
+                {"src_path": b, "dst_repo": "", "dst_path": a, "confidence": conf, "origin": "changed together"}]
+    return out
+
+
+async def vault_sync(client, meta: dict, listing: list, read, measured=None) -> dict:
+    """One sync through the gateway's owner-scoped ``/v1/memory/code/sync/*`` -- the sdk's one sync
+    algorithm (``code_index.sync_source``); the repo's ``changed together`` links ride its last apply."""
+    async def plan(items, m):
+        return await client._request("POST", "/v1/memory/code/sync/plan", json={"listing": items, "meta": m},
+                                     timeout=120)
+
+    async def apply(**payload):
+        if measured and not (payload.get("meta") or {}).get("defer_links"):
+            payload = {**payload, "measured": measured}
+        return await client._request("POST", "/v1/memory/code/sync/apply", json=payload, timeout=300)
+    return await indexer.sync_source(plan, apply, meta, listing, read)
+
+
+def _local_listing(root: str, rels=None) -> list:
+    out = []
+    for rel in (rels if rels is not None else _walk(root)):
+        rel = rel.replace(os.sep, "/")
+        if not indexer.indexable(rel) or ignored_path(root, rel):
+            continue
+        try:
+            st = os.stat(os.path.join(root, rel))
+            out.append({"path": rel, "size": int(st.st_size), "mtime": float(st.st_mtime)})
+        except OSError:
+            out.append({"path": rel, "size": -1, "mtime": 0.0})     # gone: removed from the vault
+    return out

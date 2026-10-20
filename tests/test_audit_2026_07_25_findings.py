@@ -28,7 +28,7 @@ def test_a1_chunk_id_ignores_kind_so_ids_can_collide():
     method, so both chunks get the SAME id. Fix = include kind/symbol in the
     id (then this test must be updated).
     """
-    from webbee.intel import chunker
+    from imperal_sdk import code_index as chunker
 
     src = inspect.getsource(chunker._mk)
     # FIXED 2026-07-25: the id now carries kind AND symbol, which is what
@@ -441,7 +441,7 @@ def test_a1_end_to_end_repro_one_ordinary_file_kills_intel(tmp_path):
     """
     import collections
 
-    from webbee.intel import chunker, indexer
+    from imperal_sdk import code_index as chunker, code_index as indexer
     from webbee.intel.vectors import VectorStore
 
     lines = ["class Big:"]                        # line 1
