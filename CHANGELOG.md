@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4
+
+* **Code search by meaning for repos synced before**: imperal-sdk >= 6.3.6 tells the code map this client
+  embeds, so the map asks once for the files it holds without vectors -- a repo first synced without them stayed
+  "semantic: off" and only matched names.
+
 ## 0.5.3
 
 * **grep finds lines in a single file**: a grep whose path is one file searched nothing and answered
