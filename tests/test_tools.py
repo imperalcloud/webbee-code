@@ -887,3 +887,30 @@ def test_system_sftp_refuses_a_control_character_in_a_remote_path():
         with pytest.raises(OSError):
             asyncio.run(s.readdir(bad))
     assert ran == []
+
+
+def test_an_asyncssh_connect_reports_every_key_of_the_host_the_user_trusts(monkeypatch):
+    """Live 2026-10-20: the panel met whm-jump by RSA, the user's ssh by ed25519 -- two machine nodes. The
+    client sends the negotiated key and the host's other known_hosts keys: one machine."""
+    import asyncio
+    import asyncssh
+    import webbee.tools as t
+    monkeypatch.setattr(t, "master_open", lambda host: False)
+    monkeypatch.setattr(t, "known_fingerprints", lambda host: ["SHA256:rsa", "SHA256:ecdsa", "SHA256:ed"])
+
+    class Key:
+        def get_fingerprint(self, alg):
+            return "SHA256:ed"
+
+    class Conn:
+        def get_server_host_key(self):
+            return Key()
+
+        async def start_sftp_client(self):
+            return "sftp"
+
+    async def connect(host, **kw):
+        return Conn()
+    monkeypatch.setattr(asyncssh, "connect", connect)
+    sftp, conn, fps, why = asyncio.run(t._open_sftp("whm-jump"))
+    assert sftp == "sftp" and why == "" and fps == ["SHA256:ecdsa", "SHA256:ed", "SHA256:rsa"]

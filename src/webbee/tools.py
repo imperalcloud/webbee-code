@@ -1111,7 +1111,11 @@ async def _open_sftp(host: str):
     except Exception as e:      # unreachable, refused, a host key that changed: said, never guessed past
         return None, None, [], f"{type(e).__name__}: {e}"
     key = conn.get_server_host_key()
-    return await conn.start_sftp_client(), conn, ([key.get_fingerprint("sha256")] if key else []), ""
+    # the negotiated key and the host's other keys the user's known_hosts trusts: a server has several (RSA,
+    # ECDSA, ed25519) and another source may have met it by a different one -- one machine, never two
+    fps = sorted({key.get_fingerprint("sha256")} if key else set())
+    fps = sorted(set(fps) | set(known_fingerprints(host)))
+    return await conn.start_sftp_client(), conn, fps, ""
 
 
 async def remote_sync(client, host: str, root: str, paths: list) -> dict:

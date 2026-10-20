@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+* **One server, one machine**: a repo synced over your own `ssh` reports every host key of that server your
+  `known_hosts` trusts (RSA, ECDSA, ed25519), so the panel and your terminal see one machine, not two.
+* Requires `imperal-sdk >= 6.3.4` (10 MB a file, batched syncs).
+
 ## 0.5.1
 
 **Security fixes for the remote and local code sync.**
