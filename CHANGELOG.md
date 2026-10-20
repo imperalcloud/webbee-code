@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+**Webbee v0.5.0: one code graph for every source.**
+
+* **The code index feeds the Tenant Vault**: the workspace's files, definitions and links go into the vault's
+  code graph, so the panel, Telegram and the kernel answer code questions about your repos from the same graph.
+* **`intel_sync_remote`**: a repo on a server you reach with your own `ssh` is synced over SFTP (no remote
+  commands, nothing written, symlinks never followed, never a password prompt) -- code questions about it are
+  answered from the vault; a key that needs interactive login is said plainly.
+* **Shared extractor**: parsing, chunks and embeddings come from `imperal-sdk` (`imperal_sdk.code_index`, >= 6.3.2).
+* Requires `asyncssh` for direct SFTP (falls back to the system `sftp` through an open master connection).
+
 ## 0.4.4
 
 **Webbee v0.4.4: Clean Tool Rendering, Real-Time Action Cost Estimation & Terminal Robustness.**
