@@ -3,6 +3,7 @@ import time
 from collections import OrderedDict, deque
 
 from webbee.coding_context import build_coding_context, detect_verify_cmd
+from webbee.http import make_client
 from webbee.consent import _retire, race_consent
 from webbee.frames import (
     _MARATHON_FACT_TYPES,
@@ -232,7 +233,7 @@ class AgentSession:
             body["goal"] = goal
 
         headers = await self._headers()
-        async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:
+        async with make_client(self.cfg, timeout=60) as client:     # keepalive: a slept socket dies, never hangs
             resp = await _transient_retry(lambda: client.post(
                 "/v1/agent/sessions", json=body, headers=headers))
             resp.raise_for_status()
@@ -274,7 +275,7 @@ class AgentSession:
         executor = LocalToolExecutor(self.workspace_root, indexer=self._intel,
                                      shadow=self._shadow,
                                      client_factory=self._file_client_factory())
-        async with httpx.AsyncClient(base_url=self.cfg.api_url, timeout=60) as client:
+        async with make_client(self.cfg, timeout=60) as client:     # keepalive: a slept socket dies, never hangs
             return await self._serve_stream(sink, client, session_id, start_id, task_id,
                                             executor, marathon=marathon)
 

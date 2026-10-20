@@ -1737,6 +1737,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         # log; the contextlib redirect below additionally covers Python-level
         # sys.stderr writers. Fail-soft: on any failure leave fd 2 untouched.
         _saved_stderr_fd = None
+        _boot_error = ""
         try:
             _saved_stderr_fd = os.dup(2)
             os.dup2(_errlog.fileno(), 2)
@@ -1993,6 +1994,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             import traceback
             with open("/tmp/dock_boot_error.log", "w") as f:
                 traceback.print_exc(file=f)
+            _boot_error = f"{type(e).__name__}: {e}"
             ok = False
         finally:
             # Restore the real fd 2 BEFORE the transcript dump / any later
@@ -2007,6 +2009,10 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 _errlog.close()
             except Exception:
                 pass
+            if _boot_error:     # said on the REAL stderr (fd 2 is restored): never a silent fallback
+                sys.stderr.write(f"\r\n[webbee] the terminal UI failed to start: {_boot_error[:300]}\r\n"
+                                 "         details: /tmp/dock_boot_error.log\r\n")
+                sys.stderr.flush()
         if ok:
             # the alt screen is gone — reprint EVERY session tab's own
             # scrollback to real stdout (Task 7: was just the one slot that

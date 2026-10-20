@@ -51,6 +51,8 @@ class _TransientStatus(Exception):
 
 async def stream_frames(client, session_id: str, headers_provider, *,
                         start_id: str = "0-0", force_refresh=None, on_retry=None):
+    from webbee.http import WakeDetector
+    woke = WakeDetector()
     last_id = start_id or "0-0"
     backoff = _BACKOFF_BASE
     attempt = 0
@@ -105,6 +107,8 @@ async def stream_frames(client, session_id: str, headers_provider, *,
                         yield frame
         except (httpx.HTTPError, OSError, _TransientStatus, _TransientAuth):
             attempt += 1
+            if woke.check():
+                backoff = _BACKOFF_BASE      # the machine slept: reconnect now, not after the old backoff
             delay = min(backoff, _BACKOFF_MAX)
             if on_retry is not None:
                 try:

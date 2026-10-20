@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.3
+
+* **grep finds lines in a single file**: a grep whose path is one file searched nothing and answered
+  "(no matches)" -- the agent concluded things were missing that were there.
+* **The connection survives sleep and network changes**: sockets carry TCP keepalive (a connection that died
+  while the laptop slept is found dead in about a minute instead of hanging the stream), idle pooled
+  connections expire after 30s, and the stream reconnects at once after a wake.
+* **The tab bar never vanishes**: it is one fixed row that never wraps or scrolls; a broken terminal size
+  falls back to sane bounds.
+* **A UI that fails to start says why** on the real terminal, not only in `/tmp/dock_boot_error.log`.
+
 ## 0.5.2
 
 * **One server, one machine**: a repo synced over your own `ssh` reports every host key of that server your
