@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.6
+
+* **`pip install webbee` works on Python 3.7, 3.8 and 3.9** (macOS ships 3.9): webbee's dependencies need
+  3.10+, so on an older Python the install is light and the `webbee` command (`webbee/_launch.py`, standard
+  library only, 3.7 syntax) sets up the same release on its own Python 3.12 once with uv, then hands over.
+  It is the full webbee -- code index and search by meaning included. uv comes as a wheel on 3.8+; on 3.7
+  the launcher downloads uv's release build from GitHub and checks its published SHA-256. On 3.10+ nothing
+  changes. Checked on clean Python 3.7 (arm64, x86_64), 3.8, 3.9 (incl. macOS's own with pip 21) and 3.12.
+* **README**: one install section for every Python, and the errors people actually hit.
+
 ## 0.5.5
 
 * **Installs on Python 3.10 again**: pip and pipx stopped with "conflicting dependencies / ResolutionImpossible"
