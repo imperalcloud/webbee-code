@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.8
+
+* **README**: the supported Python versions (3.7 – 3.14) at the top of the page.
+
 ## 0.5.7
 
 * **The one-time Python 3.12 setup cannot be steered by the folder it starts in**: uv now runs with

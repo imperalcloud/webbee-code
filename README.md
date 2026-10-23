@@ -1,9 +1,11 @@
 # Webbee 🐝 — The Open-Source ICNLI Coding Agent
 
 [![PyPI](https://img.shields.io/pypi/v/webbee)](https://pypi.org/project/webbee/)
-[![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776ab?logo=python&logoColor=white)](https://pypi.org/project/webbee/)
+[![Python](https://img.shields.io/badge/python-3.7%20%7C%203.8%20%7C%203.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776ab?logo=python&logoColor=white)](https://pypi.org/project/webbee/))
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-imperal.io-00afd7)](https://docs.imperal.io)
+
+**Python 3.7 – 3.14** · `pip install webbee` works on every one of them.
 
 **Webbee** is the free, open-source terminal coding agent of [Imperal Cloud](https://imperal.io) (the ICNLI AI Cloud OS). It acts directly in your local terminal and workspace: reading, writing, editing, refactoring, and verifying code with deep code intelligence, native multimodal vision, and live cross-platform system capabilities.
 
@@ -45,8 +47,8 @@ Works with **any Python from 3.7**:
 - **Python 3.7 – 3.9** (macOS ships 3.9, Ubuntu 20.04 has 3.8) — the install is light, and the first
   `webbee` command sets up the same release on its own Python 3.12, once (about 30–45 s, needs internet;
   it fetches uv to do it). Every start after that is immediate, and it is the full webbee — code index
-  and search by meaning included. It lives in `~/.local/share/webbee/runtime`
-  (`%LOCALAPPDATA%\webbee\runtime` on Windows) and changes nothing else on your system.
+  and search by meaning included. It lives in `~/.local/share/webbee/runtime` and changes nothing else on
+  your system.
 
 <details>
 <summary>Install problems</summary>
