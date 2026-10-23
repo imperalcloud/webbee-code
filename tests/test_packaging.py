@@ -1,5 +1,9 @@
-import tomllib
 import pathlib
+
+import pytest
+
+# tomllib is 3.11+; on 3.10 these checks run where the release is built
+tomllib = pytest.importorskip("tomllib")
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 

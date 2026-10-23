@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.5
+
+* **Installs on Python 3.10 again**: pip and pipx stopped with "conflicting dependencies / ResolutionImpossible"
+  because imperal-mcp up to 0.5.6 required Python 3.11 -- Ubuntu 22.04 and Pop!_OS 22.04 ship 3.10. webbee now
+  needs imperal-mcp >= 0.5.7, which runs on 3.10.
+* **`/exit` no longer hangs on Python 3.10**: the steer poller asked `Task.cancelling()` (3.11+) whether a
+  turn had swallowed its cancel; on 3.10 the call failed, the poller kept looping and the terminal never
+  closed. A submitted turn now runs as its own task the poller waits on, so the cancel always reaches the
+  poller -- one path for every Python.
+* **Python 3.10 is the stated floor** (was 3.9, which no dependency set could satisfy): an older Python now gets
+  pip's plain "requires a different Python" instead of a dependency conflict.
+* **README installs through uv first** (it brings its own Python) and lists the install errors people hit.
+
 ## 0.5.4
 
 * **Code search by meaning for repos synced before**: imperal-sdk >= 6.3.6 tells the code map this client

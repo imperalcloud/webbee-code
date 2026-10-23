@@ -75,13 +75,22 @@ def _consume_mode(payload, on_mode) -> bool:
     return True
 
 
-def _cancel_absorbed() -> bool:
-    """True when this task received a cancel that a submitted turn swallowed
-    (repl._run_turn treats CancelledError as a user interrupt). Without this
-    check the poller would sail past its own cancellation and asyncio.run's
-    shutdown would hang on a task that ignored it."""
-    task = asyncio.current_task()
-    return task is not None and task.cancelling() > 0
+async def _await_turn(coro) -> None:
+    """Run a submitted turn and wait for it, letting a cancel of THIS task end the
+    poller even when the turn swallows CancelledError (repl._run_turn treats it as
+    a user interrupt). The turn runs as its own task and the poller only waits on
+    it, so the cancel lands in the poller's wait, never inside the turn: without
+    that the poller would sail past its own cancellation and asyncio.run's
+    shutdown would hang on a task that ignored it. Works on every Python
+    (Task.cancelling() would need 3.11)."""
+    turn = asyncio.ensure_future(coro)
+    try:
+        await asyncio.wait({turn})
+    except asyncio.CancelledError:
+        turn.cancel()                    # the turn ends as a user interrupt would
+        await asyncio.wait({turn})
+        raise
+    turn.result()                        # a turn's own error reaches the poller as before
 
 
 async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
@@ -251,9 +260,7 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                     if is_busy():
                         continue
                     last_active = now()  # an attach pickup = activity
-                    await attach_turn(attach)
-                    if _cancel_absorbed():
-                        raise asyncio.CancelledError
+                    await _await_turn(attach_turn(attach))
                     failures = 0
                     continue
             if not backlog:
@@ -266,10 +273,8 @@ async def poll_idle_steer(cfg, token_provider, *, workspace: str, is_busy,
                 backlog.appendleft(item)  # a local line won the race -- defer, don't drop
                 continue
             last_active = now()          # an item arrived = activity
-            await submit(text, str(item.get("surface") or "telegram"),
-                         str(item.get("iid") or ""))
-            if _cancel_absorbed():
-                raise asyncio.CancelledError
+            await _await_turn(submit(text, str(item.get("surface") or "telegram"),
+                                     str(item.get("iid") or "")))
         except asyncio.CancelledError:
             raise
         except Exception:

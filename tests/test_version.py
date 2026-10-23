@@ -7,8 +7,10 @@ def test_version_is_semver():
 
 
 def test_version_matches_pyproject():
-    import tomllib
     import pathlib
+
+    import pytest
+    tomllib = pytest.importorskip("tomllib")   # 3.11+; the release build runs it
     root = pathlib.Path(__file__).resolve().parent.parent
     data = tomllib.loads((root / "pyproject.toml").read_text())
     assert data["project"]["version"] == webbee.__version__

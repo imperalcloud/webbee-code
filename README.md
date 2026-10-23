@@ -27,20 +27,34 @@ Webbee is powered by **ICNLI** (*Infrastructure Contextual Natural Language Inte
 
 ## 📦 Installation
 
-Install easily using **pipx** (recommended) or **uv**:
+One line — installs [uv](https://docs.astral.sh/uv/) if needed, which brings its own Python:
 
 ```sh
-pipx install webbee
-# or with uv:
+curl -LsSf https://raw.githubusercontent.com/imperalcloud/webbee-code/main/install.sh | sh
+```
+
+Or, if you already have uv or pipx:
+
+```sh
 uv tool install webbee
+# or:
+pipx install webbee
 ```
 
-Or install in a Python virtual environment:
+Webbee needs **Python 3.10 or newer**. `uv` fetches a suitable Python by itself, so it works even where
+the system Python is older (macOS ships 3.9).
 
-```sh
-python3 -m venv .venv && source .venv/bin/activate
-pip install webbee
-```
+<details>
+<summary>Install problems</summary>
+
+| You see | Why | Do |
+|---------|-----|----|
+| `Cannot install webbee==… because these package versions have conflicting dependencies` / `ResolutionImpossible` | pip/pipx runs on a Python older than 3.10 (or webbee < 0.5.5 on Python 3.10) | `uv tool install webbee`, or `pipx install --python python3.12 webbee` |
+| `No matching distribution found for webbee` | Python older than 3.10 | same as above |
+| `error: externally-managed-environment` | `pip install` into the system Python is blocked on Homebrew, Debian 12+, Ubuntu 23.04+ | `uv tool install webbee` or `pipx install webbee` |
+| `webbee: command not found` after install | the tool folder is not on `PATH` | `uv tool update-shell` (or `pipx ensurepath`), then open a new terminal |
+
+</details>
 
 ---
 
