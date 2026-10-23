@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.7
+
+* **The one-time Python 3.12 setup cannot be steered by the folder it starts in**: uv now runs with
+  `--no-config` from the launcher's own folder, so a `uv.toml`, `pyproject.toml` or `.python-version` in
+  someone's repository can no longer pick the package index or the interpreter for the runtime.
+
 ## 0.5.6
 
 * **`pip install webbee` works on Python 3.7, 3.8 and 3.9** (macOS ships 3.9): webbee's dependencies need
