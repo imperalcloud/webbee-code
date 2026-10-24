@@ -10,6 +10,7 @@ Enterprise Grade Multi-OS popups with:
 """
 from __future__ import annotations
 
+import atexit
 import itertools
 import os
 import re
@@ -223,18 +224,56 @@ def get_macos_builtin_audio_device() -> str:
         return ":0"
 
 
+# A voice note never outlives this, even if every stop path fails: ffmpeg ends itself (-t).
+MAX_VOICE_NOTE_SECONDS = 900
+
+
 def get_system_audio_capture_args(output_path: str) -> List[str]:
-    """Build cross-platform FFmpeg audio recording CLI arguments for macOS, Linux, and Windows."""
+    """Build cross-platform FFmpeg audio recording CLI arguments for macOS, Linux, and Windows.
+
+    -nostdin: ffmpeg never reads the terminal (the TUI owns the keys); -t caps the length."""
     if sys.platform == "darwin":
         dev = get_macos_builtin_audio_device()
-        return ["ffmpeg", "-y", "-f", "avfoundation", "-i", dev, "-ar", "16000", "-ac", "1", output_path]
+        src = ["-f", "avfoundation", "-i", dev, "-ar", "16000", "-ac", "1"]
     elif sys.platform.startswith("linux"):
         if shutil.which("pactl"):
-            return ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-ar", "16000", "-ac", "1", output_path]
-        return ["ffmpeg", "-y", "-f", "alsa", "-i", "default", "-ar", "16000", "-ac", "1", output_path]
+            src = ["-f", "pulse", "-i", "default", "-ar", "16000", "-ac", "1"]
+        else:
+            src = ["-f", "alsa", "-i", "default", "-ar", "16000", "-ac", "1"]
     elif sys.platform in ("win32", "cygwin"):
-        return ["ffmpeg", "-y", "-f", "dshow", "-i", "audio=virtual-audio-device", "-ar", "16000", "-ac", "1", output_path]
-    return ["ffmpeg", "-y", "-i", "default", output_path]
+        src = ["-f", "dshow", "-i", "audio=virtual-audio-device", "-ar", "16000", "-ac", "1"]
+    else:
+        src = ["-i", "default"]
+    return ["ffmpeg", "-nostdin", "-y", *src, "-t", str(MAX_VOICE_NOTE_SECONDS), output_path]
+
+
+# Every recorder still running; atexit stops them so a quit Webbee leaves no microphone open.
+_LIVE_RECORDERS: set = set()
+
+
+def stop_recorder(proc: Optional[subprocess.Popen]) -> None:
+    """Stop one ffmpeg recorder: SIGTERM (ffmpeg finalizes the file), SIGKILL if it hangs."""
+    if proc is None:
+        return
+    _LIVE_RECORDERS.discard(proc)
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+    except Exception:
+        pass
+
+
+def stop_all_recorders() -> None:
+    for proc in list(_LIVE_RECORDERS):
+        stop_recorder(proc)
+
+
+atexit.register(stop_all_recorders)
 
 
 def transcribe_audio_file(audio_path: str, api_url: str = "", token: str = "") -> str:
@@ -397,10 +436,13 @@ def create_mic_dialog(
     voice_path = os.path.join(voice_dir, voice_filename)
 
     rec_proc: Optional[subprocess.Popen] = None
+    sent = False
 
     try:
         args = get_system_audio_capture_args(voice_path)
-        rec_proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        rec_proc = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _LIVE_RECORDERS.add(rec_proc)
     except Exception:
         pass
 
@@ -417,18 +459,13 @@ def create_mic_dialog(
     anim_ctrl = FormattedTextControl(_anim_text)
 
     def _stop_rec() -> int:
-        nonlocal rec_proc
         elapsed = max(1, int(time.time() - start_time))
-        if rec_proc is not None:
-            try:
-                if rec_proc.poll() is None:
-                    rec_proc.terminate()
-                    rec_proc.wait(timeout=2)
-            except Exception:
-                pass
+        stop_recorder(rec_proc)
         return elapsed
 
     def _handle_send():
+        nonlocal sent
+        sent = True
         rec_seconds = _stop_rec()
         on_close()
 
@@ -481,13 +518,18 @@ def create_mic_dialog(
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
 
-    def _handle_cancel():
+    def _discard():
+        if sent:
+            return
         _stop_rec()
         try:
             if os.path.exists(voice_path):
                 os.remove(voice_path)
         except Exception:
             pass
+
+    def _handle_cancel():
+        _discard()
         on_close()
 
     # EXACTLY TWO BUTTONS: Send and Cancel matching all other dialog layouts
@@ -505,13 +547,17 @@ def create_mic_dialog(
     cols = app.output.get_size()[1] if (app and app.output) else 80
     dialog_width = Dimension(min=36, max=76, preferred=min(68, max(36, cols - 6)))
 
-    return Dialog(
+    dialog = Dialog(
         title="Voice Recording (STT)",
         body=HSplit(all_elements),
         buttons=[],
         width=dialog_width,
         modal=True,
     )
+    # The host calls dispose() whenever the dialog goes away (Esc, another modal) -- not only
+    # via the two buttons -- so the microphone is never left recording.
+    dialog.dispose = _discard
+    return dialog
 
 
 def create_session_menu_dialog(

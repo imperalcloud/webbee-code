@@ -1886,7 +1886,19 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         if app is not None:
             app.invalidate()
 
+    def _dispose_modal(dialog):
+        # A dialog that holds a resource (the mic recorder) releases it however it is closed.
+        dispose = getattr(dialog, "dispose", None)
+        if callable(dispose):
+            try:
+                dispose()
+            except Exception:
+                pass
+
     def _set_modal_active(dialog):
+        prev = _active_modal.get("dialog")
+        if prev is not None and prev is not dialog:
+            _dispose_modal(prev)
         _active_modal["dialog"] = dialog
         from prompt_toolkit.application import get_app_or_none
         app = get_app_or_none()
@@ -1900,7 +1912,10 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         _invalidate()
 
     def _close_modal():
+        prev = _active_modal.get("dialog")
         _active_modal["dialog"] = None
+        if prev is not None:
+            _dispose_modal(prev)
         _hover_on["v"] = None
         # Guarantee buffer is 100% clean of any mouse escape residue on modal close
         buf.text = scrub_mouse_residue(buf.text)

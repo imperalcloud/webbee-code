@@ -73,7 +73,46 @@ def test_file_picker_dialog_callbacks():
     assert dialog.title == "Attach File / Document"
 
 
-def test_mic_dialog_callbacks():
+class _FakeRecorder:
+    """Stands in for the ffmpeg Popen -- tests never open the real microphone."""
+    def __init__(self, args, **kw):
+        self.args, self.kw = args, kw
+        self.alive = True
+        self.signals = []
+        with open(args[-1], "wb") as f:
+            f.write(b"RIFF")
+
+    def poll(self):
+        return None if self.alive else 0
+
+    def terminate(self):
+        self.signals.append("TERM")
+        self.alive = False
+
+    def kill(self):
+        self.signals.append("KILL")
+        self.alive = False
+
+    def wait(self, timeout=None):
+        return 0
+
+
+@pytest.fixture
+def fake_recorder(monkeypatch, tmp_path):
+    import webbee.modals as m
+    made = []
+
+    def _popen(args, **kw):
+        made.append(_FakeRecorder(args, **kw))
+        return made[-1]
+
+    monkeypatch.setattr(m.subprocess, "Popen", _popen)
+    monkeypatch.setattr(m, "get_macos_builtin_audio_device", lambda: ":0")
+    return made, str(tmp_path)
+
+
+def test_mic_dialog_callbacks(fake_recorder):
+    _, voice_dir = fake_recorder
     transcribed = []
     sent = []
     closed = []
@@ -82,8 +121,80 @@ def test_mic_dialog_callbacks():
         on_transcribe=lambda t: transcribed.append(t),
         on_send_direct=lambda t: sent.append(t),
         on_close=lambda: closed.append(True),
+        voice_dir=voice_dir,
     )
     assert dialog.title == "Voice Recording (STT)"
+    dialog.dispose()
+
+
+def test_mic_dialog_dispose_stops_recording_and_drops_the_file(fake_recorder):
+    # Esc / another modal closes the dialog through dispose(), not the buttons:
+    # the recorder must stop and the unsent audio must go.
+    made, voice_dir = fake_recorder
+    dialog = create_mic_dialog(on_transcribe=lambda t: None, on_send_direct=lambda t: None,
+                               on_close=lambda: None, voice_dir=voice_dir)
+    rec = made[0]
+    assert rec.kw.get("stdin") is not None          # never the terminal's stdin
+    dialog.dispose()
+    assert rec.signals == ["TERM"] and not rec.alive
+    assert os.listdir(voice_dir) == []
+    dialog.dispose()                                # idempotent
+    assert rec.signals == ["TERM"]
+
+
+def test_stop_recorder_kills_a_recorder_that_ignores_term():
+    import subprocess
+    from webbee.modals import stop_recorder
+
+    class _Stuck(_FakeRecorder):
+        def __init__(self):
+            self.alive, self.signals = True, []
+
+        def terminate(self):
+            self.signals.append("TERM")              # ignored
+
+        def wait(self, timeout=None):
+            if self.alive:
+                raise subprocess.TimeoutExpired("ffmpeg", timeout)
+            return 0
+
+    p = _Stuck()
+    stop_recorder(p)
+    assert p.signals == ["TERM", "KILL"] and not p.alive
+
+
+def test_quitting_stops_every_live_recorder(fake_recorder):
+    import webbee.modals as m
+    made, voice_dir = fake_recorder
+    create_mic_dialog(on_transcribe=lambda t: None, on_send_direct=lambda t: None,
+                      on_close=lambda: None, voice_dir=voice_dir)
+    assert made[0] in m._LIVE_RECORDERS
+    m.stop_all_recorders()                          # what atexit runs
+    assert not made[0].alive and not m._LIVE_RECORDERS
+
+
+def test_mic_send_keeps_the_audio_for_transcription(fake_recorder, monkeypatch):
+    import webbee.modals as m
+    made, voice_dir = fake_recorder
+    seen = []
+    monkeypatch.setattr(m, "transcribe_audio_file",
+                        lambda path, **kw: seen.append(os.path.exists(path)) or "hello")
+    buttons = {}
+    real_button = m.make_clean_button
+    monkeypatch.setattr(m, "make_clean_button",
+                        lambda text, handler=None, **kw: buttons.setdefault(text, handler) and real_button(text, handler=handler, **kw))
+    host = {}
+    dialog = create_mic_dialog(on_transcribe=lambda t: None, on_send_direct=lambda t: None,
+                               on_close=lambda: host["dialog"].dispose(), voice_dir=voice_dir)
+    host["dialog"] = dialog
+    buttons["▶ Send Voice Note"]()
+    import time
+    for _ in range(50):
+        if seen:
+            break
+        time.sleep(0.02)
+    assert seen == [True]                           # host's dispose on close did not delete it
+    assert not made[0].alive
 
 
 def test_session_menu_dialog_callbacks():
@@ -122,6 +233,8 @@ def test_system_audio_capture_args():
     assert len(cmd) > 0
     assert cmd[0] == "ffmpeg"
     assert "/tmp/test_out.wav" in cmd
+    assert "-nostdin" in cmd
+    assert cmd[cmd.index("-t") + 1] == "900"
 
 
 def test_modal_input_insulation_prevents_command_line_pollution():
