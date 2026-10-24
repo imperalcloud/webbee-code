@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.10
+
+* **One machine id per machine**: on macOS the id the code catalog keys a machine by is now the hardware UUID. Python
+  3.12 there could not read the network address and returned a random one per process, so every start of webbee or
+  imperal-mcp registered a new machine and synced the repo again. Linux keeps `/etc/machine-id`, Windows uses
+  `MachineGuid`; a random address is never used.
+
 ## 0.5.9
 
 * **Code questions about your local repo go to the exact code graph in your Imperal vault**: on the kernel's request
