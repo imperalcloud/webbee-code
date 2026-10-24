@@ -276,3 +276,17 @@ def test_describe_surfaces_paused_autocheckpoint(tmp_path):
     out = sg.describe()
     assert out.startswith("⚠ Auto-checkpointing is paused")
     assert "cp-1" in out                # the list still follows the warning
+
+
+def test_checkpoint_names_the_changed_paths(tmp_path):
+    """Phase B Task 10: a snapshot says which paths it changed (imperal-mcp measures an agent's edits by it)."""
+    from webbee.checkpoints import ShadowGit
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.py").write_text("x=1\n")
+    sg = ShadowGit(str(ws), "k", cache_dir=str(tmp_path / "c"))
+    assert sg.ensure()
+    assert sg.checkpoint("base", force=True)["paths"] == ["a.py"]
+    (ws / "a.py").write_text("x=2\n")
+    assert sg.checkpoint("next")["paths"] == ["a.py"]
+    assert sg.checkpoint("same")["paths"] == []

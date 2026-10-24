@@ -107,7 +107,8 @@ class ShadowGit:
 
     def checkpoint(self, label: str = "", force: bool = False) -> "dict | None":
         """Commit the workspace state to the shadow history.
-        {"id","n","label","changed"} or None when unavailable/failed.
+        {"id","n","label","changed","paths"} or None when unavailable/failed --
+        ``paths``: the workspace paths this snapshot changed (sorted; [] when none).
         `force=True` always records a new checkpoint even with nothing dirty
         -- used by rollback() for its mandatory pre-rollback safety snapshot,
         which must exist even when the workspace already matches HEAD."""
@@ -117,10 +118,11 @@ class ShadowGit:
             if self._git("add", "-A").returncode != 0:
                 return None          # a partial add must never masquerade as a snapshot
             dirty = self._git("status", "--porcelain").stdout.strip()
+            paths = sorted({ln[3:].split(" -> ")[-1].strip().strip('"') for ln in dirty.splitlines() if len(ln) > 3})
             head = self._git("rev-parse", "--short", "HEAD")
             if not dirty and head.returncode == 0 and not force:
                 return {"id": head.stdout.strip(), "n": self._count(),
-                        "label": "(no changes)", "changed": False}
+                        "label": "(no changes)", "changed": False, "paths": []}
             msg = (label or "checkpoint").strip()[:200] or "checkpoint"
             args = ["commit", "-m", msg, "--no-verify"]
             if head.returncode != 0 or not dirty:
@@ -131,7 +133,7 @@ class ShadowGit:
             sha = self._git("rev-parse", "--short", "HEAD").stdout.strip()
             n = self._count() + 1
             self._git("update-ref", f"refs/webbee/cp-{n}", "HEAD")
-            return {"id": sha, "n": n, "label": msg, "changed": True}
+            return {"id": sha, "n": n, "label": msg, "changed": True, "paths": paths}
         except Exception:
             return None
 
