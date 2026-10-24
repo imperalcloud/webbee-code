@@ -310,3 +310,19 @@ def test_sync_now_sends_an_edit_the_watcher_has_not_reported(tmp_path, monkeypat
 def test_sync_now_without_cloud_says_so(tmp_path):
     svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
     assert svc.sync_now() == {"ok": False, "content": "this session cannot reach the cloud"}
+
+
+def test_sync_now_while_the_first_sync_runs_answers_at_once(tmp_path, monkeypatch):
+    """frame phase A (review I7): a big repo's first sync is still running -- the question goes coarse at once
+    instead of waiting behind it."""
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    svc.build()
+    svc.vault_client_factory = lambda: _Cloud()
+    svc.last_sync = {}
+    assert svc._sync_lock.acquire(blocking=False)          # the boot-time first sync holds the lock
+    try:
+        out = svc.sync_now()
+    finally:
+        svc._sync_lock.release()
+    assert out == {"ok": False, "content": "the first code sync of this repo is still running"}

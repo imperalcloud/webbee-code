@@ -1154,6 +1154,10 @@ async def remote_sync(client, host: str, root: str, paths: list) -> dict:
         return {"repo_key": "", "partial_reason": why, "content": f"{host}: {why}"}
     try:
         repo_root = await ci.sftp_repo_root(sftp, root)
+        try:     # the repo's identity is its real path: a symlinked dir names the release it points into
+            real_root = str(await sftp.realpath(repo_root) or repo_root) if hasattr(sftp, "realpath") else repo_root
+        except Exception:
+            real_root = repo_root
         meta_files = (await ci.sftp_read_meta(sftp, repo_root))["files"]
         if paths:
             listing = []
@@ -1172,7 +1176,7 @@ async def remote_sync(client, host: str, root: str, paths: list) -> dict:
         meta = {"machine": {"fingerprints": fps,
                             "machine_id": meta_files.get("/etc/machine-id", b"").decode("utf-8", "replace").strip(),
                             "label": host},
-                "root": repo_root, "root_path": repo_root, "os": tree["os"], "source": "system_ssh", "ref": host,
+                "root": real_root, "root_path": real_root, "os": tree["os"], "source": "system_ssh", "ref": host,
                 "machine_kind": "ssh", "git": ci.git_identity(meta_files), "listing_complete": not paths}
         if tree.get("partial"):
             meta["partial_listing"] = tree["partial"]

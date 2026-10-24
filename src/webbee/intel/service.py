@@ -329,6 +329,11 @@ class IntelService:
         The git history is not re-read. ``{repo_key, synced_at, ...counts}`` or ``{ok: False, content}``."""
         if self.vault_client_factory is None:
             return {"ok": False, "content": "this session cannot reach the cloud"}
+        if not self.last_sync and not self._sync_lock.acquire(blocking=False):
+            # the repo's first sync (a whole repo: extract + embed) is still running: never wait behind it
+            return {"ok": False, "content": "the first code sync of this repo is still running"}
+        if not self.last_sync:
+            self._sync_lock.release()
         out = self._sync_vault(None, history=False)
         if not out.get("repo_key"):
             return {"ok": False, "content": "the code sync to the vault failed"}

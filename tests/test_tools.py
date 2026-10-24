@@ -947,3 +947,16 @@ def test_local_code_answers_marked_coarse(tmp_path):
 def test_intel_sync_local_needs_no_consent():
     from webbee.consent import READ_VERBS
     assert "intel_sync_local" in READ_VERBS
+
+
+def test_a_symlinked_remote_repo_is_known_by_its_real_path(monkeypatch):
+    """frame phase A (review I2): the repo's identity is the real path the server reports."""
+    sftp = _Sftp(WIN_TREE, WIN_FILES)
+
+    async def realpath(p):
+        return "/C:/real/proj" if p == "/C:/u/proj" else p
+    sftp.realpath = realpath
+    ex, cloud = _remote(monkeypatch, sftp)
+    ex.run("intel_sync_remote", {"host": "winbox", "root": "/C:/u/proj/Pkg"})
+    meta = cloud.calls[0][1]["meta"]
+    assert meta["root"] == meta["root_path"] == "/C:/real/proj"
