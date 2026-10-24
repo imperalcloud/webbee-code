@@ -326,3 +326,46 @@ def test_sync_now_while_the_first_sync_runs_answers_at_once(tmp_path, monkeypatc
     finally:
         svc._sync_lock.release()
     assert out == {"ok": False, "content": "the first code sync of this repo is still running"}
+
+
+# ── the machine's id is one per machine, whatever Python or process asks (live 2026-10-24: Python 3.12 on macOS
+# returned a random uuid.getnode() per process, so every imperal-mcp start registered a new machine and repo) ──
+def _no_machine_id_file(monkeypatch):
+    import builtins
+    real_open = builtins.open
+
+    def fake_open(path, *a, **k):
+        if str(path) == "/etc/machine-id":
+            raise OSError("none")
+        return real_open(path, *a, **k)
+    monkeypatch.setattr(builtins, "open", fake_open)
+
+
+def test_macos_uses_the_hardware_uuid(monkeypatch):
+    from webbee.intel import service as S
+    _no_machine_id_file(monkeypatch)
+    monkeypatch.setattr(S.sys, "platform", "darwin")
+    out = '  "IOPlatformUUID" = "4A1B2C3D-0000-1111-2222-333344445555"\n'
+    monkeypatch.setattr(S.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0, "stdout": out})())
+    monkeypatch.setattr(S.uuid, "getnode", lambda: 0x010000000001)     # a random node must never be used
+    assert S.machine_id() == "4a1b2c3d000011112222333344445555"
+
+
+def test_a_random_node_is_never_the_machine(monkeypatch, tmp_path):
+    from webbee.intel import service as S
+    _no_machine_id_file(monkeypatch)
+    monkeypatch.setattr(S.sys, "platform", "linux")
+    monkeypatch.setattr(S, "_MACHINE_ID_FILE", str(tmp_path / "machine-id"))
+    nodes = iter([0x010000000001, 0x010000000002])                     # multicast bit set: random per call
+    monkeypatch.setattr(S.uuid, "getnode", lambda: next(nodes))
+    first = S.machine_id()
+    assert first and first == S.machine_id()                           # kept once, the same ever after
+
+
+def test_a_real_mac_keeps_the_old_id(monkeypatch):
+    import hashlib
+    from webbee.intel import service as S
+    _no_machine_id_file(monkeypatch)
+    monkeypatch.setattr(S.sys, "platform", "linux")
+    monkeypatch.setattr(S.uuid, "getnode", lambda: 0xfa4532c55bb6)
+    assert S.machine_id() == hashlib.sha256(f"webbee|{0xfa4532c55bb6}".encode()).hexdigest()[:32]

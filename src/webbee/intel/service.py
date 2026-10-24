@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -403,8 +404,14 @@ class IntelService:
 
 # ── code graph everywhere (plan 3 Tasks 7, 9): the local workspace in the vault's one graph ─────────
 
+_MACHINE_ID_FILE = os.path.join(os.path.expanduser("~"), ".local", "share", "webbee", "machine-id")
+
+
 def machine_id() -> str:
-    """This machine's id for the code catalog (the vault separates two checkouts of one repo by it)."""
+    """This machine's id for the code catalog (the vault separates two checkouts of one repo by it) -- ONE per machine
+    whatever Python or process asks: /etc/machine-id; the hardware UUID on macOS (live 2026-10-24: Python 3.12 there
+    returned a random uuid.getnode() per process, so every start registered a new machine); MachineGuid on Windows;
+    a real network address (the id earlier releases sent); else an id made once and kept."""
     try:
         with open("/etc/machine-id", encoding="utf-8") as f:
             mid = f.read().strip()
@@ -412,7 +419,41 @@ def machine_id() -> str:
                 return mid
     except OSError:
         pass
-    return hashlib.sha256(f"webbee|{uuid.getnode()}".encode()).hexdigest()[:32]
+    try:
+        if sys.platform == "darwin":
+            r = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], capture_output=True, text=True,
+                               timeout=5)
+            for line in (r.stdout or "").splitlines() if r.returncode == 0 else []:
+                if "IOPlatformUUID" in line and "=" in line:
+                    hw = line.split("=", 1)[1].strip().strip('"').replace("-", "").lower()
+                    if hw:
+                        return hw[:32]
+        elif os.name == "nt":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as k:
+                guid = str(winreg.QueryValueEx(k, "MachineGuid")[0]).replace("-", "").lower()
+                if guid:
+                    return guid[:32]
+    except Exception:
+        pass
+    node = uuid.getnode()
+    if not (node >> 40) & 1:            # the multicast bit marks a random node: never the machine's id
+        return hashlib.sha256(f"webbee|{node}".encode()).hexdigest()[:32]
+    try:
+        with open(_MACHINE_ID_FILE, encoding="utf-8") as f:
+            kept = f.read().strip()
+            if kept:
+                return kept
+    except OSError:
+        pass
+    made = uuid.uuid4().hex
+    try:
+        os.makedirs(os.path.dirname(_MACHINE_ID_FILE), exist_ok=True)
+        with open(_MACHINE_ID_FILE, "w", encoding="utf-8") as f:
+            f.write(made)
+    except OSError:
+        pass
+    return made
 
 
 def local_git_identity(root: str) -> dict:
