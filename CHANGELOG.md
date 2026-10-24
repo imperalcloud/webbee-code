@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.9
+
+* **Code questions about your local repo go to the exact code graph in your Imperal vault**: on the kernel's request
+  webbee syncs the repo it works in (`intel_sync_local`) and the kernel asks the vault by that repo's key -- who
+  calls what by scope rules, uses inside the same file, tests counted apart. When the vault cannot be reached the
+  old local index answers and says so (`coarse`).
+* **A remote repo is known by its real path** (a symlinked deploy folder is never synced as a second repo), and a
+  code question never waits behind a repo's first sync.
+* **Checkpoints name the paths they changed** -- what imperal-mcp's frame measures an agent's edits by.
+* **Voice**: the recorder stops with its window -- no orphaned ffmpeg filling the disk.
+
 ## 0.5.8
 
 * **README**: the supported Python versions (3.7 – 3.14) at the top of the page.
