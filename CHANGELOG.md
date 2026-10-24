@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.11
+
+* **Only a repository reaches the code graph**: a folder with neither `.git` nor a project manifest at its root
+  (`pyproject.toml`, `package.json`, `setup.py`, `requirements.txt`, `tsconfig.json` ...) is never synced whole --
+  opening webbee in a home folder or a folder of projects no longer sends every file in it; the repositories inside
+  are synced one by one when the work is in them.
+
 ## 0.5.10
 
 * **One machine id per machine**: on macOS the id the code catalog keys a machine by is now the hardware UUID. Python
