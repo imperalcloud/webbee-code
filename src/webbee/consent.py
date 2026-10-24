@@ -13,7 +13,7 @@ from webbee.frames import _is_foreign_frame, render_foreign_frame
 # Verbs that only read: the kernel never asks consent for them (a verified read, core.action_effect); a
 # confirm_request naming one is answered yes here without a prompt (code graph spec §4.8: index reads
 # never ask -- intel_sync_remote lists and reads a repo over SFTP, writes nothing, runs nothing there).
-READ_VERBS = frozenset({"intel_sync_remote"})
+READ_VERBS = frozenset({"intel_sync_remote", "intel_sync_local"})
 
 
 async def handle_confirm_request(frame: dict, mode: str, ask_consent) -> dict:

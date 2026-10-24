@@ -278,7 +278,7 @@ class IntelService:
                 if fresh_ids:
                     self.vectors.add(fresh_ids, fresh_vecs)
 
-    def _sync_vault(self, rels=None) -> dict:
+    def _sync_vault(self, rels=None, history: bool = True) -> dict:
         """The workspace (``rels=None``: every indexable file, with the git history's co-change links) or the
         changed files into the vault. Fail-soft: a cloud outage never touches the local index."""
         factory = self.vault_client_factory
@@ -309,7 +309,7 @@ class IntelService:
                         "machine_kind": "local", "git": local_git_identity(self.root),
                         "local_key": compute_repo_key(self.root), "listing_complete": rels is None}
                 listing = _local_listing(self.root, rels)
-                measured = co_change_pairs(self.root) if rels is None else None
+                measured = co_change_pairs(self.root) if rels is None and history else None
                 out = asyncio.run(vault_sync(factory(), meta, listing, read, measured))
             except Exception as exc:
                 log.warning("code sync to the vault failed: %s", exc)
@@ -322,6 +322,17 @@ class IntelService:
                      out.get("partial_reason") or "-", int((time.monotonic() - t0) * 1000))
             return out
 
+
+    def sync_now(self) -> dict:
+        """The kernel asks before a code question (frame phase A): the workspace reaches the vault now -- a full
+        listing, so an edit no watcher reported (a shell edit) is sent too; the vault's plan picks the changed files.
+        The git history is not re-read. ``{repo_key, synced_at, ...counts}`` or ``{ok: False, content}``."""
+        if self.vault_client_factory is None:
+            return {"ok": False, "content": "this session cannot reach the cloud"}
+        out = self._sync_vault(None, history=False)
+        if not out.get("repo_key"):
+            return {"ok": False, "content": "the code sync to the vault failed"}
+        return {**out, "synced_at": time.time()}
 
     def sync_vault(self, rels=None) -> None:
         """Off the caller's thread: the build and the watcher never wait for the cloud."""

@@ -923,3 +923,27 @@ def test_an_asyncssh_connect_reports_every_key_of_the_host_the_user_trusts(monke
     monkeypatch.setattr(asyncssh, "connect", connect)
     sftp, conn, fps, why = asyncio.run(t._open_sftp("whm-jump"))
     assert sftp == "sftp" and why == "" and fps == ["SHA256:ecdsa", "SHA256:ed", "SHA256:rsa"]
+
+
+def test_intel_sync_local_returns_the_vault_key(tmp_path):
+    class _Svc:
+        def sync_now(self):
+            return {"repo_key": "rk1", "synced_at": 5.0, "files": 1}
+    ex = LocalToolExecutor(str(tmp_path), indexer=_Svc())
+    out = ex._t_intel_sync_local({"root": str(tmp_path)})
+    assert out == {"ok": True, "content": {"repo_key": "rk1", "synced_at": 5.0, "counts": {"files": 1}}}
+
+
+def test_local_code_answers_marked_coarse(tmp_path):
+    from webbee.intel.service import IntelService
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    svc.build()
+    ex = LocalToolExecutor(str(tmp_path), indexer=svc)
+    out = ex._t_impact_of_change({"symbols": ["alpha"], "_local_index": True})
+    assert out["coarse"] == "vault graph unavailable: links by name"
+
+
+def test_intel_sync_local_needs_no_consent():
+    from webbee.consent import READ_VERBS
+    assert "intel_sync_local" in READ_VERBS

@@ -768,6 +768,24 @@ class LocalToolExecutor:
         return []
 
     def _cpc(self, verb: str, a: dict) -> dict:
+        out = self._cpc_local(verb, a)
+        # frame phase A: the kernel asks the vault graph first; this local index is the fallback -- links by name
+        if isinstance(out, dict) and out.get("ok", True) is not False:
+            out = {**out, "coarse": "vault graph unavailable: links by name"}
+        return out
+
+    def _t_intel_sync_local(self, a: dict) -> dict:
+        """The workspace into the vault's code graph now (frame phase A): the kernel asks before a local code
+        question when the vault's copy is behind the last edit. A read: nothing is written or run."""
+        if self.indexer is None or not hasattr(self.indexer, "sync_now"):
+            return {"ok": False, "content": "intel_sync_local: no code index in this session"}
+        out = self.indexer.sync_now()
+        if out.get("ok") is False:
+            return {"ok": False, "content": f"intel_sync_local: {out.get('content')}"}
+        counts = {k: v for k, v in out.items() if k not in ("repo_key", "synced_at")}
+        return {"ok": True, "content": {"repo_key": out["repo_key"], "synced_at": out["synced_at"], "counts": counts}}
+
+    def _cpc_local(self, verb: str, a: dict) -> dict:
         if self.indexer is None:
             return {"ok": False, "content": "intel not available; install webbee[intel]"}
         from webbee.intel import query

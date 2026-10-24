@@ -287,3 +287,26 @@ def test_a_link_leading_out_of_the_workspace_is_never_read(tmp_path, monkeypatch
     sent = [c[1] for c in cloud.calls if "files" in c[1]]
     assert sent and all(f["path"] != "leak.py" for c in sent for f in c["files"])
     assert "outside the workspace" not in repr(cloud.calls)
+
+
+def test_sync_now_sends_an_edit_the_watcher_has_not_reported(tmp_path, monkeypatch):
+    """frame phase A: the kernel asks for a sync before a code question -- the edit reaches the vault at once,
+    even one no watcher reported (a shell edit), and without re-reading the git history."""
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    _synced(svc, monkeypatch)
+    cloud = _Cloud()
+    svc.build()
+    svc.attach_vault(lambda: cloud)
+    cloud.calls.clear()
+    cloud.have = {"a.py"}
+    (tmp_path / "b.py").write_text("def beta():\n    return 2\n")          # a shell edit, never reported
+    out = svc.sync_now()
+    assert out["repo_key"] and out["synced_at"] > 0
+    assert [f["path"] for f in cloud.calls[1][1]["files"]] == ["b.py"]
+    assert "measured" not in cloud.calls[1][1]
+
+
+def test_sync_now_without_cloud_says_so(tmp_path):
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    assert svc.sync_now() == {"ok": False, "content": "this session cannot reach the cloud"}
