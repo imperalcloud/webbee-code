@@ -285,6 +285,10 @@ class IntelService:
         factory = self.vault_client_factory
         if factory is None:
             return {}
+        if not is_repository(self.root):
+            # never the whole of a home folder or a folder of projects (live: a 14 GB folder with photo backups)
+            return {"repo_key": "", "partial_reason": f"{self.root} is not a repository (no .git, no project manifest) "
+                                                      "-- its repositories are synced one by one"}
         with self._sync_lock:
             t0 = time.monotonic()
             try:
@@ -337,7 +341,7 @@ class IntelService:
             self._sync_lock.release()
         out = self._sync_vault(None, history=False)
         if not out.get("repo_key"):
-            return {"ok": False, "content": "the code sync to the vault failed"}
+            return {"ok": False, "content": str(out.get("partial_reason") or "the code sync to the vault failed")}
         return {**out, "synced_at": time.time()}
 
     def sync_vault(self, rels=None) -> None:
@@ -403,6 +407,21 @@ class IntelService:
 
 
 # ── code graph everywhere (plan 3 Tasks 7, 9): the local workspace in the vault's one graph ─────────
+
+# what makes a folder a project for the code graph: version control or a manifest of an indexable language at its root
+# (the sdk's config names; Python and JS/TS are what the index reads)
+_MANIFESTS = tuple(indexer.CONFIG_NAMES) + ("setup.py", "requirements.txt", "tsconfig.json")
+
+
+def is_repository(root: str) -> bool:
+    """A repository the code graph may hold: ``.git`` (a dir, or a file in a worktree) or a project manifest at the
+    root. A home folder or a folder of projects is none -- its repositories are synced one by one (owner 2026-10-25)."""
+    try:
+        names = set(os.listdir(root))
+    except OSError:
+        return False
+    return ".git" in names or any(m in names for m in _MANIFESTS)
+
 
 _MACHINE_ID_FILE = os.path.join(os.path.expanduser("~"), ".local", "share", "webbee", "machine-id")
 

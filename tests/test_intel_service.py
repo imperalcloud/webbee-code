@@ -194,6 +194,8 @@ class _Cloud:
 
 
 def _synced(svc, monkeypatch):
+    import os
+    os.makedirs(os.path.join(svc.root, ".git"), exist_ok=True)     # a repository: only one reaches the vault
     monkeypatch.setattr(type(svc), "sync_vault", lambda self, rels=None: self._sync_vault(rels))
 
 
@@ -369,3 +371,26 @@ def test_a_real_mac_keeps_the_old_id(monkeypatch):
     monkeypatch.setattr(S.sys, "platform", "linux")
     monkeypatch.setattr(S.uuid, "getnode", lambda: 0xfa4532c55bb6)
     assert S.machine_id() == hashlib.sha256(f"webbee|{0xfa4532c55bb6}".encode()).hexdigest()[:32]
+
+
+# ── only a repository reaches the vault (owner 2026-10-25: Webbee or imperal-mcp opened in a home folder must never
+# sync the whole folder -- live: a 14 GB folder with photo backups went in as one "repo") ──
+def test_a_folder_that_is_no_repository_is_never_synced(tmp_path):
+    from webbee.intel.service import IntelService
+    (tmp_path / "Photos").mkdir()
+    (tmp_path / "Photos" / "gallery.js").write_text("function show() {}\n")
+    asked = []
+    svc = IntelService(str(tmp_path), "k", cache_dir=str(tmp_path / ".cache"))
+    svc.vault_client_factory = lambda: asked.append(1) or None
+    out = svc.sync_now()
+    assert out["ok"] is False and "not a repository" in out["content"] and asked == []
+
+
+def test_a_repository_by_git_or_by_manifest(tmp_path):
+    from webbee.intel.service import is_repository
+    assert not is_repository(str(tmp_path))
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    assert is_repository(str(tmp_path))
+    other = tmp_path / "other"
+    (other / ".git").mkdir(parents=True)
+    assert is_repository(str(other))
