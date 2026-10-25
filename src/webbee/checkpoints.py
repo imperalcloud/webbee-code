@@ -117,8 +117,11 @@ class ShadowGit:
         try:
             if self._git("add", "-A").returncode != 0:
                 return None          # a partial add must never masquerade as a snapshot
-            dirty = self._git("status", "--porcelain").stdout.strip()
-            paths = sorted({ln[3:].split(" -> ")[-1].strip().strip('"') for ln in dirty.splitlines() if len(ln) > 3})
+            porcelain = self._git("status", "--porcelain").stdout
+            dirty = porcelain.strip()
+            # each porcelain line is "XY path": its first two columns are the status -- a strip of the whole output took
+            # the first line's leading space and then its path's first letter (Webbee 2026-10-25: "mperal_kernel/...")
+            paths = sorted({ln[3:].split(" -> ")[-1].strip().strip('"') for ln in porcelain.splitlines() if len(ln) > 3})
             head = self._git("rev-parse", "--short", "HEAD")
             if not dirty and head.returncode == 0 and not force:
                 return {"id": head.stdout.strip(), "n": self._count(),

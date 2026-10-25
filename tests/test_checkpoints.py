@@ -290,3 +290,22 @@ def test_checkpoint_names_the_changed_paths(tmp_path):
     (ws / "a.py").write_text("x=2\n")
     assert sg.checkpoint("next")["paths"] == ["a.py"]
     assert sg.checkpoint("same")["paths"] == []
+
+
+def test_a_path_keeps_its_first_letter_when_the_first_line_is_unstaged(tmp_path, monkeypatch):
+    """Webbee 2026-10-25: " M imperal_kernel/x.py" stripped whole lost its status space, then [3:] cut the "i"."""
+    import subprocess
+    from webbee.checkpoints import ShadowGit
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.py").write_text("x=1\n")
+    sg = ShadowGit(str(ws), "k", cache_dir=str(tmp_path / "c"))
+    assert sg.ensure()
+    real = sg._git
+
+    def fake(*args):
+        if args[:2] == ("status", "--porcelain"):
+            return subprocess.CompletedProcess(args, 0, " M imperal_kernel/x.py\nM  tests/t.py\n", "")
+        return real(*args)
+    monkeypatch.setattr(sg, "_git", fake)
+    assert sg.checkpoint("x")["paths"] == ["imperal_kernel/x.py", "tests/t.py"]
