@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.9
+
+* imperal-mcp 0.8.5 at least: a server's repo that cannot be answered says why; parallel code questions never mix
+  their freshness; a change's second-depth users are real ones.
+
 ## 0.6.8
 
 * **Autopilot asks nothing**: the coding mode rides every turn, and a switch (Shift-Tab, /mode, a remote flip) reaches
