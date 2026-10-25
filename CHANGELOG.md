@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.3
+
+* **imperal-mcp 0.8.2 at least**: a shell command reaches the kernel with the folder it ran in, so the frame places a
+  `git` run without its own `cd` in the right repository. Works with the kernel of 2026-10-25 (package 0.8.4): memory
+  lookups are reads, parallel calls each keep their part of the history, one step numbering, WORLD's HEAD checked
+  against the code map.
+
 ## 0.6.2
 
 * **The upgrade at the start installs a release the moment it is out**: by its wheel's address on PyPI's file host
