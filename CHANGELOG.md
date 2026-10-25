@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.14
+
+* **The newest release before the start**: webbee first upgrades itself (by the tool that installed it -- uv, pipx,
+  pip, or the light install of an old Python) and starts again on the new release, then brings imperal-mcp, the server
+  your other shells run, to its newest release with its code extra (installed when missing, from git when PyPI is out
+  of reach). Offline it starts at once; `WEBBEE_NO_AUTOUPDATE=1` switches it off. `pip install -U webbee` brings
+  imperal-mcp 0.8.1 or newer with it.
+* **The kernel knows your system**: the coding context names it, so the kernel's probes fit it (macOS, Linux, Windows).
+* **A folder of repositories names them**: the repo profile of a folder that is no repository itself carries its
+  repositories; the kernel shows "this folder is not one repository -- it holds N: ..." instead of one profile mixed
+  from all of them (an empty `git:` and symbols drawn from the whole folder).
+
 ## 0.5.13
 
 * **The kernel's own probes are shown free**: the evidence and reality probes the kernel runs to keep its memory
