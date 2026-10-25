@@ -52,6 +52,26 @@ def latest(dist: str):
         return None
 
 
+def wheel_url(dist: str, version: str):
+    """The release's own wheel on PyPI's file host -- there the moment it is published, while the index pages trail it
+    by minutes (live 2026-10-25: pip found no 0.6.1 a minute after PyPI served it) -- or None."""
+    try:
+        import httpx
+        r = httpx.get(PYPI.format(f"{dist}/{version}"), timeout=3.0)
+        r.raise_for_status()
+        wheels = [u["url"] for u in r.json().get("urls") or [] if u.get("packagetype") == "bdist_wheel"
+                  and str(u.get("url") or "").startswith("https://files.pythonhosted.org/")]
+        return wheels[0] if wheels else None
+    except Exception:
+        return None
+
+
+def _spec(name: str, dist: str, version: str, wheel) -> str:
+    """``name`` (with its extras) at ``version``: by its wheel's address when known, else by the index."""
+    url = wheel(dist, version) if wheel else None
+    return f"{name} @ {url}" if url else f"{name}=={version}"
+
+
 def _ver(s) -> tuple:
     try:
         return tuple(int(x) for x in str(s).strip().split("."))
@@ -78,9 +98,9 @@ def find_uv(which=safe_which):
 
 
 def self_command(version: str, prefix: str = sys.prefix, executable: str = sys.executable, env=os.environ,
-                 uv=None, pipx=None):
+                 uv=None, pipx=None, wheel=None):
     """The command that installs webbee ``version`` where this webbee is installed -- or None."""
-    spec = f"{DIST}=={version}"
+    spec = _spec(DIST, DIST, version, wheel)
     light = env.get(LIGHT_ENV)
     if light:                               # an old Python runs this release through its light install
         return [light, "-m", "pip", "install", "--upgrade", "--no-cache-dir", spec]
@@ -123,7 +143,7 @@ def mcp_installed(which=safe_which, run=subprocess.run) -> dict:
     return out
 
 
-def mcp_command(inst: dict, newest, uv, pipx):
+def mcp_command(inst: dict, newest, uv, pipx, wheel=None):
     """The one command that makes the shell's imperal-mcp the newest with its code extra -- by the tool that installed
     it (uv, else pipx, for a new install) -- or None when it already is, or nothing can do it."""
     if inst and inst.get("version") and inst.get("version") == newest and inst.get("code"):
@@ -132,7 +152,7 @@ def mcp_command(inst: dict, newest, uv, pipx):
         return None                         # it did not answer: a working install is never replaced blind
     if inst and not newest and inst.get("code"):
         return None                         # PyPI unread: what works stays
-    spec = f"{MCP_SPEC}=={newest}" if newest else (MCP_SPEC if inst else MCP_GIT_SPEC)
+    spec = _spec(MCP_SPEC, MCP, newest, wheel) if newest else (MCP_SPEC if inst else MCP_GIT_SPEC)
     tool = inst.get("tool") if inst else ("uv" if uv else "pipx" if pipx else "")
     return _install(tool, spec, uv, pipx, inst.get("python") if inst else None)
 
@@ -154,7 +174,7 @@ def _run(cmd, run=subprocess.run) -> bool:
 
 
 def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe_which, run=subprocess.run,
-                         execv=os.execv, env=os.environ) -> list:
+                         execv=os.execv, env=os.environ, wheel=wheel_url) -> list:
     """Bring webbee and the shell's imperal-mcp to their newest releases, then let the start go on; a self-upgrade
     starts webbee again on the new release (never returns then). Returns what it did, for the log. Never raises."""
     did: list = []
@@ -164,7 +184,7 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
         uv, pipx = find_uv(which), which("pipx")
         newest = fetch(DIST)
         if newest and _ver(newest) > _ver(current) and not env.get(DONE_ENV):
-            cmd = self_command(newest, env=env, uv=uv, pipx=pipx)
+            cmd = self_command(newest, env=env, uv=uv, pipx=pipx, wheel=wheel)
             if cmd:
                 say(f"🐝 updating webbee {current} -> {newest} ...")
                 if _run(cmd, run):
@@ -178,7 +198,7 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
                 say(f"🐝 webbee could not update itself -- run: {' '.join(cmd)}")
         mcp_newest = fetch(MCP)
         inst = mcp_installed(which, run)
-        cmd = mcp_command(inst, mcp_newest, uv, pipx)
+        cmd = mcp_command(inst, mcp_newest, uv, pipx, wheel)
         if cmd:
             what = (f"imperal-mcp {inst.get('version') or '?'} -> {mcp_newest or 'source'}" if inst
                     else f"imperal-mcp {mcp_newest or 'from source'}")

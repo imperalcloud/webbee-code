@@ -40,7 +40,7 @@ def test_webbee_upgrades_itself_by_its_own_tool():
 def test_a_newer_webbee_is_installed_and_started_again_before_anything_else():
     run, execd, env = _Run(), [], {}
     fetch = {"webbee": "0.6.0", "imperal-mcp": "0.8.2"}.get
-    au.upgrade_before_start(["--mode", "plan"], "0.5.14", say=lambda m: None, fetch=fetch,
+    au.upgrade_before_start(["--mode", "plan"], "0.5.14", say=lambda m: None, fetch=fetch, wheel=None,
                             which=_which({"pipx": "/bin/pipx"}), run=run, execv=lambda p, a: execd.append(a),
                             env=env)
     assert run.calls[0][-1] == "webbee==0.6.0" and env[au.DONE_ENV] == "1"
@@ -53,7 +53,7 @@ def test_the_shell_s_imperal_mcp_is_brought_to_the_newest_with_its_code_extra(tm
     exe.write_text("")
     run = _Run(stdout="0.8.1 False")                          # an old release that lost its code extra
     monkeypatch.setattr(au, "find_uv", lambda which=None: "/bin/uv")
-    did = au.upgrade_before_start([], "0.5.14", say=lambda m: None,
+    did = au.upgrade_before_start([], "0.5.14", say=lambda m: None, wheel=None,
                                   fetch={"webbee": "0.5.14", "imperal-mcp": "0.8.2"}.get,
                                   which=_which({"imperal-mcp": str(exe)}), run=run, env={})
     assert ["/bin/uv", "tool", "install", "--force", "--refresh", "imperal-mcp[code]==0.8.2"] in run.calls
@@ -67,7 +67,7 @@ def test_nothing_changes_when_all_is_newest_or_pypi_is_out_of_reach(tmp_path, mo
     monkeypatch.setattr(au, "find_uv", lambda which=None: None)
     for fetch in ({"webbee": "0.5.14", "imperal-mcp": "0.8.2"}.get, lambda d: None):
         run = _Run(stdout="0.8.2 True")
-        au.upgrade_before_start([], "0.5.14", say=lambda m: None, fetch=fetch,
+        au.upgrade_before_start([], "0.5.14", wheel=lambda d, v: None, say=lambda m: None, fetch=fetch,
                                 which=_which({"imperal-mcp": str(exe), "pipx": "/bin/pipx"}), run=run, env={})
         assert not any("install" in c for c in run.calls)
 
@@ -81,13 +81,13 @@ def test_a_missing_imperal_mcp_is_installed_from_git_when_pypi_is_out_of_reach()
 def test_a_failed_or_switched_off_upgrade_never_stops_the_start(monkeypatch):
     said = []
     monkeypatch.setattr(au, "find_uv", lambda which=None: "/bin/uv")
-    did = au.upgrade_before_start([], "0.5.14", say=said.append, fetch={"webbee": "0.6.0", "imperal-mcp": None}.get,
+    did = au.upgrade_before_start([], "0.5.14", wheel=lambda d, v: None, say=said.append, fetch={"webbee": "0.6.0", "imperal-mcp": None}.get,
                                   which=_which({}), run=_Run(rc=1), execv=lambda *a: 1 / 0,
                                   env={})
     assert did == [] and any("could not update itself" in s for s in said)
-    assert au.upgrade_before_start([], "0.5.14", fetch=lambda d: 1 / 0, env={au.OFF_ENV: "1"}) == []
+    assert au.upgrade_before_start([], "0.5.14", wheel=lambda d, v: None, fetch=lambda d: 1 / 0, env={au.OFF_ENV: "1"}) == []
     run = _Run()                                    # just restarted after a self-upgrade: never a second one
-    au.upgrade_before_start([], "0.5.14", say=said.append, fetch={"webbee": "0.6.0"}.get, which=_which({}),
+    au.upgrade_before_start([], "0.5.14", wheel=lambda d, v: None, say=said.append, fetch={"webbee": "0.6.0"}.get, which=_which({}),
                             run=run, execv=lambda *a: 1 / 0, env={au.DONE_ENV: "1"})
     assert not any("webbee==0.6.0" in c for c in run.calls)
 
@@ -112,3 +112,15 @@ def test_one_odd_answer_never_reinstalls_and_a_silent_install_is_left_alone(tmp_
     inst = au.mcp_installed(which=lambda n: str(exe), run=run)
     assert inst["code"] is True and au.mcp_command(inst, "0.8.1", "/bin/uv", None) is None
     assert au.mcp_command({"tool": "uv", "version": "", "code": False}, "0.8.2", "/bin/uv", None) is None
+
+
+def test_a_release_is_installed_by_its_wheel_s_address_when_pypi_names_it():
+    url = "https://files.pythonhosted.org/packages/a8/1c/x/webbee-0.6.1-py3-none-any.whl"
+    wheel = lambda dist, v: url if dist == "webbee" else None                      # noqa: E731
+    cmd = au.self_command("0.6.1", prefix="/h/.local/pipx/venvs/webbee", env={}, pipx="/bin/pipx", wheel=wheel)
+    assert cmd[-1] == f"webbee @ {url}"
+    mcp_url = "https://files.pythonhosted.org/packages/b/imperal_mcp-0.8.2-py3-none-any.whl"
+    got = au.mcp_command({}, "0.8.2", "/bin/uv", None, wheel=lambda d, v: mcp_url)
+    assert got[-1] == f"imperal-mcp[code] @ {mcp_url}"
+    assert au.self_command("0.6.1", prefix="/v", executable="/v/bin/python", env={}, wheel=lambda d, v: None)[-1] \
+        == "webbee==0.6.1"
