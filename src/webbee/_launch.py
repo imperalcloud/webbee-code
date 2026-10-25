@@ -53,9 +53,9 @@ def _bin(prefix, name):
     return os.path.join(prefix, "bin", name)
 
 
-def _find_uv(home):
-    """uv from the pip-installed `uv` package (Python 3.8+), PATH, the usual install folders,
-    or our own earlier bootstrap -- else None."""
+def _find_uv(home, which=shutil.which):
+    """uv from the pip-installed `uv` package (Python 3.8+), PATH (``which``: webbee.autoupdate passes one that never
+    takes a program from the current folder), the usual install folders, or our own earlier bootstrap -- else None."""
     try:
         import uv  # noqa: F401  -- the PyPI `uv` package ships the binary
         found = uv.find_uv_bin()
@@ -64,7 +64,7 @@ def _find_uv(home):
     except Exception:
         pass
     name = "uv.exe" if _WINDOWS else "uv"
-    candidates = [shutil.which("uv"), os.path.join(home, "uv", name)]
+    candidates = [which("uv"), os.path.join(home, "uv", name)]
     for d in (os.path.join("~", ".local", "bin"), os.path.join("~", ".cargo", "bin")):
         candidates.append(os.path.join(os.path.expanduser(d), name))
     for c in candidates:

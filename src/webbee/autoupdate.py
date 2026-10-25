@@ -72,7 +72,7 @@ def tool_of(path: str) -> str:
 def find_uv(which=safe_which):
     try:
         from webbee._launch import _find_uv, _home
-        return _find_uv(_home())
+        return _find_uv(_home(), which)
     except Exception:
         return which("uv")
 
