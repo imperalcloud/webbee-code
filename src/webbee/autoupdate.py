@@ -102,14 +102,19 @@ def mcp_installed(which=safe_which, run=subprocess.run) -> dict:
     real = os.path.realpath(exe)
     py = os.path.join(os.path.dirname(real), "python.exe" if _WINDOWS else "python")
     out = {"tool": tool_of(real), "python": py, "version": "", "code": False}
-    try:
-        got = run([py, "-c", _NO_CWD + "import importlib.metadata as m, importlib.util as u; "
-                             "print(m.version('imperal-mcp'), u.find_spec('webbee') is not None)"],
-                  capture_output=True, text=True, timeout=20)
-        version, code = (str(got.stdout or "").split() + ["", ""])[:2]
-        out.update(version=version, code=code == "True")
-    except Exception:
-        pass
+    # asked twice when it says "no code extra": a reinstall is never made on one odd answer (live 2026-10-25: right after
+    # another install the first answer said no webbee, the next ones yes)
+    for _ in range(2):
+        try:
+            got = run([py, "-c", _NO_CWD + "import importlib.metadata as m, importlib.util as u; "
+                                 "print(m.version('imperal-mcp'), u.find_spec('webbee') is not None)"],
+                      capture_output=True, text=True, timeout=20)
+            version, code = (str(got.stdout or "").split() + ["", ""])[:2]
+            out.update(version=version, code=code == "True")
+        except Exception:
+            pass
+        if out["code"] or not out["version"]:
+            break
     return out
 
 
@@ -118,6 +123,8 @@ def mcp_command(inst: dict, newest, uv, pipx):
     it (uv, else pipx, for a new install) -- or None when it already is, or nothing can do it."""
     if inst and inst.get("version") and inst.get("version") == newest and inst.get("code"):
         return None
+    if inst and not inst.get("version"):
+        return None                         # it did not answer: a working install is never replaced blind
     if inst and not newest and inst.get("code"):
         return None                         # PyPI unread: what works stays
     spec = f"{MCP_SPEC}=={newest}" if newest else (MCP_SPEC if inst else MCP_GIT_SPEC)

@@ -99,3 +99,16 @@ def test_no_program_or_module_is_taken_from_the_current_folder(tmp_path, monkeyp
     assert au.safe_which("x", which=lambda n: "/usr/bin/x") == "/usr/bin/x"
     again = au.restart_command(["--once"], env={}, executable="/v/bin/python")
     assert again[2].startswith(au._NO_CWD) and again[-1] == "--once"
+
+
+def test_one_odd_answer_never_reinstalls_and_a_silent_install_is_left_alone(tmp_path):
+    exe = tmp_path / "uv" / "tools" / "imperal-mcp" / "bin" / "imperal-mcp"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    answers = iter(["0.8.1 False", "0.8.1 True"])
+
+    def run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout=next(answers), stderr="")
+    inst = au.mcp_installed(which=lambda n: str(exe), run=run)
+    assert inst["code"] is True and au.mcp_command(inst, "0.8.1", "/bin/uv", None) is None
+    assert au.mcp_command({"tool": "uv", "version": "", "code": False}, "0.8.2", "/bin/uv", None) is None
