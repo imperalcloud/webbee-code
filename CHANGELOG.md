@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0
+
+* **The newest release before every start** (since 0.5.14) -- now never a needless reinstall: imperal-mcp's code extra
+  is asked twice before it is reinstalled, and an install that does not answer is left as it is.
+
 ## 0.5.14
 
 * **The newest release before the start**: webbee first upgrades itself (by the tool that installed it -- uv, pipx,
