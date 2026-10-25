@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1
+
+* **The upgrade at the start finds a release minutes old**: it reads past pip's / uv's index cache (before, a fresh
+  release stayed invisible until the cache expired).
+
 ## 0.6.0
 
 * **The newest release before every start** (since 0.5.14) -- now never a needless reinstall: imperal-mcp's code extra
