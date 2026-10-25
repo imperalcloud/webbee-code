@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.10
+
+* **Webbee and an agent in another shell work together**: `message_session` writes to another session of yours that
+  is working now (`live_sessions` names them) -- read there as an agent's words, never yours: it approves nothing and
+  changes no task. A message reaches Webbee at the next step of a turn you run; it never starts a turn by itself.
+* imperal-mcp 0.8.6 at least.
+
 ## 0.6.9
 
 * imperal-mcp 0.8.5 at least: a server's repo that cannot be answered says why; parallel code questions never mix
