@@ -90,3 +90,12 @@ def test_a_failed_or_switched_off_upgrade_never_stops_the_start(monkeypatch):
     au.upgrade_before_start([], "0.5.14", say=said.append, fetch={"webbee": "0.6.0"}.get, which=_which({}),
                             run=run, execv=lambda *a: 1 / 0, env={au.DONE_ENV: "1"})
     assert not any("webbee==0.6.0" in c for c in run.calls)
+
+
+def test_no_program_or_module_is_taken_from_the_current_folder(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert au.safe_which("x", which=lambda n: str(tmp_path / "x.exe")) is None       # planted beside the workspace
+    assert au.safe_which("x", which=lambda n: "/usr/bin/x") == "/usr/bin/x"
+    again = au.restart_command(["--once"], env={}, executable="/v/bin/python")
+    assert again[2].startswith(au._NO_CWD) and again[-1] == "--once"

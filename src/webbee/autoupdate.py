@@ -23,6 +23,22 @@ DONE_ENV = "WEBBEE_UPGRADED"               # set on the restart after a self-upg
 LIGHT_ENV = "WEBBEE_LIGHT_PYTHON"          # the old Python whose light install runs this release (webbee._launch)
 STEP_TIMEOUT_S = 300
 _WINDOWS = os.name == "nt"
+# `python -c` puts the current folder first on sys.path: a webbee.py there would run in our place (security review).
+# Dropped before any import -- `-I` is no way out, it also drops a `pip install --user` webbee.
+_NO_CWD = "import sys; sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "
+
+
+def safe_which(name: str, which=shutil.which):
+    """A program from PATH, never one sitting in the current folder unless that folder is on PATH itself (Windows looks
+    in the current folder first -- security review)."""
+    found = which(name)
+    if not found:
+        return None
+    here = os.path.abspath(os.getcwd())
+    on_path = {os.path.abspath(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p and os.path.isabs(p)}
+    if os.path.dirname(os.path.abspath(found)) == here and here not in on_path:
+        return None
+    return found
 
 
 def latest(dist: str):
@@ -53,7 +69,7 @@ def tool_of(path: str) -> str:
     return "pip"
 
 
-def find_uv(which=shutil.which):
+def find_uv(which=safe_which):
     try:
         from webbee._launch import _find_uv, _home
         return _find_uv(_home())
@@ -78,7 +94,7 @@ def self_command(version: str, prefix: str = sys.prefix, executable: str = sys.e
     return None
 
 
-def mcp_installed(which=shutil.which, run=subprocess.run) -> dict:
+def mcp_installed(which=safe_which, run=subprocess.run) -> dict:
     """The shell's imperal-mcp (the command on PATH): ``{"tool", "python", "version", "code"}`` -- {} when none."""
     exe = which(MCP)
     if not exe:
@@ -87,7 +103,7 @@ def mcp_installed(which=shutil.which, run=subprocess.run) -> dict:
     py = os.path.join(os.path.dirname(real), "python.exe" if _WINDOWS else "python")
     out = {"tool": tool_of(real), "python": py, "version": "", "code": False}
     try:
-        got = run([py, "-c", "import importlib.metadata as m, importlib.util as u; "
+        got = run([py, "-c", _NO_CWD + "import importlib.metadata as m, importlib.util as u; "
                              "print(m.version('imperal-mcp'), u.find_spec('webbee') is not None)"],
                   capture_output=True, text=True, timeout=20)
         version, code = (str(got.stdout or "").split() + ["", ""])[:2]
@@ -119,8 +135,8 @@ def restart_command(argv, env=os.environ, executable: str = sys.executable):
     """How this webbee starts again on the release just installed, with the same arguments."""
     light = env.get(LIGHT_ENV)
     if light:
-        return [light, "-c", "from webbee._launch import main; main()", *argv]
-    return [executable, "-c", "from webbee.cli import main; main()", *argv]
+        return [light, "-c", _NO_CWD + "from webbee._launch import main; main()", *argv]
+    return [executable, "-c", _NO_CWD + "from webbee.cli import main; main()", *argv]
 
 
 def _run(cmd, run=subprocess.run) -> bool:
@@ -131,7 +147,7 @@ def _run(cmd, run=subprocess.run) -> bool:
         return False
 
 
-def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=shutil.which, run=subprocess.run,
+def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe_which, run=subprocess.run,
                          execv=os.execv, env=os.environ) -> list:
     """Bring webbee and the shell's imperal-mcp to their newest releases, then let the start go on; a self-upgrade
     starts webbee again on the new release (never returns then). Returns what it did, for the log. Never raises."""
