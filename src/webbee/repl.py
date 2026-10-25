@@ -265,8 +265,27 @@ def set_slot_mode(slot: SessionSlot, mode: str) -> None:
     slot.mode = mode
     if slot.agent is not None:
         slot.agent.mode = mode
+        _notify_mode(slot.agent, mode)
     from webbee.mode_store import save_mode
     save_mode(slot.workspace, mode)
+
+
+_MODE_POSTS: set = set()      # in-flight mode notices (a task kept alive until it is done)
+
+
+def _notify_mode(agent, mode: str) -> None:
+    """The running session hears the switch at once (``AgentSession.post_mode``): fire and forget on the running
+    loop; outside a loop (tests, boot) nothing is sent -- the next turn's coding_context carries the mode."""
+    post = getattr(agent, "post_mode", None)
+    if post is None or not getattr(agent, "session_id", ""):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(post(mode))
+    _MODE_POSTS.add(task)
+    task.add_done_callback(_MODE_POSTS.discard)
 
 
 def set_slot_tier(slot: SessionSlot, tier: str) -> None:

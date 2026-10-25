@@ -1141,6 +1141,44 @@ async def _open_sftp(host: str):
     return await conn.start_sftp_client(), conn, fps, ""
 
 
+async def _no_repo_at(sftp, ci, root: str) -> str:
+    """Why ``root`` on the server is no repository to sync ("" when it is one): it must exist and be (inside) a
+    repository -- a ``.git`` or a manifest at it or above."""
+    try:
+        await sftp.readdir(root)
+    except Exception as e:
+        return f"{root} does not exist or is not a readable directory ({type(e).__name__})"
+    repo_root = await ci.sftp_repo_root(sftp, root)
+    try:
+        names = {e.filename for e in await sftp.readdir(repo_root)}
+    except Exception:
+        names = set()
+    if not names & (set(getattr(ci, "_REPO_MARKERS", (".git",))) | set(getattr(ci, "_MANIFESTS", ()))):
+        return f"{root} is in no repository (no .git or project manifest at it or above)"
+    return ""
+
+
+async def remote_head(host: str, root: str) -> dict:
+    """The commit the server's repo at ``root`` is on -- a few small SFTP reads (``.git/HEAD`` and its ref), never a
+    listing: ``{"commit", "branch", "root", "why"}``; ``why`` says what failed (an unknown host, a missing folder)."""
+    from imperal_sdk import code_index as ci
+    sftp, conn, _fps, why = await _open_sftp(host)
+    if sftp is None:
+        return {"commit": "", "branch": "", "root": root, "why": f"{host}: {why}"}
+    try:
+        missing = await _no_repo_at(sftp, ci, root)
+        if missing:
+            return {"commit": "", "branch": "", "root": root, "why": f"{host}: {missing}"}
+        repo_root = await ci.sftp_repo_root(sftp, root)
+        ident = ci.git_identity((await ci.sftp_read_meta(sftp, repo_root))["files"])
+        return {"commit": ident.get("commit") or "", "branch": ident.get("branch") or "", "root": repo_root, "why": ""}
+    except Exception as e:
+        return {"commit": "", "branch": "", "root": root, "why": f"{host}: {type(e).__name__}: {e}"}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 async def remote_sync(client, host: str, root: str, paths: list) -> dict:
     """List and read the repo holding ``root`` on ``host`` over SFTP (the sdk's one walk: .gitignore,
     secrets and dependency trees skipped), extract and embed here, and sync it into the vault through
@@ -1155,6 +1193,10 @@ async def remote_sync(client, host: str, root: str, paths: list) -> dict:
     if sftp is None:
         return {"repo_key": "", "partial_reason": why, "content": f"{host}: {why}"}
     try:
+        missing = await _no_repo_at(sftp, ci, root)
+        if missing:
+            # never a walk of the folder above (live 2026-10-25: a root that did not exist synced /home for 30 min)
+            return {"repo_key": "", "partial_reason": missing, "content": f"{host}: {missing}"}
         repo_root = await ci.sftp_repo_root(sftp, root)
         try:     # the repo's identity is its real path: a symlinked dir names the release it points into
             real_root = str(await sftp.realpath(repo_root) or repo_root) if hasattr(sftp, "realpath") else repo_root

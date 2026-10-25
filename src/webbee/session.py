@@ -176,6 +176,21 @@ class AgentSession:
         token = await self.token_provider()
         return {"Authorization": f"Bearer {token}"}
 
+    async def post_mode(self, mode: str) -> bool:
+        """Tell the running session its new coding mode (the gateway signals the kernel's ``set_mode``): autopilot
+        is asked nothing from now on, the others are asked again. False when there is no session yet or no live one
+        took it -- the next turn carries the mode anyway. Never raises."""
+        if not self.session_id or self.cfg is None or self.token_provider is None:
+            return False
+        try:
+            headers = await self._headers()
+            async with make_client(self.cfg, timeout=15) as client:
+                resp = await client.post(f"/v1/agent/sessions/{self.session_id}/mode", json={"mode": mode},
+                                         headers=headers)
+            return resp.status_code == 200 and bool((resp.json() or {}).get("ok"))
+        except Exception:
+            return False
+
     async def run(self, task: str, sink, *, marathon: bool = False, goal: str = "",
                   surface: str = "", steer_iid: str = "") -> str:
         import httpx
@@ -199,6 +214,9 @@ class AgentSession:
         coding_context = await asyncio.to_thread(build_coding_context, self.workspace_root, self._intel)
         if self.model_tier:
             coding_context = {**coding_context, "model_tier": self.model_tier}
+        # the mode this turn runs under: in autopilot the kernel asks no consent at all (no card, no park); a switch
+        # mid-turn reaches the running session through post_mode
+        coding_context = {**coding_context, "mode": str(self.mode or "default")}
         if marathon:
             # verify_cmd is CLIENT-detected here and carried in coding_context —
             # the trusted proof-of-done the kernel runs (never brain-authored).
