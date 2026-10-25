@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.8
+
+* **Autopilot asks nothing**: the coding mode rides every turn, and a switch (Shift-Tab, /mode, a remote flip) reaches
+  the running session at once -- in autopilot the kernel sends no consent request at all, so no turn waits for one.
+  A production release still runs only on your own words.
+* **A server's repo is synced only where it is**: a folder that does not exist, or is in no repository, is refused at
+  once (a wrong path walked `/home` for half an hour), and the repo's HEAD is read in a few small reads.
+* imperal-mcp 0.8.4 at least.
+
 ## 0.6.7
 
 * **The OS's file-watch limit never crashes webbee**: on a large tree (Linux `fs.inotify.max_user_watches`, a repo with
