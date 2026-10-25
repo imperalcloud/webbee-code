@@ -75,3 +75,29 @@ def test_missing_watchfiles_extra_returns_immediately(monkeypatch, tmp_path):
     monkeypatch.setattr(builtins, "__import__", _blocked_import)
     # Must return (not hang/raise) when the optional extra isn't installed.
     asyncio.run(watch.watch_workspace(str(tmp_path), lambda rels: None))
+
+
+def test_the_os_watch_limit_falls_back_to_polling_and_never_raises(tmp_path):
+    """live 2026-10-25 (a repo with node_modules on Linux): "OS file watch limit reached" killed the watcher task and
+    its exception was printed when webbee quit -- the tree is polled instead."""
+    root = str(tmp_path)
+    calls, opened = [], []
+
+    def fake_awatch(_root, force_polling=False, poll_delay_ms=0):
+        opened.append(force_polling)
+
+        async def gen():
+            if not force_polling:
+                raise OSError('OS file watch limit reached. about ["/w"] (Error { kind: MaxFilesWatch })')
+            yield {("modified", os.path.join(root, "b.py"))}
+        return gen()
+
+    asyncio.run(watch.watch_workspace(root, calls.append, awatch=fake_awatch))
+    assert opened == [False, True] and calls == [{"b.py"}]
+
+    def broken(_root, **kw):
+        async def gen():
+            raise RuntimeError("anything else")
+            yield
+        return gen()
+    asyncio.run(watch.watch_workspace(root, calls.append, awatch=broken))     # ends quietly, never raises

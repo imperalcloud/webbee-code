@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.7
+
+* **The OS's file-watch limit never crashes webbee**: on a large tree (Linux `fs.inotify.max_user_watches`, a repo with
+  `node_modules`) the live re-index polls the tree every 3 s instead of dying, and the watcher's end is always
+  collected -- no "Task exception was never retrieved" when webbee quits.
+
 ## 0.6.6
 
 * **The upgrade's lock is the user's own**: it lives in webbee's data folder (only this user can write it), never in

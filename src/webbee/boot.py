@@ -102,6 +102,9 @@ async def start_intel(cfg, workspace: str, intel_factory):
         await asyncio.to_thread(svc.build)
         from webbee.intel import watch
         watcher_task = asyncio.ensure_future(watch.watch_workspace(svc.root, svc.apply_changes))
+        # its end is always collected: an exception is never printed when webbee quits ("Task exception was never
+        # retrieved", live 2026-10-25)
+        watcher_task.add_done_callback(lambda t: t.cancelled() or t.exception())
         return svc, watcher_task
     except Exception:
         return None, None

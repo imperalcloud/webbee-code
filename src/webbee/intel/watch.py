@@ -17,14 +17,36 @@ def _ignored(path: str, root: str = "") -> bool:
     return ignored_path(root, path)
 
 
-async def watch_workspace(root: str, on_change) -> None:
+# the OS's watch limit reached (Linux: fs.inotify.max_user_watches; live 2026-10-25 on a repo with node_modules: the
+# watcher task died with "OS file watch limit reached" and its exception was printed when webbee quit): the tree is
+# polled instead -- slower, never a crash
+POLL_MS = 3000
+
+
+async def watch_workspace(root: str, on_change, awatch=None) -> None:
     """Call on_change(set_of_relpaths) as files change. Fail-soft: if
-    watchfiles is unavailable, return immediately (no watcher)."""
+    watchfiles is unavailable, return immediately (no watcher); if the OS cannot
+    watch the tree, poll it; any other watch failure ends the watcher alone."""
+    if awatch is None:
+        try:
+            from watchfiles import awatch
+        except ImportError:
+            return
     try:
-        from watchfiles import awatch
-    except ImportError:
+        await _follow(awatch(root), root, on_change)
+    except OSError as exc:
+        if "watch limit" not in str(exc) and "MaxFilesWatch" not in str(exc):
+            return
+        try:
+            await _follow(awatch(root, force_polling=True, poll_delay_ms=POLL_MS), root, on_change)
+        except Exception:
+            return
+    except Exception:
         return
-    async for changes in awatch(root):
+
+
+async def _follow(stream, root: str, on_change) -> None:
+    async for changes in stream:
         rels = set()
         for _chg, path in changes:
             if _ignored(path, root):
