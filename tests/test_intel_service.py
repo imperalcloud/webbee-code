@@ -434,3 +434,17 @@ def test_a_change_syncs_only_its_repository(tmp_path, monkeypatch):
     svc.vault_client_factory = lambda: object()
     svc._sync_vault(["repo_b/m.py"])
     assert synced == ["repo_b"]
+
+
+def test_a_folder_of_repositories_names_them_in_its_profile(tmp_path):
+    """Live 2026-10-25: Webbee in a folder of six repositories got one mixed profile ("git:" empty, 20 symbols drawn
+    from all of them); the kernel names the repositories instead when the profile says them."""
+    for name in ("alpha", "beta"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+        (tmp_path / name / "m.py").write_text("def f():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk9", cache_dir=str(tmp_path / ".c"))
+    svc.build()
+    assert svc.repo_profile()["repos"] == ["alpha", "beta"]
+    one = IntelService(str(tmp_path / "alpha"), "rk10", cache_dir=str(tmp_path / ".c2"))
+    one.build()
+    assert "repos" not in one.repo_profile()

@@ -429,6 +429,9 @@ class IntelService:
                                            and len(schemas) <= _MAX_CONTRACT_EVIDENCE),
             "endpoints": endpoints[:_MAX_CONTRACT_EVIDENCE],
             "schemas": schemas[:_MAX_CONTRACT_EVIDENCE],
+            # a folder of repositories is no one repository: the kernel names them instead of one mixed profile
+            # (live 2026-10-25: "git:" empty, 20 symbols drawn from the whole folder)
+            **({"repos": sub_repositories(self.root)} if not is_repository(self.root) else {}),
         }
 
 
