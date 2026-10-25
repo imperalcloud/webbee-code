@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.12
+
+* **A folder of repositories syncs each one**: webbee opened in a folder that is no repository itself (a folder of
+  projects) syncs every sub-folder with its own `.git` into the code graph under its own key, and a change sends only
+  the repository it touched. Folders without `.git` (photos, documents) are never sent; no more failed code sync on
+  every step.
+
 ## 0.5.11
 
 * **Only a repository reaches the code graph**: a folder with neither `.git` nor a project manifest at its root
