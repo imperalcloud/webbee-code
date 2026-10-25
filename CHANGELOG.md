@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.13
+
+* **The kernel's own probes are shown free**: the evidence and reality probes the kernel runs to keep its memory
+  honest are its own work -- they no longer show an estimated cost in the step list (they were never charged).
+
 ## 0.5.12
 
 * **A folder of repositories syncs each one**: webbee opened in a folder that is no repository itself (a folder of
