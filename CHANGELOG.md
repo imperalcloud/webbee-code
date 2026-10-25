@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.11
+
+* **A checkpoint names its paths whole**: the first changed path no longer loses its first letter
+  ("mperal_kernel/..." for "imperal_kernel/...") -- found by Webbee, fixed with Claude through message_session.
+
 ## 0.6.10
 
 * **Webbee and an agent in another shell work together**: `message_session` writes to another session of yours that
