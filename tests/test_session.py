@@ -54,7 +54,7 @@ def test_build_coding_context_shape(tmp_path):
     # I-CODING-TIME-CONTRACT: client_now/client_tz_label ride every snapshot
     # (best-effort -- a clock-read failure would simply omit them).
     assert set(ctx) == {"cwd", "git", "tree", "repo_key", "repo_root",
-                        "client_now", "client_tz_label"}
+                        "client_now", "client_tz_label", "client_os"}
     assert "a.txt" in ctx["tree"]
 
 

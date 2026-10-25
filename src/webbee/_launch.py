@@ -201,6 +201,7 @@ def main():
              % (DIST, RUNTIME_PYTHON, e, DIST))
         sys.exit(1)
     argv = [exe] + sys.argv[1:]
+    os.environ["WEBBEE_LIGHT_PYTHON"] = sys.executable   # webbee.autoupdate upgrades this light install, not the runtime
     if _WINDOWS:                         # no exec on Windows: run it and pass its exit code on
         sys.exit(subprocess.call(argv))
     os.execv(exe, argv)

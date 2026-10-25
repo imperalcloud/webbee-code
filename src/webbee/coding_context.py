@@ -54,8 +54,11 @@ def build_coding_context(workspace_root: str, intel=None) -> dict:
             break
     from webbee.repo import compute_repo_key, find_repo_root
     root = find_repo_root(cwd)
+    import platform
     d = {"cwd": cwd, "git": git, "tree": "\n".join(paths),
-         "repo_key": compute_repo_key(root), "repo_root": root}
+         "repo_key": compute_repo_key(root), "repo_root": root,
+         # the kernel writes its probes for this system (macOS nc bounds a connect only by -G; Windows has no nc)
+         "client_os": platform.system()}
     # I-CODING-TIME-CONTRACT: the machine's actual local wall-clock, ISO 8601
     # WITH UTC offset (so the kernel can compare it against the user's
     # CONFIGURED timezone without re-resolving anything) + the IANA zone name

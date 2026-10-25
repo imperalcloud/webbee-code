@@ -1,0 +1,92 @@
+"""Owner 2026-10-25: webbee starts on the newest release of itself and of the shell's imperal-mcp (with its code
+extra), on any system -- the upgrade first, then the start."""
+import subprocess
+
+from webbee import autoupdate as au
+
+
+class _Run:
+    def __init__(self, rc=0, stdout=""):
+        self.calls, self.rc, self.stdout = [], rc, stdout
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, self.rc if "install" in cmd else 0,
+                                           stdout=self.stdout if "-c" in cmd else "", stderr="")
+
+
+def _which(found):
+    return lambda name: found.get(name)
+
+
+def test_the_installer_is_read_from_the_install_s_path():
+    assert au.tool_of("/Users/me/.local/share/uv/tools/webbee") == "uv"
+    assert au.tool_of(r"C:\Users\me\AppData\Roaming\uv\tools\imperal-mcp\Scripts\imperal-mcp.exe") == "uv"
+    assert au.tool_of("/home/me/.local/pipx/venvs/webbee") == "pipx"
+    assert au.tool_of("/usr/lib/python3/site-packages") == "pip"
+
+
+def test_webbee_upgrades_itself_by_its_own_tool():
+    uv = au.self_command("0.6.0", prefix="/u/.local/share/uv/tools/webbee", env={}, uv="/bin/uv")
+    assert uv == ["/bin/uv", "tool", "install", "--force", "webbee==0.6.0"]
+    px = au.self_command("0.6.0", prefix="/h/.local/pipx/venvs/webbee", env={}, pipx="/bin/pipx")
+    assert px == ["/bin/pipx", "install", "--force", "webbee==0.6.0"]
+    pip = au.self_command("0.6.0", prefix="/venv", executable="/venv/bin/python", env={})
+    assert pip == ["/venv/bin/python", "-m", "pip", "install", "--upgrade", "webbee==0.6.0"]
+    light = au.self_command("0.6.0", env={au.LIGHT_ENV: "/usr/bin/python3.8"})      # an old Python's light install
+    assert light == ["/usr/bin/python3.8", "-m", "pip", "install", "--upgrade", "webbee==0.6.0"]
+
+
+def test_a_newer_webbee_is_installed_and_started_again_before_anything_else():
+    run, execd, env = _Run(), [], {}
+    fetch = {"webbee": "0.6.0", "imperal-mcp": "0.8.2"}.get
+    au.upgrade_before_start(["--mode", "plan"], "0.5.14", say=lambda m: None, fetch=fetch,
+                            which=_which({"pipx": "/bin/pipx"}), run=run, execv=lambda p, a: execd.append(a),
+                            env=env)
+    assert run.calls[0][-1] == "webbee==0.6.0" and env[au.DONE_ENV] == "1"
+    assert execd and execd[0][-2:] == ["--mode", "plan"]
+
+
+def test_the_shell_s_imperal_mcp_is_brought_to_the_newest_with_its_code_extra(tmp_path, monkeypatch):
+    exe = tmp_path / "uv" / "tools" / "imperal-mcp" / "bin" / "imperal-mcp"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    run = _Run(stdout="0.8.1 False")                          # an old release that lost its code extra
+    monkeypatch.setattr(au, "find_uv", lambda which=None: "/bin/uv")
+    did = au.upgrade_before_start([], "0.5.14", say=lambda m: None,
+                                  fetch={"webbee": "0.5.14", "imperal-mcp": "0.8.2"}.get,
+                                  which=_which({"imperal-mcp": str(exe)}), run=run, env={})
+    assert ["/bin/uv", "tool", "install", "--force", "imperal-mcp[code]==0.8.2"] in run.calls
+    assert did == ["imperal-mcp 0.8.1 -> 0.8.2"]
+
+
+def test_nothing_changes_when_all_is_newest_or_pypi_is_out_of_reach(tmp_path, monkeypatch):
+    exe = tmp_path / "pipx" / "venvs" / "imperal-mcp" / "bin" / "imperal-mcp"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    monkeypatch.setattr(au, "find_uv", lambda which=None: None)
+    for fetch in ({"webbee": "0.5.14", "imperal-mcp": "0.8.2"}.get, lambda d: None):
+        run = _Run(stdout="0.8.2 True")
+        au.upgrade_before_start([], "0.5.14", say=lambda m: None, fetch=fetch,
+                                which=_which({"imperal-mcp": str(exe), "pipx": "/bin/pipx"}), run=run, env={})
+        assert not any("install" in c for c in run.calls)
+
+
+def test_a_missing_imperal_mcp_is_installed_from_git_when_pypi_is_out_of_reach():
+    assert au.mcp_command({}, None, "/bin/uv", None) == ["/bin/uv", "tool", "install", "--force", au.MCP_GIT_SPEC]
+    assert au.mcp_command({}, "0.8.2", None, "/bin/pipx")[-1] == "imperal-mcp[code]==0.8.2"
+    assert au.mcp_command({}, "0.8.2", None, None) is None             # no uv, no pipx: nothing to install with
+
+
+def test_a_failed_or_switched_off_upgrade_never_stops_the_start(monkeypatch):
+    said = []
+    monkeypatch.setattr(au, "find_uv", lambda which=None: "/bin/uv")
+    did = au.upgrade_before_start([], "0.5.14", say=said.append, fetch={"webbee": "0.6.0", "imperal-mcp": None}.get,
+                                  which=_which({}), run=_Run(rc=1), execv=lambda *a: 1 / 0,
+                                  env={})
+    assert did == [] and any("could not update itself" in s for s in said)
+    assert au.upgrade_before_start([], "0.5.14", fetch=lambda d: 1 / 0, env={au.OFF_ENV: "1"}) == []
+    run = _Run()                                    # just restarted after a self-upgrade: never a second one
+    au.upgrade_before_start([], "0.5.14", say=said.append, fetch={"webbee": "0.6.0"}.get, which=_which({}),
+                            run=run, execv=lambda *a: 1 / 0, env={au.DONE_ENV: "1"})
+    assert not any("webbee==0.6.0" in c for c in run.calls)

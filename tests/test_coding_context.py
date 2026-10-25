@@ -41,3 +41,10 @@ def test_build_coding_context_carries_client_now(tmp_path):
     # ISO 8601 with an explicit UTC offset (+HH:MM/-HH:MM or Z) -- the kernel
     # compares this against the configured timezone without re-resolving.
     assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$", ctx["client_now"])
+
+
+def test_the_context_names_the_client_s_system(tmp_path):
+    """The kernel writes its probes for the client's system (live 2026-10-25: macOS nc waited ~75 s per dead host)."""
+    import platform
+    from webbee.coding_context import build_coding_context
+    assert build_coding_context(str(tmp_path))["client_os"] == platform.system()

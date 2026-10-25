@@ -65,7 +65,7 @@ def main(argv=None) -> None:
         from webbee.repl import run_marathon
         try:
             _print_boot_progress("checking for updates")
-            _maybe_print_update_notice()
+            _upgrade_before_start(argv)
             _print_boot_progress("booting workspace (indexing, git, session)")
             asyncio.run(run_marathon(cfg, args.mode, args.marathon))
         except KeyboardInterrupt:
@@ -86,7 +86,7 @@ def main(argv=None) -> None:
         # notes printed to the real (non-full-screen-yet) terminal -- gone the
         # instant the dock takes over the screen, never left behind as clutter.
         _print_boot_progress("checking for updates")
-        _maybe_print_update_notice()
+        _upgrade_before_start(argv)
         _print_boot_progress("booting workspace (indexing, git, session)")
         asyncio.run(run_repl(cfg, args.mode, once=args.once))
     except KeyboardInterrupt:
@@ -114,6 +114,23 @@ def _print_boot_progress(what: str) -> None:
         sys.stdout.flush()
     except Exception:
         pass  # a progress note must never block or crash startup
+
+
+def _upgrade_before_start(argv) -> None:
+    """The newest webbee and imperal-mcp before the start (webbee.autoupdate); a self-upgrade starts webbee again on the
+    new release. Then the old notice, only when the upgrade could not be made."""
+    import sys
+    try:
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            raise RuntimeError("no network upgrade inside a test run")
+        from webbee.autoupdate import upgrade_before_start
+        upgrade_before_start(list(sys.argv[1:] if argv is None else argv), __version__,
+                             say=lambda m: print("\r" + m))
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+    _maybe_print_update_notice()
 
 
 def _maybe_print_update_notice() -> None:
