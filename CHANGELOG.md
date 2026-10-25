@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2
+
+* **The upgrade at the start installs a release the moment it is out**: by its wheel's address on PyPI's file host
+  (the index pages trail a release by minutes), past every install cache.
+
 ## 0.6.1
 
 * **The upgrade at the start finds a release minutes old**: it reads past pip's / uv's index cache (before, a fresh
