@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.4
+
+* **imperal-mcp 0.8.3 at least**: the prompt hook's frame is composed by the kernel to the size the shell keeps.
+  Works with the kernel's package 0.8.5 of 2026-10-25: a run started in the background is proven by the read of its
+  log, every parallel call keeps its result, an expectation is checked on the whole answer, the conversation lens holds
+  the request being worked on, WORLD takes the code map's commit and leaves old facts of a machine out.
+
+## 0.6.4
+
+* **imperal-mcp 0.8.3 at least**: the prompt hook's frame is composed by the kernel to the size the shell keeps.
+  Works with the kernel's package 0.8.5 of 2026-10-25: a run started in the background is proven by the read of its
+  log, every parallel call keeps its result, an expectation is checked on the whole answer, the conversation lens holds
+  the request being worked on, WORLD takes the code map's commit and leaves old facts of a machine out.
+
 ## 0.6.3
 
 * **imperal-mcp 0.8.2 at least**: a shell command reaches the kernel with the folder it ran in, so the frame places a
