@@ -1,11 +1,17 @@
 # Changelog
 
-## 0.6.4
+## 0.6.6
 
-* **imperal-mcp 0.8.3 at least**: the prompt hook's frame is composed by the kernel to the size the shell keeps.
-  Works with the kernel's package 0.8.5 of 2026-10-25: a run started in the background is proven by the read of its
-  log, every parallel call keeps its result, an expectation is checked on the whole answer, the conversation lens holds
-  the request being worked on, WORLD takes the code map's commit and leaves old facts of a machine out.
+* **The upgrade's lock is the user's own**: it lives in webbee's data folder (only this user can write it), never in
+  the shared temp folder where another user could hold every upgrade back; a lock another user made is ignored.
+
+## 0.6.5
+
+* **Two webbees started together never break the install**: the upgrade at the start runs one at a time (a lock per
+  user); the second start waits for the first and starts on the release it installed. A pipx install is upgraded in
+  place (`pipx runpip`), never deleted and built again; the new release must import before webbee starts on it, else
+  it is installed once more (live 2026-10-25: a start in the middle of another's reinstall failed on
+  `No module named 'pygments.styles'`).
 
 ## 0.6.4
 

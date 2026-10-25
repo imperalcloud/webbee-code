@@ -12,7 +12,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 DIST = "webbee"
@@ -176,8 +175,15 @@ def restart_command(argv, env=os.environ, executable: str = sys.executable):
 
 
 def _lock_path() -> str:
-    who = str(os.getuid()) if hasattr(os, "getuid") else (os.environ.get("USERNAME") or "user")
-    return os.path.join(tempfile.gettempdir(), f"webbee-upgrade-{who}.lock")
+    """The lock in webbee's own data folder of this user (0700) -- never a shared temp folder, where anyone could make
+    it first and hold every upgrade back (security review 2026-10-25)."""
+    try:
+        from webbee._launch import _home
+        base = os.path.dirname(_home())
+    except Exception:
+        base = os.path.join(os.path.expanduser("~"), ".webbee")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    return os.path.join(base, "upgrade.lock")
 
 
 def _lock(path: str) -> bool:
@@ -191,7 +197,10 @@ def _lock(path: str) -> bool:
             return True
         except FileExistsError:
             try:
-                if time.time() - os.path.getmtime(path) < LOCK_STALE_S:
+                st = os.stat(path)
+                if hasattr(os, "getuid") and st.st_uid != os.getuid():
+                    return True             # not this user's: no lock of ours, the upgrade goes on
+                if time.time() - st.st_mtime < LOCK_STALE_S:
                     return False
                 os.remove(path)
             except OSError:

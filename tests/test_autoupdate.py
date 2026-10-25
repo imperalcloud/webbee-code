@@ -164,3 +164,13 @@ def test_the_lock_is_released_before_the_restart_and_a_broken_install_is_done_ag
     assert seen == [False]                                    # no lock left behind by exec
     assert len([c for c in run.calls if "install" in c]) == 2
     assert not lock.exists()
+
+
+def test_the_lock_lives_in_webbee_s_own_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.delenv("WEBBEE_RUNTIME_HOME", raising=False)
+    path = au._lock_path()
+    assert path.startswith(str(tmp_path / "data")) and path.endswith("upgrade.lock")
+    import os
+    import stat
+    assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) & 0o077 == 0     # only this user
