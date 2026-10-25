@@ -30,7 +30,7 @@ def test_webbee_upgrades_itself_by_its_own_tool():
     uv = au.self_command("0.6.0", prefix="/u/.local/share/uv/tools/webbee", env={}, uv="/bin/uv")
     assert uv == ["/bin/uv", "tool", "install", "--force", "--refresh", "webbee==0.6.0"]
     px = au.self_command("0.6.0", prefix="/h/.local/pipx/venvs/webbee", env={}, pipx="/bin/pipx")
-    assert px == ["/bin/pipx", "install", "--force", "--pip-args=--no-cache-dir", "webbee==0.6.0"]
+    assert px == ["/bin/pipx", "runpip", "webbee", "install", "--upgrade", "--no-cache-dir", "webbee==0.6.0"]
     pip = au.self_command("0.6.0", prefix="/venv", executable="/venv/bin/python", env={})
     assert pip == ["/venv/bin/python", "-m", "pip", "install", "--upgrade", "--no-cache-dir", "webbee==0.6.0"]
     light = au.self_command("0.6.0", env={au.LIGHT_ENV: "/usr/bin/python3.8"})      # an old Python's light install
@@ -124,3 +124,43 @@ def test_a_release_is_installed_by_its_wheel_s_address_when_pypi_names_it():
     assert got[-1] == f"imperal-mcp[code] @ {mcp_url}"
     assert au.self_command("0.6.1", prefix="/v", executable="/v/bin/python", env={}, wheel=lambda d, v: None)[-1] \
         == "webbee==0.6.1"
+
+
+# ── live 2026-10-25: two starts reinstalled one venv at once; the restart found it half-written ──
+def test_pipx_upgrades_its_venv_in_place():
+    px = au.self_command("0.6.5", prefix="/h/.local/pipx/venvs/webbee", env={}, pipx="/bin/pipx")
+    assert px == ["/bin/pipx", "runpip", "webbee", "install", "--upgrade", "--no-cache-dir", "webbee==0.6.5"]
+    inst = {"tool": "pipx", "python": "/p/bin/python", "version": "0.8.2", "code": True}
+    assert au.mcp_command(inst, "0.8.3", None, "/bin/pipx") == [
+        "/bin/pipx", "runpip", "imperal-mcp", "install", "--upgrade", "--no-cache-dir", "imperal-mcp[code]==0.8.3"]
+    assert au.mcp_command({}, "0.8.3", None, "/bin/pipx")[:3] == ["/bin/pipx", "install", "--force"]   # a new one
+
+
+def test_a_second_start_waits_for_the_first_upgrade_and_starts_on_it(tmp_path):
+    lock = tmp_path / "webbee-upgrade.lock"
+    lock.write_text("1 0")                                    # another webbee is upgrading right now
+    run, execd, env, said = _Run(), [], {}, []
+    slept = []
+
+    def sleep(s):
+        slept.append(s)
+        lock.unlink()                                         # ... and it finishes
+    au.upgrade_before_start(["--once"], "0.6.4", say=said.append, fetch={"webbee": "0.6.5"}.get, wheel=None,
+                            which=_which({"pipx": "/bin/pipx"}), run=run, execv=lambda p, a: execd.append(a),
+                            env=env, lock_path=lambda: str(lock), sleep=sleep)
+    assert run.calls == [] and slept and execd and env[au.DONE_ENV] == "1"   # no second install, the new release
+    assert "another webbee is updating" in said[0]
+
+
+def test_the_lock_is_released_before_the_restart_and_a_broken_install_is_done_again(tmp_path, monkeypatch):
+    lock = tmp_path / "webbee-upgrade.lock"
+    seen = []
+    checks = iter([False, True])                              # the first install left it broken, the second is whole
+    monkeypatch.setattr(au, "imports_ok", lambda python, run=None: next(checks))
+    run = _Run()
+    au.upgrade_before_start([], "0.6.4", say=lambda m: None, fetch={"webbee": "0.6.5"}.get, wheel=None,
+                            which=_which({"pipx": "/bin/pipx"}), run=run, env={}, lock_path=lambda: str(lock),
+                            execv=lambda p, a: seen.append(lock.exists()))
+    assert seen == [False]                                    # no lock left behind by exec
+    assert len([c for c in run.calls if "install" in c]) == 2
+    assert not lock.exists()

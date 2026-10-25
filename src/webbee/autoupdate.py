@@ -12,6 +12,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 DIST = "webbee"
 MCP = "imperal-mcp"
@@ -22,6 +24,10 @@ OFF_ENV = "WEBBEE_NO_AUTOUPDATE"           # 1: never upgrade at the start (CI, 
 DONE_ENV = "WEBBEE_UPGRADED"               # set on the restart after a self-upgrade: never twice in a row
 LIGHT_ENV = "WEBBEE_LIGHT_PYTHON"          # the old Python whose light install runs this release (webbee._launch)
 STEP_TIMEOUT_S = 300
+# one upgrade at a time per user: two webbees started together reinstalled one venv at once and the restart found it
+# half-written (live 2026-10-25: "No module named 'pygments.styles'"); the second waits for the first
+LOCK_WAIT_S = 2 * STEP_TIMEOUT_S + 60
+LOCK_STALE_S = 3 * STEP_TIMEOUT_S
 _WINDOWS = os.name == "nt"
 # `python -c` puts the current folder first on sys.path: a webbee.py there would run in our place (security review).
 # Dropped before any import -- `-I` is no way out, it also drops a `pip install --user` webbee.
@@ -104,14 +110,18 @@ def self_command(version: str, prefix: str = sys.prefix, executable: str = sys.e
     light = env.get(LIGHT_ENV)
     if light:                               # an old Python runs this release through its light install
         return [light, "-m", "pip", "install", "--upgrade", "--no-cache-dir", spec]
-    return _install(tool_of(prefix), spec, uv, pipx, executable)
+    return _install(tool_of(prefix), spec, uv, pipx, executable, venv=DIST)
 
 
-def _install(tool: str, spec: str, uv, pipx, python):
+def _install(tool: str, spec: str, uv, pipx, python, venv: str = ""):
     """``spec`` installed by ``tool`` -- past its index cache: a release minutes old is missing from a cached index page
-    (live 2026-10-25: pip listed nothing newer than 0.5.13 while PyPI served 0.6.0)."""
+    (live 2026-10-25: pip listed nothing newer than 0.5.13 while PyPI served 0.6.0). A pipx venv that exists is upgraded
+    in place (``runpip``): ``install --force`` deletes the venv and builds it again, and a start in that window found
+    it half-written (live 2026-10-25)."""
     if tool == "uv" and uv:
         return [uv, "tool", "install", "--force", "--refresh", spec]
+    if tool == "pipx" and pipx and venv:
+        return [pipx, "runpip", venv, "install", "--upgrade", "--no-cache-dir", spec]
     if tool == "pipx" and pipx:
         return [pipx, "install", "--force", "--pip-args=--no-cache-dir", spec]
     if tool == "pip" and python:
@@ -154,7 +164,7 @@ def mcp_command(inst: dict, newest, uv, pipx, wheel=None):
         return None                         # PyPI unread: what works stays
     spec = _spec(MCP_SPEC, MCP, newest, wheel) if newest else (MCP_SPEC if inst else MCP_GIT_SPEC)
     tool = inst.get("tool") if inst else ("uv" if uv else "pipx" if pipx else "")
-    return _install(tool, spec, uv, pipx, inst.get("python") if inst else None)
+    return _install(tool, spec, uv, pipx, inst.get("python") if inst else None, venv=MCP if inst else "")
 
 
 def restart_command(argv, env=os.environ, executable: str = sys.executable):
@@ -163,6 +173,55 @@ def restart_command(argv, env=os.environ, executable: str = sys.executable):
     if light:
         return [light, "-c", _NO_CWD + "from webbee._launch import main; main()", *argv]
     return [executable, "-c", _NO_CWD + "from webbee.cli import main; main()", *argv]
+
+
+def _lock_path() -> str:
+    who = str(os.getuid()) if hasattr(os, "getuid") else (os.environ.get("USERNAME") or "user")
+    return os.path.join(tempfile.gettempdir(), f"webbee-upgrade-{who}.lock")
+
+
+def _lock(path: str) -> bool:
+    """This start's turn to upgrade: the lock file made by it alone (``O_EXCL``, any system); a lock older than any
+    upgrade takes is left over from a killed start and is taken over."""
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()} {time.time():.0f}".encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(path) < LOCK_STALE_S:
+                    return False
+                os.remove(path)
+            except OSError:
+                return False
+        except OSError:
+            return True                     # no place for a lock: upgrade as before rather than never
+    return False
+
+
+def _unlock(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _wait_unlocked(path: str, sleep=time.sleep) -> None:
+    end = time.time() + LOCK_WAIT_S
+    while os.path.exists(path) and time.time() < end:
+        sleep(1)
+
+
+def imports_ok(python: str, run=subprocess.run) -> bool:
+    """The installed webbee starts: its modules import in its own Python (a half-written venv fails here, not at the
+    user's start)."""
+    try:
+        return run([python, "-c", _NO_CWD + "import webbee.cli, webbee.repl"], capture_output=True, text=True,
+                   timeout=60).returncode == 0
+    except Exception:
+        return False
 
 
 def _run(cmd, run=subprocess.run) -> bool:
@@ -174,12 +233,28 @@ def _run(cmd, run=subprocess.run) -> bool:
 
 
 def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe_which, run=subprocess.run,
-                         execv=os.execv, env=os.environ, wheel=wheel_url) -> list:
+                         execv=os.execv, env=os.environ, wheel=wheel_url, lock_path=_lock_path,
+                         sleep=time.sleep) -> list:
     """Bring webbee and the shell's imperal-mcp to their newest releases, then let the start go on; a self-upgrade
     starts webbee again on the new release (never returns then). Returns what it did, for the log. Never raises."""
     did: list = []
+    lock = ""
     try:
         if env.get(OFF_ENV) == "1":
+            return did
+        lock = lock_path() if lock_path else ""
+        if lock and not _lock(lock):
+            # another webbee is upgrading this install: wait for it, then start on what it installed
+            say("🐝 another webbee is updating -- waiting for it ...")
+            _wait_unlocked(lock, sleep)
+            lock = ""
+            newest = fetch(DIST)
+            if newest and _ver(newest) > _ver(current) and not env.get(DONE_ENV):
+                env[DONE_ENV] = "1"
+                again = restart_command(list(argv), env=env)
+                if _WINDOWS:
+                    sys.exit(subprocess.call(again))
+                execv(again[0], again)
             return did
         uv, pipx = find_uv(which), which("pipx")
         newest = fetch(DIST)
@@ -187,9 +262,14 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
             cmd = self_command(newest, env=env, uv=uv, pipx=pipx, wheel=wheel)
             if cmd:
                 say(f"🐝 updating webbee {current} -> {newest} ...")
-                if _run(cmd, run):
+                python = env.get(LIGHT_ENV) or ""
+                ok = _run(cmd, run) and (python or imports_ok(sys.executable, run) or
+                                         (_run(cmd, run) and imports_ok(sys.executable, run)))
+                if ok:
                     did.append(f"webbee {newest}")
                     env[DONE_ENV] = "1"           # the restart inherits it: never a second self-upgrade
+                    _unlock(lock)                 # exec never returns: the lock goes before it, not in finally
+                    lock = ""
                     again = restart_command(list(argv), env=env)
                     if _WINDOWS:            # no exec on Windows: run it and pass its exit code on
                         sys.exit(subprocess.call(again))
@@ -211,5 +291,8 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
         raise
     except Exception:
         pass
+    finally:
+        if lock:
+            _unlock(lock)
     return did
 
