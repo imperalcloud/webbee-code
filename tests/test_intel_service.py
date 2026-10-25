@@ -1,3 +1,4 @@
+import os
 import pytest
 pytest.importorskip("tree_sitter")
 from webbee.intel.service import IntelService
@@ -394,3 +395,42 @@ def test_a_repository_by_git_or_by_manifest(tmp_path):
     other = tmp_path / "other"
     (other / ".git").mkdir(parents=True)
     assert is_repository(str(other))
+
+
+
+# ── live 2026-10-25 (Webbee in imperal-cloud-main, a folder of repositories): intel_sync_local failed every step ──
+def test_a_folder_of_repositories_syncs_each_repository(tmp_path, monkeypatch):
+    from webbee.intel import service as S
+    for name in ("repo_a", "repo_b"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+        (tmp_path / name / f"{name}.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "Photos").mkdir()
+    (tmp_path / "Photos" / "gallery.js").write_text("function show() {}\n")
+    synced = []
+
+    async def fake_sync(client, meta, listing, read, measured=None):
+        synced.append((os.path.basename(meta["root"]), sorted(i["path"] for i in listing)))
+        return {"repo_key": "k_" + os.path.basename(meta["root"]), "listed": len(listing)}
+    monkeypatch.setattr(S, "vault_sync", fake_sync)
+    svc = S.IntelService(str(tmp_path), "k", cache_dir=str(tmp_path / ".cache"))
+    svc.vault_client_factory = lambda: object()
+    out = svc.sync_now()
+    assert out.get("ok") is not False and out["repos"] == {"repo_a": "k_repo_a", "repo_b": "k_repo_b"}
+    assert sorted(synced) == [("repo_a", ["repo_a.py"]), ("repo_b", ["repo_b.py"])]      # never Photos
+
+
+def test_a_change_syncs_only_its_repository(tmp_path, monkeypatch):
+    from webbee.intel import service as S
+    for name in ("repo_a", "repo_b"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+        (tmp_path / name / "m.py").write_text("x = 1\n")
+    synced = []
+
+    async def fake_sync(client, meta, listing, read, measured=None):
+        synced.append(os.path.basename(meta["root"]))
+        return {"repo_key": "k"}
+    monkeypatch.setattr(S, "vault_sync", fake_sync)
+    svc = S.IntelService(str(tmp_path), "k", cache_dir=str(tmp_path / ".cache"))
+    svc.vault_client_factory = lambda: object()
+    svc._sync_vault(["repo_b/m.py"])
+    assert synced == ["repo_b"]

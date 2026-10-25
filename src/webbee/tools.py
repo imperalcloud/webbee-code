@@ -782,8 +782,10 @@ class LocalToolExecutor:
         out = self.indexer.sync_now()
         if out.get("ok") is False:
             return {"ok": False, "content": f"intel_sync_local: {out.get('content')}"}
-        counts = {k: v for k, v in out.items() if k not in ("repo_key", "synced_at")}
-        return {"ok": True, "content": {"repo_key": out["repo_key"], "synced_at": out["synced_at"], "counts": counts}}
+        counts = {k: v for k, v in out.items() if k not in ("repo_key", "synced_at", "repos")}
+        # a folder of repositories: each one synced under its own key (``repos``: folder -> key)
+        return {"ok": True, "content": {"repo_key": out.get("repo_key") or "", "synced_at": out["synced_at"],
+                                        **({"repos": out["repos"]} if out.get("repos") else {}), "counts": counts}}
 
     def _cpc_local(self, verb: str, a: dict) -> dict:
         if self.indexer is None:

@@ -285,10 +285,36 @@ class IntelService:
         factory = self.vault_client_factory
         if factory is None:
             return {}
-        if not is_repository(self.root):
-            # never the whole of a home folder or a folder of projects (live: a 14 GB folder with photo backups)
+        if is_repository(self.root):
+            return self._sync_root(self.root, rels, history)
+        # never the whole of a home folder or a folder of projects (live: a 14 GB folder with photo backups) -- its
+        # repositories one by one (live 2026-10-25: Webbee in a folder of repositories failed the sync every step)
+        subs = sub_repositories(self.root)
+        if not subs:
             return {"repo_key": "", "partial_reason": f"{self.root} is not a repository (no .git, no project manifest) "
-                                                      "-- its repositories are synced one by one"}
+                                                      "and holds none"}
+        if rels is not None:            # a change: only the repositories it touched, with their own paths
+            by_repo: dict = {}
+            for rel in rels:
+                head, _, tail = str(rel).replace(os.sep, "/").partition("/")
+                if head in subs and tail:
+                    by_repo.setdefault(head, []).append(tail)
+            todo = {name: by_repo[name] for name in by_repo}
+        else:
+            todo = {name: None for name in subs}
+        repos = {}
+        for name, sub_rels in todo.items():
+            out = self._sync_root(os.path.join(self.root, name), sub_rels, history)
+            if out.get("repo_key"):
+                repos[name] = str(out["repo_key"])
+        out = {"repo_key": "", "repos": repos}
+        if repos:
+            self.last_sync = out
+        return out
+
+    def _sync_root(self, root: str, rels=None, history: bool = True) -> dict:
+        """One repository (``root``) into the vault: every indexable file, or ``rels`` (paths under ``root``)."""
+        factory = self.vault_client_factory
         with self._sync_lock:
             t0 = time.monotonic()
             try:
@@ -296,9 +322,9 @@ class IntelService:
 
                 async def read(paths):
                     got = {}
-                    base = os.path.realpath(self.root)
+                    base = os.path.realpath(root)
                     for p in paths:
-                        full = os.path.join(self.root, p)
+                        full = os.path.join(root, p)
                         # never a link, never a path that resolves outside the workspace
                         real = os.path.realpath(full)
                         if os.path.islink(full) or not (real == base or real.startswith(base + os.sep)):
@@ -309,12 +335,12 @@ class IntelService:
                         except OSError:
                             continue
                     return got
-                meta = {"machine": {"machine_id": machine_id()}, "root": self.root, "root_path": self.root,
+                meta = {"machine": {"machine_id": machine_id()}, "root": root, "root_path": root,
                         "os": "windows" if os.name == "nt" else "posix", "source": "local", "ref": "",
-                        "machine_kind": "local", "git": local_git_identity(self.root),
-                        "local_key": compute_repo_key(self.root), "listing_complete": rels is None}
-                listing = _local_listing(self.root, rels)
-                measured = co_change_pairs(self.root) if rels is None and history else None
+                        "machine_kind": "local", "git": local_git_identity(root),
+                        "local_key": compute_repo_key(root), "listing_complete": rels is None}
+                listing = _local_listing(root, rels)
+                measured = co_change_pairs(root) if rels is None and history else None
                 out = asyncio.run(vault_sync(factory(), meta, listing, read, measured))
             except Exception as exc:
                 log.warning("code sync to the vault failed: %s", exc)
@@ -340,7 +366,7 @@ class IntelService:
         if not self.last_sync:
             self._sync_lock.release()
         out = self._sync_vault(None, history=False)
-        if not out.get("repo_key"):
+        if not out.get("repo_key") and not out.get("repos"):
             return {"ok": False, "content": str(out.get("partial_reason") or "the code sync to the vault failed")}
         return {**out, "synced_at": time.time()}
 
@@ -411,6 +437,29 @@ class IntelService:
 # what makes a folder a project for the code graph: version control or a manifest of an indexable language at its root
 # (the sdk's config names; Python and JS/TS are what the index reads)
 _MANIFESTS = tuple(indexer.CONFIG_NAMES) + ("setup.py", "requirements.txt", "tsconfig.json")
+
+
+SUB_REPOS_MAX = 40     # a folder of projects: at most this many of its repositories are synced
+
+
+def sub_repositories(root: str) -> list:
+    """The repositories directly inside a folder that is none itself: sub-folders with ``.git`` (never a link, never a
+    hidden folder; a manifest alone does not make a sub-folder a project here), sorted, bounded."""
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        full = os.path.join(root, name)
+        if name.startswith(".") or os.path.islink(full) or not os.path.isdir(full):
+            continue
+        try:
+            if ".git" in os.listdir(full):
+                out.append(name)
+        except OSError:
+            continue
+    return out[:SUB_REPOS_MAX]
 
 
 def is_repository(root: str) -> bool:
