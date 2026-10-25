@@ -83,14 +83,19 @@ def self_command(version: str, prefix: str = sys.prefix, executable: str = sys.e
     spec = f"{DIST}=={version}"
     light = env.get(LIGHT_ENV)
     if light:                               # an old Python runs this release through its light install
-        return [light, "-m", "pip", "install", "--upgrade", spec]
-    tool = tool_of(prefix)
+        return [light, "-m", "pip", "install", "--upgrade", "--no-cache-dir", spec]
+    return _install(tool_of(prefix), spec, uv, pipx, executable)
+
+
+def _install(tool: str, spec: str, uv, pipx, python):
+    """``spec`` installed by ``tool`` -- past its index cache: a release minutes old is missing from a cached index page
+    (live 2026-10-25: pip listed nothing newer than 0.5.13 while PyPI served 0.6.0)."""
     if tool == "uv" and uv:
-        return [uv, "tool", "install", "--force", spec]
+        return [uv, "tool", "install", "--force", "--refresh", spec]
     if tool == "pipx" and pipx:
-        return [pipx, "install", "--force", spec]
-    if tool == "pip":
-        return [executable, "-m", "pip", "install", "--upgrade", spec]
+        return [pipx, "install", "--force", "--pip-args=--no-cache-dir", spec]
+    if tool == "pip" and python:
+        return [python, "-m", "pip", "install", "--upgrade", "--no-cache-dir", spec]
     return None
 
 
@@ -129,13 +134,7 @@ def mcp_command(inst: dict, newest, uv, pipx):
         return None                         # PyPI unread: what works stays
     spec = f"{MCP_SPEC}=={newest}" if newest else (MCP_SPEC if inst else MCP_GIT_SPEC)
     tool = inst.get("tool") if inst else ("uv" if uv else "pipx" if pipx else "")
-    if tool == "uv" and uv:
-        return [uv, "tool", "install", "--force", spec]
-    if tool == "pipx" and pipx:
-        return [pipx, "install", "--force", spec]
-    if tool == "pip" and inst.get("python"):
-        return [inst["python"], "-m", "pip", "install", "--upgrade", spec]
-    return None
+    return _install(tool, spec, uv, pipx, inst.get("python") if inst else None)
 
 
 def restart_command(argv, env=os.environ, executable: str = sys.executable):

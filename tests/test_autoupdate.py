@@ -28,13 +28,13 @@ def test_the_installer_is_read_from_the_install_s_path():
 
 def test_webbee_upgrades_itself_by_its_own_tool():
     uv = au.self_command("0.6.0", prefix="/u/.local/share/uv/tools/webbee", env={}, uv="/bin/uv")
-    assert uv == ["/bin/uv", "tool", "install", "--force", "webbee==0.6.0"]
+    assert uv == ["/bin/uv", "tool", "install", "--force", "--refresh", "webbee==0.6.0"]
     px = au.self_command("0.6.0", prefix="/h/.local/pipx/venvs/webbee", env={}, pipx="/bin/pipx")
-    assert px == ["/bin/pipx", "install", "--force", "webbee==0.6.0"]
+    assert px == ["/bin/pipx", "install", "--force", "--pip-args=--no-cache-dir", "webbee==0.6.0"]
     pip = au.self_command("0.6.0", prefix="/venv", executable="/venv/bin/python", env={})
-    assert pip == ["/venv/bin/python", "-m", "pip", "install", "--upgrade", "webbee==0.6.0"]
+    assert pip == ["/venv/bin/python", "-m", "pip", "install", "--upgrade", "--no-cache-dir", "webbee==0.6.0"]
     light = au.self_command("0.6.0", env={au.LIGHT_ENV: "/usr/bin/python3.8"})      # an old Python's light install
-    assert light == ["/usr/bin/python3.8", "-m", "pip", "install", "--upgrade", "webbee==0.6.0"]
+    assert light == ["/usr/bin/python3.8", "-m", "pip", "install", "--upgrade", "--no-cache-dir", "webbee==0.6.0"]
 
 
 def test_a_newer_webbee_is_installed_and_started_again_before_anything_else():
@@ -56,7 +56,7 @@ def test_the_shell_s_imperal_mcp_is_brought_to_the_newest_with_its_code_extra(tm
     did = au.upgrade_before_start([], "0.5.14", say=lambda m: None,
                                   fetch={"webbee": "0.5.14", "imperal-mcp": "0.8.2"}.get,
                                   which=_which({"imperal-mcp": str(exe)}), run=run, env={})
-    assert ["/bin/uv", "tool", "install", "--force", "imperal-mcp[code]==0.8.2"] in run.calls
+    assert ["/bin/uv", "tool", "install", "--force", "--refresh", "imperal-mcp[code]==0.8.2"] in run.calls
     assert did == ["imperal-mcp 0.8.1 -> 0.8.2"]
 
 
@@ -73,7 +73,7 @@ def test_nothing_changes_when_all_is_newest_or_pypi_is_out_of_reach(tmp_path, mo
 
 
 def test_a_missing_imperal_mcp_is_installed_from_git_when_pypi_is_out_of_reach():
-    assert au.mcp_command({}, None, "/bin/uv", None) == ["/bin/uv", "tool", "install", "--force", au.MCP_GIT_SPEC]
+    assert au.mcp_command({}, None, "/bin/uv", None) == ["/bin/uv", "tool", "install", "--force", "--refresh", au.MCP_GIT_SPEC]
     assert au.mcp_command({}, "0.8.2", None, "/bin/pipx")[-1] == "imperal-mcp[code]==0.8.2"
     assert au.mcp_command({}, "0.8.2", None, None) is None             # no uv, no pipx: nothing to install with
 
