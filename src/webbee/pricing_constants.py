@@ -44,9 +44,13 @@ DEFAULT_ACTION_PRICES = {
     "memory-index": 0.01,
 }
 
-def estimate_action_cost(tool_name: str) -> float:
-    """Estimate credit cost for an action by tool name."""
-    if not tool_name:
+# the kernel's own read-only probes (evidence / reality) are the kernel's work, never the user's priced step
+_KERNEL_PROBES = (": imperal-evidence-probe;", ": imperal-reality-probe")
+
+
+def estimate_action_cost(tool_name: str, arg: str = "") -> float:
+    """Estimate credit cost for an action by tool name (a kernel probe is free)."""
+    if not tool_name or any(m in str(arg or "") for m in _KERNEL_PROBES):
         return 0.0
     t = tool_name.strip()
     if t in DEFAULT_ACTION_PRICES:

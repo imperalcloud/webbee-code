@@ -626,7 +626,7 @@ class RichSink:
             duration_ms = max(0, int((self._clock() - self._pending_start) * 1000))
         self._pending = ("", "")
         self._pending_start = 0.0
-        cost_cr = estimate_action_cost(_tool)
+        cost_cr = estimate_action_cost(_tool, arg)
         dur_str = f"{duration_ms}ms" if duration_ms > 0 else "<1ms"
         cost_str = f"{cost_cr:.2f} cr"
         self._step_index += 1
