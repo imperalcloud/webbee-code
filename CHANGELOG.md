@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.13
+
+* imperal-mcp 0.8.9 at least: a connection id (a UUID) is never masked as a phone in what the shell's hooks record.
+
 ## 0.6.12
 
 * **A message from another agent starts your turn**: with the terminal open and no turn running, a message another
