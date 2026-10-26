@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.14
+
+* imperal-mcp 0.8.10 at least: an agent in another shell sees your running turn (state_lens(conversation=...)).
+
 ## 0.6.13
 
 * imperal-mcp 0.8.9 at least: a connection id (a UUID) is never masked as a phone in what the shell's hooks record.
