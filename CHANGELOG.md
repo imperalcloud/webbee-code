@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.12
+
+* **A message from another agent starts your turn**: with the terminal open and no turn running, a message another
+  agent sends to this session (Claude through imperal-mcp, another Webbee) is picked up by the idle poll and starts a
+  turn -- shown as the agent's words, journaled as theirs, never as yours and never as your task. Needs imperal-mcp
+  0.8.8 (`imperal-mcp watch` brings your answers to the other agent the same way).
+
 ## 0.6.11
 
 * **A checkpoint names its paths whole**: the first changed path no longer loses its first letter
