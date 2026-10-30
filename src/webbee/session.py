@@ -776,6 +776,14 @@ class AgentSession:
                                 _hook(_origin, _iid)
                         except Exception:
                             pass
+                    # another agent's message also stays in the scrollback: its
+                    # panel row leaves as soon as the turn takes it
+                    _say = getattr(sink, "agent_message", None)
+                    if ftype == "task_queued" and _origin == "agent" and _say is not None:
+                        try:
+                            _say(str(frame.get("text", "") or ""), str(frame.get("steer_iid", "") or ""))
+                        except Exception:
+                            pass
 
                 elif ftype == "marathon_complete":  # U4 — the whole GOAL is done: terminal
                     return frame.get("text", "")

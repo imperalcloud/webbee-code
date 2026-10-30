@@ -1082,3 +1082,10 @@ def test_step_records_reset_on_a_new_turn():
     s.begin_turn()                                 # a fresh turn, fresh numbering
     assert s._step_records == {}
     assert s._step_index == 0
+
+
+def test_an_agents_message_prints_one_kept_line_once():
+    s = _sink()
+    s.agent_message("Claude (imperal-mcp): stop", "agent.m1")
+    s.agent_message("Claude (imperal-mcp): stop", "agent.m1")        # a re-sent frame prints once
+    assert s.console.export_text().count("[agent] Claude (imperal-mcp): stop") == 1

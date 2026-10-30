@@ -520,6 +520,26 @@ class RichSink:
                                     "iid": iid})
         self._nudge()
 
+    def agent_message(self, text: str, iid: str = "") -> None:
+        """Another agent's message landed in the RUNNING session (a kernel
+        `task_queued` frame with origin `agent`): ONE line in the scrollback
+        that stays -- the panel row leaves the moment the turn takes the
+        message (2026-10-30: the owner never saw Claude's follow-ups; a
+        Telegram steer showed, an agent's did not). Display-only; a frame
+        delivered twice (publish retry / SSE resume) prints once."""
+        iid = str(iid or "")
+        seen = self.__dict__.setdefault("_agent_seen", set())
+        if iid and iid in seen:
+            return
+        if iid:
+            seen.add(iid)
+        t_now = time.strftime("%H:%M:%S")
+        self.console.print(_pad(Text.assemble(
+            (f"{t_now} ", "dim grey50"),
+            ("✉ [agent] " + _clean(str(text or "")), f"bold {_BEE}"),
+        )))
+        self._nudge()
+
     def remote_dequeued(self, origin: str, iid: str) -> None:
         """The kernel drained (or dedup-dropped) one queued item
         (`task_dequeued` frame): remove its panel row by `iid`. The

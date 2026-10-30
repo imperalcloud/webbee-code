@@ -1847,3 +1847,25 @@ def test_serve_stream_skips_tool_diff_hook_gracefully_when_sink_lacks_it(monkeyp
     result = asyncio.run(sess.run("write it", RecSinkNoDiffHook()))
 
     assert result == "done"
+
+
+def test_an_agents_message_stays_in_the_scrollback(monkeypatch):
+    """2026-10-30: Claude's follow-ups to a running marathon showed only as a panel row that left when the turn took
+    them -- the owner never saw them. An agent's task_queued also prints one kept line (a Telegram steer: the row)."""
+    class _AgentSink(RecSink):
+        def __init__(self):
+            super().__init__()
+            self.queued, self.said = [], []
+        def remote_queued(self, origin, text, iid): self.queued.append((origin, iid))
+        def remote_dequeued(self, origin, iid): pass
+        def agent_message(self, text, iid=""): self.said.append((text, iid))
+    sink = _AgentSink()
+    result = _run_queue_frames_stream(monkeypatch, [
+        {"type": "task_queued", "origin": "agent", "steer_iid": "agent.m1",
+         "text": "Claude (imperal-mcp): stop editing consumer.py", "queue_depth": 0},
+        {"type": "task_queued", "origin": "telegram", "steer_iid": "i1", "text": "fix", "queue_depth": 1},
+        {"type": "task_dequeued", "origin": "agent", "steer_iid": "agent.m1"},
+        {"type": "final", "task_id": "OURS", "text": "done"},
+    ], sink)
+    assert result == "done" and sink.queued == [("agent", "agent.m1"), ("telegram", "i1")]
+    assert sink.said == [("Claude (imperal-mcp): stop editing consumer.py", "agent.m1")]
