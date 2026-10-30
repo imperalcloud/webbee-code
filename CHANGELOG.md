@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.16
+
+* **The time machine covers every repository you work in**: a checkpoint holds the files of nested repositories (a
+  folder of repositories, a repository inside a repository, at any depth) and a rollback restores them -- it used to
+  hold none of them and say "restored". Every checkpoint and rollback names what it did not cover and why
+  (too large, a virtualenv, a repository git cannot list); the user's own `.git` is never touched; a snapshot has
+  a time budget and leaves dependency and cache folders out.
+* **Esc stops the command**: a stop ends the running command and every process it started, instead of letting a
+  deploy or a migration run on for up to an hour.
+* **A tool never runs twice after a reconnect**: each result is kept (the newest 64 per session, the user's own
+  files) before it is sent; a request the kernel sends again after a crash or a reconnect gets the kept result, and
+  a change cut off mid-run is answered "outcome unknown -- not run again".
+* **A result is delivered or the turn is told**: only a 2xx counts as delivered; an expired token is refreshed and
+  the result sent again; a refused result (too large, invalid) is replaced by a short honest one under the same
+  request, so the turn never waits for the kernel's timeout; a result is capped at 4 MB.
+* **A file keeps its line endings and is never left half-written**: a CRLF file stays CRLF, an LF file stays LF;
+  every write goes to a temporary file and is renamed into place, keeping the file's mode.
+* **The local index follows the disk**: after a restart the files changed while Webbee was closed are re-read (by
+  their size and time), deleted ones dropped, new ones added; the cache is saved after changes and at exit; the
+  index says when it is not fresh (the file watcher ended) and why. One sync worker merges pending changes instead
+  of a thread per change; a sync request answers within 20 s.
+* **A failed self-update is rolled back**: a new release that does not start is replaced by the previous one with
+  the same installer; a dead updater's lock is taken at once, a live one is waited 2 minutes at most.
+* **Plan mode runs only the tools that read**, on this side too; kernel silence is told after 10 minutes, and the
+  stream backs off before reconnecting.
+
 ## 0.6.15
 
 * **The cloud code map stays fresh while you work**: every tool call checks when the workspace last reached the code
