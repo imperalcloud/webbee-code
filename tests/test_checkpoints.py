@@ -236,13 +236,13 @@ def test_bare_repo_workspace_is_refused(tmp_path):
 def test_failed_add_never_fakes_a_checkpoint(tmp_path, monkeypatch):
     sg, root = _sg(tmp_path)
     _write(root, "a.txt", "x")
-    real_git = sg._git
-    def _fake(*args):
-        if args and args[0] == "add":
+    real_git = sg._git_io
+    def _fake(args, **kw):
+        if args and args[0] == "update-index":     # the snapshot stages file by file (C3)
             class _R: returncode = 1; stdout = ""; stderr = "add failed"
             return _R()
-        return real_git(*args)
-    monkeypatch.setattr(sg, "_git", _fake)
+        return real_git(args, **kw)
+    monkeypatch.setattr(sg, "_git_io", _fake)
     assert sg.checkpoint("x") is None
 
 
