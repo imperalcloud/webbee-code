@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.18
+
+* **A file is read whole -- up to 5000 lines**: a window asked of a file that fits answers with the whole file (the
+  header names the window that was asked); only a code file over 5000 lines answers with its outline first. Before,
+  a 592-line file was read ~40 times in 35-70 line windows and edited from a stale memory of it. The kernel keeps
+  every file read whole in the step's cached head, so a file read once costs the cached rate on every later step.
+
 ## 0.6.17
 
 * **The code map follows what changed and what the cloud confirmed -- never a clock**: every tool call compares each
