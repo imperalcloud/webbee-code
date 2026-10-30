@@ -29,6 +29,14 @@ def _synced(svc, monkeypatch):
                         lambda self, rels=None, history=True: self._sync_vault(rels, history))
 
 
+def _idle(svc):
+    import time
+    for _ in range(500):
+        if not svc._sync_busy():
+            return
+        time.sleep(0.01)
+
+
 def test_a_working_session_resyncs_the_map_when_it_is_due(tmp_path, monkeypatch):
     (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
     svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
@@ -36,12 +44,15 @@ def test_a_working_session_resyncs_the_map_when_it_is_due(tmp_path, monkeypatch)
     cloud = _Cloud()
     svc.build()
     svc.attach_vault(lambda: cloud)
-    first = svc.last_sync_ok_at
-    assert first > 0 and svc.sync_state()["synced_s_ago"] is not None
+    assert svc.last_sync_ok_at > 0 and svc.sync_state()["synced_s_ago"] is not None
+    svc._sync_vault(None, history=False)                    # the listing the vault confirms, remembered
     cloud.calls.clear()
-    assert svc.sync_if_due() is False and cloud.calls == []                   # fresh: nothing to do
+    assert svc.sync_if_due() is True
+    _idle(svc)
+    assert cloud.calls == []                                # checked: nothing changed, no cloud call
     (tmp_path / "a.py").write_text("def alpha():\n    return 2\n")             # a shell edit no watcher saw
-    assert svc.sync_if_due(now=first + svc_mod.SYNC_DUE_S + 1) is True
+    assert svc.sync_if_due() is True                        # no clock: the change itself sends it
+    _idle(svc)
     plan = cloud.calls[0][1]
     assert plan["meta"]["listing_complete"] is True
     assert [f["path"] for f in cloud.calls[1][1]["files"]] == ["a.py"]
@@ -86,3 +97,38 @@ def test_every_tool_call_keeps_the_map_fresh(tmp_path):
     ex.run("read_file", {"path": "f.txt"})
     ex.run("read_file", {"path": "f.txt"})
     assert calls == [1, 1]
+
+
+def test_an_unchanged_repository_asks_the_cloud_nothing(tmp_path, monkeypatch):
+    """The owner's folder of 7 repositories: every code question synced all 7 (2-4 s each, nothing changed) -- past
+    sync_now's wait, so the terminal showed intel_sync failed. An unchanged full listing makes no cloud call."""
+    (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
+    svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
+    _synced(svc, monkeypatch)
+    cloud = _Cloud()
+    svc.build()
+    svc.attach_vault(lambda: cloud)
+    svc._sync_vault(None, history=False)                       # a full sync the vault took
+    cloud.calls.clear()
+    out = svc._sync_vault(None, history=False)
+    assert cloud.calls == [] and out.get("skipped") == "unchanged" and out["repo_key"]
+    (tmp_path / "a.py").write_text("def alpha():\n    return 22\n")
+    svc._sync_vault(None, history=False)
+    assert cloud.calls and [f["path"] for f in cloud.calls[1][1]["files"]] == ["a.py"]
+    svc._sync_vault(["a.py"], history=False)                  # changed files went: the confirmed listing is
+    cloud.calls.clear()                                       # forgotten, the next full sync asks the cloud
+    svc._sync_vault(None, history=False)
+    assert cloud.calls
+
+
+def test_the_kernel_hears_pending_not_failed_while_the_first_sync_runs(tmp_path):
+    from webbee.tools import LocalToolExecutor
+
+    class Idx:
+        def sync_if_due(self):
+            return False
+
+        def sync_now(self):
+            return {"pending": "the first code sync of this workspace is still running"}
+    r = LocalToolExecutor(str(tmp_path), indexer=Idx()).run("intel_sync_local", {})
+    assert r["ok"] is True and r["content"]["pending"] and r["content"]["repo_key"] == ""

@@ -977,6 +977,8 @@ class LocalToolExecutor:
         if self.indexer is None or not hasattr(self.indexer, "sync_now"):
             return {"ok": False, "content": "intel_sync_local: no code index in this session"}
         out = self.indexer.sync_now()
+        if out.get("pending"):     # a state, not a failure: the first sync of the workspace is still running
+            return {"ok": True, "content": {"repo_key": "", "pending": out["pending"]}}
         if out.get("ok") is False:
             return {"ok": False, "content": f"intel_sync_local: {out.get('content')}"}
         counts = {k: v for k, v in out.items() if k not in ("repo_key", "synced_at", "repos")}

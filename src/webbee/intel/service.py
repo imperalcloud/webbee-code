@@ -22,19 +22,18 @@ from webbee.intel.graph import CodeGraph
 
 log = logging.getLogger("webbee.intel")
 
-# The workspace reaches the cloud code map at least this often while the session works (2026-10-30: a repo of a
-# user's sessions was last synced 5 days before, a folder's map 5 days too -- the client synced at start, on the
-# watcher's changes and when the kernel asked before a code question; a shell edit, a git pull, a failed start sync
-# left the map old without a word). A full listing: the vault's plan sends only what changed.
-SYNC_DUE_S = 300
+# The cloud code map follows the workspace by what actually changed and what the vault confirmed -- never by a clock
+# (the owner, 2026-10-30: "not by seconds -- by the real sync and its confirmation"). Every tool call compares each
+# repository's files (path, size, time) with the listing the vault last confirmed; only a repository that differs is
+# sent, and the kernel's sync request waits for that sync to end and answers with what the vault took.
 
 # The index cache is saved this long after the first unsaved change (a branch switch is hundreds of changes: one save).
 # Lost at a hard quit costs nothing wrong: the next start's stat check re-parses what the cache missed.
 SAVE_DEBOUNCE_S = 10.0
 
-# sync_now waits at most this long for a running sync before it answers "sync busy" (the kernel's tool call must
-# not hang behind a long sync; its own request is queued and goes when the running one ends).
-SYNC_NOW_WAIT_S = 20.0
+# 2026-10-30, the owner's folder of 7 repositories: every code question after an edit synced all 7, 2-4 s each with
+# nothing changed -- a full sync now asks the cloud nothing for a repository whose files are the ones the vault last
+# confirmed.
 
 _MAX_PROFILE_SAMPLE = 20
 _MAX_CONTRACT_EVIDENCE = 5000
@@ -152,6 +151,7 @@ class IntelService:
         # factory of the cloud client (set by the tool executor); None = no cloud, nothing is synced
         self.vault_client_factory = None
         self._sync_lock = threading.Lock()
+        self._synced_sigs: dict = {}      # root -> (listing signature, repo_key, when) of the last sync the vault took
         self.last_sync: dict = {}
         self.last_sync_ok_at = 0.0         # the last sync the vault took (time.time()); 0 -- none this session
         self.last_sync_error = ""          # why the last sync failed; "" -- it did not
@@ -500,8 +500,21 @@ class IntelService:
                 listing, capped = _local_listing_of(root, rels)
                 if capped:      # an incomplete listing never lets the vault drop the files it did not name
                     meta.update(listing_complete=False, partial_reason=capped)
+                sig = _listing_sig(listing, capped) if rels is None else ""
+                seen = self._synced_sigs.get(root)
+                if sig and seen and seen[0] == sig and not history:
+                    # its files are the ones the vault last confirmed: no cloud round trip
+                    self.last_sync_ok_at = time.time()
+                    self.last_sync_error = ""
+                    out = {"repo_key": seen[1], "listed": len(listing), "changed": 0, "skipped": "unchanged"}
+                    self.last_sync = out
+                    return out
                 measured = co_change_pairs(root) if rels is None and history else None
                 out = asyncio.run(vault_sync(factory(), meta, listing, read, measured))
+                if sig and out.get("repo_key"):
+                    self._synced_sigs[root] = (sig, str(out["repo_key"]), time.time())
+                elif rels is not None:
+                    self._synced_sigs.pop(root, None)       # changed files went: the next full sync asks the cloud
             except Exception as exc:
                 log.warning("code sync to the vault failed: %s", exc)
                 self.last_sync_error = f"{type(exc).__name__}: {exc}"[:300]
@@ -521,24 +534,22 @@ class IntelService:
     def sync_now(self, wait_s: float | None = None) -> dict:
         """The kernel asks before a code question (frame phase A): the workspace reaches the vault now -- a full
         listing, so an edit no watcher reported (a shell edit) is sent too; the vault's plan picks the changed files.
-        The git history is not re-read. It goes through the one sync worker and waits at most ``SYNC_NOW_WAIT_S``
-        (before, it blocked the tool call on _sync_lock behind any running sync); past that the request stays
-        queued and the answer is "sync busy". ``{repo_key, synced_at, ...counts}`` or ``{ok: False, content}``."""
+        The git history is not re-read. It goes through the one sync worker and waits until ITS sync has ended --
+        never a clock: the answer is what the vault confirmed (``{repo_key | repos, synced_at, ...counts}``), or
+        ``{ok: False, content}`` when the sync really failed. While a repository's FIRST sync runs (a whole repo:
+        extract + embed, minutes) it answers at once ``{pending}`` -- a state, not a failure. ``wait_s``: tests only."""
         if self.vault_client_factory is None:
             return {"ok": False, "content": "this session cannot reach the cloud"}
         if not self.last_sync and self._sync_busy():
-            # the repo's first sync (a whole repo: extract + embed) is still running: never wait behind it
-            return {"ok": False, "content": "the first code sync of this repo is still running"}
-        wait = SYNC_NOW_WAIT_S if wait_s is None else wait_s
+            # the repo's first sync (a whole repo: extract + embed) is still running: answered at once, as a state
+            return {"pending": "the first code sync of this workspace is still running -- the local index answers "
+                               "until it ends"}
         ticket = self._sync_request(None, history=False)
         with self._sync_cv:
-            done = self._sync_cv.wait_for(lambda: self._sync_done >= ticket, timeout=wait)
+            done = self._sync_cv.wait_for(lambda: self._sync_done >= ticket, timeout=wait_s)
             out = dict(self._sync_out) if done else {}
         if not done:
-            age = self.sync_state()["synced_s_ago"]
-            return {"ok": False, "content": f"sync busy: a code sync of this workspace is still running after "
-                                            f"{wait:g}s; this one is queued behind it -- the map was last synced "
-                                            + (f"{age}s ago" if age is not None else "never this session")}
+            return {"pending": f"the code sync is still running after {wait_s:g}s"}
         if not out.get("repo_key") and not out.get("repos"):
             return {"ok": False, "content": str(out.get("partial_reason") or self.last_sync_error
                                                 or "the code sync to the vault failed")}
@@ -602,13 +613,11 @@ class IntelService:
                 self._sync_out = out or {}
                 self._sync_cv.notify_all()
 
-    def sync_if_due(self, now: float | None = None) -> bool:
-        """A full sync of the workspace off the caller's thread when the last one the vault took is older than
-        ``SYNC_DUE_S`` (or none took) -- called on every tool call, so a working session's map is never older than
-        that; never a second sync beside a running one. True when one started."""
+    def sync_if_due(self) -> bool:
+        """Called on every tool call: off the caller's thread, the workspace is compared with what the vault last
+        confirmed and only a repository whose files changed is sent (an unchanged one costs a local listing, no
+        cloud call) -- never a second sync beside a running one. True when a check started."""
         if self.vault_client_factory is None or self.index is None:
-            return False
-        if (now if now is not None else time.time()) - self.last_sync_ok_at < SYNC_DUE_S:
             return False
         if self._sync_busy():
             return False
@@ -861,6 +870,14 @@ def _code_files(root: str) -> tuple[list[str], str]:
     if len(code) > LISTING_MAX:
         return code[:LISTING_MAX], f"listing capped at {LISTING_MAX} code files"
     return code, ""
+
+
+def _listing_sig(listing: list, capped: str = "") -> str:
+    """PURE. One hash of a full listing (every file's path, size and time) -- equal listings, equal files."""
+    h = hashlib.sha256(capped.encode())
+    for it in sorted(listing, key=lambda x: x.get("path", "")):
+        h.update(f"{it.get('path')}\0{it.get('size')}\0{it.get('mtime')}\n".encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
 
 
 def _local_listing_of(root: str, rels=None) -> tuple[list, str]:

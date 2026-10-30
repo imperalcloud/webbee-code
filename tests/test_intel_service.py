@@ -329,7 +329,7 @@ def test_sync_now_while_the_first_sync_runs_answers_at_once(tmp_path, monkeypatc
         out = svc.sync_now()
     finally:
         svc._sync_lock.release()
-    assert out == {"ok": False, "content": "the first code sync of this repo is still running"}
+    assert set(out) == {"pending"} and "first code sync" in out["pending"]     # a state, not a failure
 
 
 # ── the machine's id is one per machine, whatever Python or process asks (live 2026-10-24: Python 3.12 on macOS

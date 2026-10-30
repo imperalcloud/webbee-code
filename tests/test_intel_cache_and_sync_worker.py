@@ -301,18 +301,23 @@ def test_sync_if_due_never_starts_beside_a_queued_or_running_sync(tmp_path, monk
     assert slow.calls[-1] == (None, False)
 
 
-def test_sync_now_waits_a_bounded_time_and_says_busy(tmp_path, monkeypatch):
+def test_sync_now_waits_for_the_real_sync_and_answers_with_its_confirmation(tmp_path, monkeypatch):
+    """The owner, 2026-10-30: "not by seconds -- by the real sync and its confirmation": behind a running sync the
+    kernel's request waits for its own sync to end and answers with what the vault took -- never "busy"."""
+    import threading
     svc, slow = _service_with_slow_sync(tmp_path, monkeypatch)
     svc.last_sync = {"repo_key": "k"}                      # not the first sync
     svc.sync_vault(None)
     assert slow.started.wait(5)
-    t0 = time.monotonic()
-    out = svc.sync_now(wait_s=0.2)
-    assert time.monotonic() - t0 < 2
-    assert out["ok"] is False and out["content"].startswith("sync busy:")
+    got = {}
+    th = threading.Thread(target=lambda: got.update(svc.sync_now()))
+    th.start()
+    time.sleep(0.3)
+    assert th.is_alive() and not got                       # waiting for the real sync; no clock answers for it
     slow.release.set()
-    _wait_idle(svc)
-    assert slow.calls == [(None, True), (None, False)]     # its request stayed queued and went after
+    th.join(10)
+    assert got["repo_key"] == "k" and got["synced_at"] > 0 and "ok" not in got
+    assert slow.calls == [(None, True), (None, False)]     # its own sync went after the running one
 
 
 def test_sync_now_answers_with_its_own_run(tmp_path, monkeypatch):
@@ -328,7 +333,7 @@ def test_the_first_sync_running_still_answers_at_once(tmp_path, monkeypatch):
     svc.sync_vault(None)
     assert slow.started.wait(5)
     out = svc.sync_now()
-    assert out == {"ok": False, "content": "the first code sync of this repo is still running"}
+    assert set(out) == {"pending"} and "first code sync" in out["pending"]     # a state, not a failure
     slow.release.set()
     _wait_idle(svc)
 

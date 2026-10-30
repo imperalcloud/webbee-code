@@ -49,6 +49,22 @@ def _isolate_newtab_mode_cache(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_webbee_log(tmp_path, monkeypatch):
+    """2026-10-30: a CLI test attached the file log to ~/.cache/webbee/webbee.log and every later test's fake
+    "gateway down" landed in the user's real log. Redirected per test, and the handler a test attached is removed."""
+    import logging
+    import webbee.cli as cli
+    monkeypatch.setattr(cli, "LOG_DIR", str(tmp_path / "webbee-log"))
+    log = logging.getLogger("webbee")
+    before = list(log.handlers)
+    yield
+    for h in list(log.handlers):
+        if h not in before:
+            log.removeHandler(h)
+            h.close()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_tab_store_cache(tmp_path, monkeypatch):
     """2026-10-30: the dock saves and restores its tabs in `~/.cache/webbee/tabs-<repo>.jsonl` -- a real-dock test
     run left tabs there, the next run restored them (Home + 3 sessions instead of Home + 1) and a keypress test that
