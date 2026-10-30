@@ -156,7 +156,7 @@ def test_the_lock_is_released_before_the_restart_and_a_broken_install_is_done_ag
     lock = tmp_path / "webbee-upgrade.lock"
     seen = []
     checks = iter([False, True])                              # the first install left it broken, the second is whole
-    monkeypatch.setattr(au, "imports_ok", lambda python, run=None: next(checks))
+    monkeypatch.setattr(au, "imports_ok", lambda python, run=None, light=False: next(checks))
     run = _Run()
     au.upgrade_before_start([], "0.6.4", say=lambda m: None, fetch={"webbee": "0.6.5"}.get, wheel=None,
                             which=_which({"pipx": "/bin/pipx"}), run=run, env={}, lock_path=lambda: str(lock),
@@ -174,3 +174,128 @@ def test_the_lock_lives_in_webbee_s_own_folder(tmp_path, monkeypatch):
     import os
     import stat
     assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) & 0o077 == 0     # only this user
+
+
+# ── an install that does not import is never left on disk: the release before it goes back, by the same tool ──
+def _checks(monkeypatch, answers):
+    it = iter(answers)
+    monkeypatch.setattr(au, "imports_ok", lambda python, run=None, light=False: next(it))
+
+
+def test_a_release_that_does_not_import_is_rolled_back_by_the_same_tool(tmp_path, monkeypatch):
+    _checks(monkeypatch, [False, False, True])                # twice broken; the old release imports again
+    run, said, execd = _Run(), [], []
+    did = au.upgrade_before_start([], "0.6.4", say=said.append, fetch={"webbee": "0.6.5"}.get, wheel=None,
+                                  which=_which({"pipx": "/bin/pipx"}), run=run, env={},
+                                  execv=lambda p, a: execd.append(a), lock_path=lambda: str(tmp_path / "upgrade.lock"))
+    installs = [c for c in run.calls if "install" in c and c[-1].startswith("webbee")]
+    assert [c[-1] for c in installs] == ["webbee==0.6.5", "webbee==0.6.5", "webbee==0.6.4"]
+    assert installs[-1][:-1] == installs[0][:-1]                                      # the same tool, the same way
+    assert execd == [] and "webbee 0.6.5" not in did
+    assert any("does not start" in s and "put 0.6.4 back" in s for s in said)
+    assert not (tmp_path / "upgrade.lock").exists()
+
+
+def test_an_install_that_broke_off_and_left_nothing_importable_is_rolled_back(tmp_path, monkeypatch):
+    _checks(monkeypatch, [False, True])                       # after the failed install: broken; after the way back: whole
+    calls, said = [], []
+
+    def run(cmd, **kw):                                       # the new release's install fails; the way back works
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 1 if "webbee==0.6.5" in cmd else 0, stdout="", stderr="")
+    au.upgrade_before_start([], "0.6.4", say=said.append, fetch={"webbee": "0.6.5", "imperal-mcp": None}.get,
+                            wheel=None, which=_which({}), run=run, env={}, execv=lambda *a: 1 / 0,
+                            lock_path=lambda: str(tmp_path / "upgrade.lock"))
+    assert [c[-1] for c in calls if c[-1].startswith("webbee")] == ["webbee==0.6.5", "webbee==0.6.4"]
+    assert any("put 0.6.4 back" in s for s in said)
+
+
+def test_a_failed_rollback_says_what_to_run(tmp_path, monkeypatch):
+    _checks(monkeypatch, [False, False, False])
+    said = []
+    monkeypatch.setattr(au, "find_uv", lambda which=None: "/bin/uv")
+    au.upgrade_before_start([], "0.6.4", say=said.append, fetch={"webbee": "0.6.5"}.get, wheel=None,
+                            which=_which({}), run=_Run(), env={}, execv=lambda *a: 1 / 0,
+                            lock_path=lambda: str(tmp_path / "upgrade.lock"))
+    assert any("could not be put back" in s and "webbee==0.6.4" in s for s in said)
+
+
+def test_a_light_install_is_checked_and_rolled_back_with_its_old_python(tmp_path):
+    light = "/usr/bin/python3.8"
+    checks, installs = [], []
+
+    def run(cmd, **kw):
+        (checks if "-c" in cmd else installs).append(list(cmd))
+        rc = 1 if "-c" in cmd and len(checks) <= 2 else 0     # the new release's launcher does not import, twice
+        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+    said, execd = [], []
+    au.upgrade_before_start([], "0.6.4", say=said.append, fetch={"webbee": "0.6.5", "imperal-mcp": None}.get,
+                            wheel=None, which=_which({}), run=run, env={au.LIGHT_ENV: light},
+                            execv=lambda p, a: execd.append(a), lock_path=lambda: str(tmp_path / "upgrade.lock"))
+    assert len(checks) == 3 and all(c[0] == light and "webbee._launch" in c[2] for c in checks)
+    assert [c for c in installs if c[-1].startswith("webbee")][-1] == [light, "-m", "pip", "install", "--upgrade", "--no-cache-dir", "webbee==0.6.4"]
+    assert execd == [] and any("put 0.6.4 back" in s for s in said)
+    ok = []                                                    # a whole light install: checked, then the restart
+
+    def run_ok(cmd, **kw):
+        ok.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    au.upgrade_before_start([], "0.6.4", say=lambda m: None, fetch={"webbee": "0.6.5"}.get, wheel=None,
+                            which=_which({}), run=run_ok, env={au.LIGHT_ENV: light},
+                            execv=lambda p, a: execd.append(a), lock_path=lambda: str(tmp_path / "upgrade.lock"))
+    assert any(c[0] == light and "-c" in c and "webbee._launch" in c[2] for c in ok) and execd
+
+
+# ── a lock names its holder: a dead one is taken at once, a live one is waited for a bounded while ──
+def _dead_pid() -> int:
+    import sys
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def test_a_lock_whose_upgrader_died_is_taken_at_once(tmp_path):
+    import os
+    import time
+    lock = tmp_path / "upgrade.lock"
+    lock.write_text(f"{_dead_pid()} {time.time():.0f}")       # Ctrl-C a second ago
+    slept, run = [], _Run()
+    au.upgrade_before_start([], "0.6.4", say=lambda m: None, fetch={"webbee": "0.6.5"}.get, wheel=None,
+                            which=_which({"pipx": "/bin/pipx"}), run=run, env={}, execv=lambda p, a: None,
+                            lock_path=lambda: str(lock), sleep=slept.append)
+    assert slept == [] and any("webbee==0.6.5" in c for c in run.calls)
+    lock.write_text(f"{_dead_pid()} {time.time():.0f}")
+    assert au._lock(str(lock)) and lock.read_text().split()[0] == str(os.getpid())
+    assert au.LOCK_WAIT_S < au.LOCK_STALE_S
+
+
+def test_a_live_lock_is_waited_for_a_bounded_while_then_the_start_goes_on_without_upgrading(tmp_path, monkeypatch):
+    import os
+    import time
+    lock = tmp_path / "upgrade.lock"
+    lock.write_text(f"{os.getpid()} {time.time():.0f}")       # a live upgrader (this very process)
+    monkeypatch.setattr(au, "LOCK_WAIT_S", 5)
+    slept, run, said, execd = [], _Run(), [], []
+    did = au.upgrade_before_start([], "0.6.4", say=said.append, fetch={"webbee": "0.6.5"}.get, wheel=None,
+                                  which=_which({"pipx": "/bin/pipx"}), run=run, env={},
+                                  execv=lambda p, a: execd.append(a), lock_path=lambda: str(lock), sleep=slept.append)
+    assert len(slept) == 5 and run.calls == [] and execd == [] and did == []
+    assert any("still updating" in s and "without updating" in s for s in said)
+    assert lock.exists()                                      # never removed from under its holder
+
+
+def test_an_upgrader_that_dies_during_the_wait_is_taken_over(tmp_path):
+    import os
+    import time
+    lock = tmp_path / "upgrade.lock"
+    lock.write_text(f"{os.getpid()} {time.time():.0f}")
+    dead = _dead_pid()
+    slept, run = [], _Run()
+
+    def sleep(s):
+        slept.append(s)
+        lock.write_text(f"{dead} {time.time():.0f}")         # ... and it is killed midway
+    au.upgrade_before_start([], "0.6.4", say=lambda m: None, fetch={"webbee": "0.6.5"}.get, wheel=None,
+                            which=_which({"pipx": "/bin/pipx"}), run=run, env={}, execv=lambda p, a: None,
+                            lock_path=lambda: str(lock), sleep=sleep)
+    assert len(slept) == 1 and any("webbee==0.6.5" in c for c in run.calls)

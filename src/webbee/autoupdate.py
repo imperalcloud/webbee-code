@@ -24,9 +24,12 @@ DONE_ENV = "WEBBEE_UPGRADED"               # set on the restart after a self-upg
 LIGHT_ENV = "WEBBEE_LIGHT_PYTHON"          # the old Python whose light install runs this release (webbee._launch)
 STEP_TIMEOUT_S = 300
 # one upgrade at a time per user: two webbees started together reinstalled one venv at once and the restart found it
-# half-written (live 2026-10-25: "No module named 'pygments.styles'"); the second waits for the first
-LOCK_WAIT_S = 2 * STEP_TIMEOUT_S + 60
-LOCK_STALE_S = 3 * STEP_TIMEOUT_S
+# half-written (live 2026-10-25: "No module named 'pygments.styles'"); the second waits for the first -- a bounded
+# while, then starts without upgrading. The lock names its holder's pid: a holder gone (Ctrl-C, a crash) frees it at
+# once; a lock older than any upgrade takes (two installs, the way back, imperal-mcp) is stale even if its pid lives on
+# in another program. The wait stays well under the stale age: a waiter never sits out a dead lock.
+LOCK_WAIT_S = 120
+LOCK_STALE_S = 5 * STEP_TIMEOUT_S
 _WINDOWS = os.name == "nt"
 # `python -c` puts the current folder first on sys.path: a webbee.py there would run in our place (security review).
 # Dropped before any import -- `-I` is no way out, it also drops a `pip install --user` webbee.
@@ -186,12 +189,54 @@ def _lock_path() -> str:
     return os.path.join(base, "upgrade.lock")
 
 
+def _pid_alive(pid: int) -> bool:
+    """The process ``pid`` still runs -- True when it cannot be told (a lock is never taken from a live upgrader on a
+    guess)."""
+    if pid <= 0:
+        return True
+    if pid == os.getpid():
+        return True
+    if _WINDOWS:                            # os.kill on Windows terminates: ask the process table instead
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(0x1000, False, pid)         # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return k32.GetLastError() != 87             # ERROR_INVALID_PARAMETER: no such process
+            code = ctypes.c_ulong()
+            ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+            k32.CloseHandle(h)
+            return not ok or code.value == 259              # STILL_ACTIVE
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True                         # EPERM: alive, another user's
+    return True
+
+
+def _stale(path: str) -> bool:
+    """A lock left over: its holder's pid is gone, or it is older than any upgrade takes."""
+    try:
+        if time.time() - os.stat(path).st_mtime >= LOCK_STALE_S:
+            return True
+        with open(path) as f:
+            head = (f.read(64).split() or [""])[0]
+    except OSError:
+        return False
+    return head.isdigit() and not _pid_alive(int(head))    # being written (empty): not stale
+
+
 def _lock(path: str) -> bool:
-    """This start's turn to upgrade: the lock file made by it alone (``O_EXCL``, any system); a lock older than any
-    upgrade takes is left over from a killed start and is taken over."""
+    """This start's turn to upgrade: the lock file made by it alone (``O_EXCL``, any system), holding its pid and start
+    time; a lock whose holder is gone, or older than any upgrade takes, is left over from a killed start and taken
+    over at once."""
     for _ in range(2):
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.write(fd, f"{os.getpid()} {time.time():.0f}".encode())
             os.close(fd)
             return True
@@ -200,7 +245,7 @@ def _lock(path: str) -> bool:
                 st = os.stat(path)
                 if hasattr(os, "getuid") and st.st_uid != os.getuid():
                     return True             # not this user's: no lock of ours, the upgrade goes on
-                if time.time() - st.st_mtime < LOCK_STALE_S:
+                if not _stale(path):
                     return False
                 os.remove(path)
             except OSError:
@@ -217,18 +262,25 @@ def _unlock(path: str) -> None:
         pass
 
 
-def _wait_unlocked(path: str, sleep=time.sleep) -> None:
-    end = time.time() + LOCK_WAIT_S
-    while os.path.exists(path) and time.time() < end:
+def _wait_unlocked(path: str, sleep=time.sleep) -> str:
+    """Wait for the upgrade another webbee is making: "free" when it let go, "stale" when its holder died, "busy" when
+    it still holds after LOCK_WAIT_S (counted in one-second sleeps: bounded however the clock moves)."""
+    for _ in range(LOCK_WAIT_S):
+        if not os.path.exists(path):
+            return "free"
+        if _stale(path):
+            return "stale"
         sleep(1)
+    return "free" if not os.path.exists(path) else "busy"
 
 
-def imports_ok(python: str, run=subprocess.run) -> bool:
+def imports_ok(python: str, run=subprocess.run, light: bool = False) -> bool:
     """The installed webbee starts: its modules import in its own Python (a half-written venv fails here, not at the
-    user's start)."""
+    user's start). A light install is checked as its old Python runs it: the launcher (``webbee._launch``), which then
+    sets up that release's runtime on its first start."""
+    mods = "import webbee, webbee._launch" if light else "import webbee.cli, webbee.repl"
     try:
-        return run([python, "-c", _NO_CWD + "import webbee.cli, webbee.repl"], capture_output=True, text=True,
-                   timeout=60).returncode == 0
+        return run([python, "-c", _NO_CWD + mods], capture_output=True, text=True, timeout=60).returncode == 0
     except Exception:
         return False
 
@@ -239,6 +291,20 @@ def _run(cmd, run=subprocess.run) -> bool:
                    timeout=STEP_TIMEOUT_S).returncode == 0
     except Exception:
         return False
+
+
+def _roll_back(current: str, newest: str, python: str, light: str, env, uv, pipx, wheel, run, say) -> bool:
+    """``newest`` installed but does not import: ``current`` installed again by the same tool and checked the same
+    way -- never a release on disk that does not start. Says what happened either way."""
+    back = self_command(current, env=env, uv=uv, pipx=pipx, wheel=wheel)
+    if back and _run(back, run) and imports_ok(python, run, light=bool(light)):
+        say(f"🐝 webbee {newest} was installed but does not start (its modules do not import) -- "
+            f"put {current} back; starting {current}")
+        return True
+    fix = " ".join(back) if back else f"pip install webbee=={current}"
+    say(f"🐝 webbee {newest} was installed but does not start, and {current} could not be put back -- "
+        f"this session runs on, but the next start may fail: run {fix}")
+    return False
 
 
 def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe_which, run=subprocess.run,
@@ -255,26 +321,40 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
         if lock and not _lock(lock):
             # another webbee is upgrading this install: wait for it, then start on what it installed
             say("🐝 another webbee is updating -- waiting for it ...")
-            _wait_unlocked(lock, sleep)
-            lock = ""
-            newest = fetch(DIST)
-            if newest and _ver(newest) > _ver(current) and not env.get(DONE_ENV):
-                env[DONE_ENV] = "1"
-                again = restart_command(list(argv), env=env)
-                if _WINDOWS:
-                    sys.exit(subprocess.call(again))
-                execv(again[0], again)
-            return did
+            state = _wait_unlocked(lock, sleep)
+            if state == "stale":            # its upgrader died midway: this start makes the upgrade (and mends it)
+                state = "taken" if _lock(lock) else "busy"
+            if state == "busy":             # never longer than LOCK_WAIT_S: start now, on this release
+                lock = ""
+                say(f"🐝 another webbee is still updating -- starting {current} without updating")
+                return did
+            if state == "free":
+                lock = ""
+                newest = fetch(DIST)
+                if newest and _ver(newest) > _ver(current) and not env.get(DONE_ENV):
+                    env[DONE_ENV] = "1"
+                    again = restart_command(list(argv), env=env)
+                    if _WINDOWS:
+                        sys.exit(subprocess.call(again))
+                    execv(again[0], again)
+                return did
         uv, pipx = find_uv(which), which("pipx")
         newest = fetch(DIST)
         if newest and _ver(newest) > _ver(current) and not env.get(DONE_ENV):
             cmd = self_command(newest, env=env, uv=uv, pipx=pipx, wheel=wheel)
             if cmd:
                 say(f"🐝 updating webbee {current} -> {newest} ...")
-                python = env.get(LIGHT_ENV) or ""
-                ok = _run(cmd, run) and (python or imports_ok(sys.executable, run) or
-                                         (_run(cmd, run) and imports_ok(sys.executable, run)))
-                if ok:
+                light = env.get(LIGHT_ENV) or ""
+                python = light or sys.executable
+                installed = _run(cmd, run)
+                ok = installed and (imports_ok(python, run, light=bool(light)) or
+                                    (_run(cmd, run) and imports_ok(python, run, light=bool(light))))
+                if not ok and (installed or not imports_ok(python, run, light=bool(light))):
+                    # on disk a release that does not import (or an install that broke off halfway): the next start
+                    # would run it and stay stuck. The one running now (and any other open session) holds the old
+                    # modules: put the old release back
+                    _roll_back(current, newest, python, light, env, uv, pipx, wheel, run, say)
+                elif ok:
                     did.append(f"webbee {newest}")
                     env[DONE_ENV] = "1"           # the restart inherits it: never a second self-upgrade
                     _unlock(lock)                 # exec never returns: the lock goes before it, not in finally
@@ -284,7 +364,8 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
                         sys.exit(subprocess.call(again))
                     execv(again[0], again)
                     return did
-                say(f"🐝 webbee could not update itself -- run: {' '.join(cmd)}")
+                else:
+                    say(f"🐝 webbee could not update itself -- run: {' '.join(cmd)}")
         mcp_newest = fetch(MCP)
         inst = mcp_installed(which, run)
         cmd = mcp_command(inst, mcp_newest, uv, pipx, wheel)
