@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.19
+
+* **Another agent's message to a running session stays on screen**: it printed only as a queue-panel row that left the
+  moment the turn took it (seconds) -- Claude's follow-ups to a running marathon were never seen. It now also prints
+  one kept line, `✉ [agent] Claude (imperal-mcp): ...`, once per message.
+
 ## 0.6.18
 
 * **A file is read whole -- up to 5000 lines**: a window asked of a file that fits answers with the whole file (the
