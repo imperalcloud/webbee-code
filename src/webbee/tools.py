@@ -135,6 +135,11 @@ class LocalToolExecutor:
                 args = {}
         if not isinstance(args, dict):
             args = {}
+        if self.indexer is not None and hasattr(self.indexer, "sync_if_due"):
+            try:            # the cloud code map kept fresh while the session works -- never in the call's way
+                self.indexer.sync_if_due()
+            except Exception:
+                pass
         if (tool in _WRITE_TIER and self.shadow is not None
                 and getattr(self.shadow, "auto_ok", True)):
             # The time machine snapshots BEFORE every mutation -- and must never

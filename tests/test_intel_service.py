@@ -197,7 +197,8 @@ class _Cloud:
 def _synced(svc, monkeypatch):
     import os
     os.makedirs(os.path.join(svc.root, ".git"), exist_ok=True)     # a repository: only one reaches the vault
-    monkeypatch.setattr(type(svc), "sync_vault", lambda self, rels=None: self._sync_vault(rels))
+    monkeypatch.setattr(type(svc), "sync_vault",
+                        lambda self, rels=None, history=True: self._sync_vault(rels, history))
 
 
 def test_a_build_syncs_every_indexable_file_and_a_change_only_itself(tmp_path, monkeypatch):

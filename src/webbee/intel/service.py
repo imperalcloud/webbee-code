@@ -22,6 +22,12 @@ from webbee.intel.graph import CodeGraph
 
 log = logging.getLogger("webbee.intel")
 
+# The workspace reaches the cloud code map at least this often while the session works (2026-10-30: a repo of a
+# user's sessions was last synced 5 days before, a folder's map 5 days too -- the client synced at start, on the
+# watcher's changes and when the kernel asked before a code question; a shell edit, a git pull, a failed start sync
+# left the map old without a word). A full listing: the vault's plan sends only what changed.
+SYNC_DUE_S = 300
+
 _MAX_PROFILE_SAMPLE = 20
 _MAX_CONTRACT_EVIDENCE = 5000
 _TEST_HINT_FILES = ("pytest.ini", "tox.ini", "package.json", "Makefile", "pyproject.toml")
@@ -127,6 +133,8 @@ class IntelService:
         self.vault_client_factory = None
         self._sync_lock = threading.Lock()
         self.last_sync: dict = {}
+        self.last_sync_ok_at = 0.0         # the last sync the vault took (time.time()); 0 -- none this session
+        self.last_sync_error = ""          # why the last sync failed; "" -- it did not
 
     def _get_backend(self):
         # Lazy + cached: the model load is expensive (and may be unavailable
@@ -310,6 +318,10 @@ class IntelService:
         out = {"repo_key": "", "repos": repos}
         if repos:
             self.last_sync = out
+            self.last_sync_ok_at = time.time()
+            self.last_sync_error = ""
+        elif todo:
+            self.last_sync_error = self.last_sync_error or "no repository of this folder reached the code map"
         return out
 
     def _sync_root(self, root: str, rels=None, history: bool = True) -> dict:
@@ -344,8 +356,12 @@ class IntelService:
                 out = asyncio.run(vault_sync(factory(), meta, listing, read, measured))
             except Exception as exc:
                 log.warning("code sync to the vault failed: %s", exc)
+                self.last_sync_error = f"{type(exc).__name__}: {exc}"[:300]
                 return {}
             self.last_sync = out
+            if out.get("repo_key"):
+                self.last_sync_ok_at = time.time()
+                self.last_sync_error = ""
             log.info("code sync repo=%s source=local listed=%d changed=%d read_bytes=%d new_blobs=%d extract_ms=%d "
                      "links+=%d links-=%d unresolved=%d partial=%s ms=%d", out.get("repo_key"), out.get("listed", 0),
                      out.get("changed", 0), out.get("read_bytes", 0), out.get("new_blobs", 0), out.get("extract_ms", 0),
@@ -367,14 +383,34 @@ class IntelService:
             self._sync_lock.release()
         out = self._sync_vault(None, history=False)
         if not out.get("repo_key") and not out.get("repos"):
-            return {"ok": False, "content": str(out.get("partial_reason") or "the code sync to the vault failed")}
+            return {"ok": False, "content": str(out.get("partial_reason") or self.last_sync_error
+                                                or "the code sync to the vault failed")}
         return {**out, "synced_at": time.time()}
 
-    def sync_vault(self, rels=None) -> None:
+    def sync_vault(self, rels=None, history: bool = True) -> None:
         """Off the caller's thread: the build and the watcher never wait for the cloud."""
         if self.vault_client_factory is None:
             return
-        threading.Thread(target=self._sync_vault, args=(rels,), name="webbee-code-sync", daemon=True).start()
+        threading.Thread(target=self._sync_vault, args=(rels, history), name="webbee-code-sync",
+                         daemon=True).start()
+
+    def sync_if_due(self, now: float | None = None) -> bool:
+        """A full sync of the workspace off the caller's thread when the last one the vault took is older than
+        ``SYNC_DUE_S`` (or none took) -- called on every tool call, so a working session's map is never older than
+        that; never a second sync beside a running one. True when one started."""
+        if self.vault_client_factory is None or self.index is None:
+            return False
+        if (now if now is not None else time.time()) - self.last_sync_ok_at < SYNC_DUE_S:
+            return False
+        if self._sync_lock.locked():
+            return False
+        self.sync_vault(None, history=False)
+        return True
+
+    def sync_state(self) -> dict:
+        """How fresh the cloud code map of this workspace is, as this session knows it."""
+        age = int(time.time() - self.last_sync_ok_at) if self.last_sync_ok_at else None
+        return {"synced_s_ago": age, **({"sync_error": self.last_sync_error} if self.last_sync_error else {})}
 
 
     def attach_vault(self, client_factory) -> None:
@@ -416,6 +452,8 @@ class IntelService:
             # fresh = the index reflects the files on disk: built this session (or loaded for this
             # HEAD) and every change the watcher or the agent's own writes reported applied
             "index_fresh": self.index is not None and self.fresh,
+            # the cloud code map: when this session last synced it, and why the last sync failed if it did
+            "code_map": self.sync_state(),
             "git_ref": self.git_ref[:12],
             "embedded_chunks": embedded_chunks,
             "vectors_ready": vectors_ready,
