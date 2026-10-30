@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.17
+
+* **The code map follows what changed and what the cloud confirmed -- never a clock**: every tool call compares each
+  repository's files (path, size, time) with the listing the code map last confirmed, and only a repository that
+  changed is sent. An unchanged repository costs a local listing, no cloud call (a folder of 7 repositories: 0.16 s
+  instead of 18-25 s of cloud round trips with nothing changed).
+* **intel_sync shows a cross only when the sync failed**: the kernel's sync request waits for its own sync to end and
+  answers with what the cloud took -- no more "sync busy" after a fixed wait while the sync went on fine; the first
+  sync of a big workspace answers "pending" (the local index answers meanwhile), not a failure.
+* Tests never write into your `~/.cache/webbee/webbee.log`.
+
 ## 0.6.16
 
 * **The time machine covers every repository you work in**: a checkpoint holds the files of nested repositories (a
