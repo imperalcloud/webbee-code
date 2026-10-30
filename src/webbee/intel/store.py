@@ -30,10 +30,12 @@ def _path(cache_dir: str, repo_key: str) -> str:
     return os.path.join(cache_dir, repo_key, "index.json")
 
 
-def save(cache_dir: str, repo_key: str, index: ProjectIndex) -> None:
+def save(cache_dir: str, repo_key: str, index: ProjectIndex, stats: dict | None = None) -> None:
+    """``stats`` -- ``{relpath: [mtime_ns, size]}`` of every file the walk saw when the index was taken: the next
+    start re-parses only the files whose stat differs (edits made while Webbee was closed, uncommitted edits)."""
     p = _path(cache_dir, repo_key)
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    data = {"schema_version": SCHEMA_VERSION, "git_ref": index.git_ref,
+    data = {"schema_version": SCHEMA_VERSION, "git_ref": index.git_ref, "stats": stats or {},
             "files": {k: {"path": v.path, "lang": v.lang, "imports": v.imports, "refs": v.refs,
                           "content_hash": v.content_hash, "endpoints": v.endpoints, "schemas": v.schemas,
                           "symbols": [asdict(s) for s in v.symbols]} for k, v in index.files.items()}}
@@ -44,6 +46,13 @@ def save(cache_dir: str, repo_key: str, index: ProjectIndex) -> None:
 
 
 def load(cache_dir: str, repo_key: str, git_ref: str) -> ProjectIndex | None:
+    got = load_with_stats(cache_dir, repo_key, git_ref)
+    return got[0] if got is not None else None
+
+
+def load_with_stats(cache_dir: str, repo_key: str, git_ref: str) -> tuple[ProjectIndex, dict] | None:
+    """``(index, {relpath: [mtime_ns, size]})`` saved for this HEAD, or None. A cache from before the stats were kept
+    gives ``{}``: every file then counts as changed and is re-parsed once."""
     # The WHOLE body (not just json.load) is guarded: a structurally-valid
     # but wrong-shape cache (missing/renamed field, unreadable dict) must
     # degrade to a cache miss, never raise -- raising here would propagate
@@ -62,7 +71,9 @@ def load(cache_dir: str, repo_key: str, git_ref: str) -> ProjectIndex | None:
                                      imports=v.get("imports", []), refs=v.get("refs", []),
                                      content_hash=v.get("content_hash", ""), endpoints=v.get("endpoints", []),
                                      schemas=v.get("schemas", []), symbols=[Symbol(**s) for s in v.get("symbols", [])])
-        return idx
+        stats = {k: list(v) for k, v in (data.get("stats") or {}).items()
+                 if isinstance(v, list) and len(v) == 2}
+        return idx, stats
     except Exception:
         return None  # miss, corrupt, or wrong-shape -- never raise into the caller
 

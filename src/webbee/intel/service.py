@@ -28,6 +28,14 @@ log = logging.getLogger("webbee.intel")
 # left the map old without a word). A full listing: the vault's plan sends only what changed.
 SYNC_DUE_S = 300
 
+# The index cache is saved this long after the first unsaved change (a branch switch is hundreds of changes: one save).
+# Lost at a hard quit costs nothing wrong: the next start's stat check re-parses what the cache missed.
+SAVE_DEBOUNCE_S = 10.0
+
+# sync_now waits at most this long for a running sync before it answers "sync busy" (the kernel's tool call must
+# not hang behind a long sync; its own request is queued and goes when the running one ends).
+SYNC_NOW_WAIT_S = 20.0
+
 _MAX_PROFILE_SAMPLE = 20
 _MAX_CONTRACT_EVIDENCE = 5000
 _TEST_HINT_FILES = ("pytest.ini", "tox.ini", "package.json", "Makefile", "pyproject.toml")
@@ -99,6 +107,18 @@ def ignored_path(root: str, path: str) -> bool:
     return False
 
 
+def _stats_of(root: str, rels) -> dict:
+    """``{relpath: [mtime_ns, size]}`` -- stat only, no read: cheap on a big repo."""
+    out = {}
+    for rel in rels:
+        try:
+            st = os.stat(os.path.join(root, rel))
+        except OSError:
+            continue
+        out[rel] = [st.st_mtime_ns, st.st_size]
+    return out
+
+
 def _walk(root: str, limit: int = 20000) -> list[str]:
     out = []
     for dp, dns, fns in os.walk(root):
@@ -135,6 +155,22 @@ class IntelService:
         self.last_sync: dict = {}
         self.last_sync_ok_at = 0.0         # the last sync the vault took (time.time()); 0 -- none this session
         self.last_sync_error = ""          # why the last sync failed; "" -- it did not
+        self.stale_reason = ""             # why the index is not known fresh; "" -- it is (or not built)
+        self._stats: dict = {}             # relpath -> [mtime_ns, size] of what the index holds, saved with it
+        self._vectors_dirty = False
+        self._save_guard = threading.Lock()
+        self._save_timer = None
+        # ONE sync worker: requests merge while it runs (a full listing supersedes changed paths); before, every
+        # watcher batch started its own thread and they piled up on _sync_lock behind a long first sync
+        self._sync_cv = threading.Condition()
+        self._sync_worker = None
+        self._sync_running = False
+        self._sync_full = False            # a full listing is pending
+        self._sync_history = False         # ... with the git history's links
+        self._sync_rels: dict = {}         # changed paths pending (insertion-ordered)
+        self._sync_taken = 0               # requests the worker took, numbered
+        self._sync_done = 0                # the last one it finished
+        self._sync_out: dict = {}          # what that one returned
 
     def _get_backend(self):
         # Lazy + cached: the model load is expensive (and may be unavailable
@@ -158,29 +194,49 @@ class IntelService:
 
     def build(self) -> None:
         """Load cache (fast) else full index; then rebuild the graph. Sync --
-        call via asyncio.to_thread from the repl boot."""
+        call via asyncio.to_thread from the repl boot. A cache is checked
+        against the disk by stat alone (live 2026-10-30: the cache of the first
+        build for a HEAD was loaded as is -- edits made while Webbee was closed
+        and uncommitted edits stayed invisible after a restart at that HEAD):
+        only the files whose mtime or size differ are re-parsed, files gone
+        are dropped, new ones added."""
         self.git_ref = _git_ref(self.root)
-        idx = store.load(self.cache_dir, self.repo_key, self.git_ref) if self.git_ref else None
-        if idx is None:
-            idx = indexer.build_index(self.root, _walk(self.root))
-            idx.git_ref = self.git_ref
-            if self.git_ref:
-                try:
-                    store.save(self.cache_dir, self.repo_key, idx)
-                except OSError:
-                    pass
-        self.index = idx
-        self.graph = CodeGraph(idx)
+        walked = _walk(self.root)
+        stats = _stats_of(self.root, walked)
+        cached = store.load_with_stats(self.cache_dir, self.repo_key, self.git_ref) if self.git_ref else None
+        touched = None                      # None: a full index (no cache); else the files the disk changed
+        if cached is None:
+            idx = indexer.build_index(self.root, walked)
+        else:
+            idx, old_stats = cached
+            changed = [r for r in walked if r in stats and old_stats.get(r) != stats[r]]
+            gone = sorted((set(idx.files) | set(old_stats)) - set(stats))
+            reparsed = indexer.build_index(self.root, changed).files if changed else {}
+            for rel in changed:             # undecodable now: out of the index, as a full build leaves it
+                idx.files.pop(rel, None)
+            idx.files.update(reparsed)
+            for rel in gone:
+                idx.files.pop(rel, None)
+            touched = {rel: idx.files.get(rel) for rel in changed + gone}
+        idx.git_ref = self.git_ref
+        with self._lock:
+            self._stats = stats
+            self.index = idx
+            self.graph = CodeGraph(idx)
         self.fresh = True
-        self._embed_build(idx)
+        self.stale_reason = ""
+        self._embed_build(idx, touched)
+        if self.git_ref and (cached is None or touched):
+            self._save_cache()             # this index for the next start (a reconciled one too)
         self.sync_vault()                 # code graph everywhere: the whole repo into the vault
 
-    def _embed_build(self, idx: ProjectIndex) -> None:
+    def _embed_build(self, idx: ProjectIndex, touched: dict | None = None) -> None:
         # Off-loop already (build() is called via asyncio.to_thread from the
         # repl boot): cache-load skips re-embedding entirely when the
         # git_ref+model_id match; a miss chunks+embeds+saves. Fail-soft --
         # no backend means self.vectors stays None and search_code (F5)
-        # falls back to lexical+graph instead of raising.
+        # falls back to lexical+graph instead of raising. ``touched`` -- the
+        # files the stat check re-parsed: their cached vectors are re-embedded.
         from webbee.intel import store as _store
         b = self._get_backend()
         if b is None:
@@ -197,6 +253,7 @@ class IntelService:
             ids, mat = cached
             vs = VectorStore.from_arrays(b.dim, ids, mat)
         else:
+            touched = None                  # embedded from the current index: nothing left to re-embed
             chunks = indexer.chunk_index(self.root, idx)
             vs = VectorStore(b.dim)
             if chunks:
@@ -211,6 +268,56 @@ class IntelService:
         with self._lock:
             self.vectors = vs
             self.vectors_ready = True
+        if touched:
+            embedded = self._embed_updates(touched)
+            with self._lock:
+                self._swap_vectors(touched, *embedded)
+
+    def _embed_updates(self, updates: dict):
+        """``(fresh_ids, fresh_vecs, current_ids)`` for the touched files -- compute only, off the lock."""
+        fresh_ids: list = []
+        fresh_vecs = None
+        current_ids: dict[str, set] = {}   # edited rel -> its FULL current chunk-id set
+        b = self._get_backend()
+        fresh_chunks = []
+        for rel, fi in updates.items():
+            if fi is None:
+                continue  # deleted -- current_ids[rel] stays absent, so ALL its
+                          # ids are caught as stale below
+            chunks = indexer.chunk_file(self.root, fi)
+            current_ids[rel] = {c.id for c in chunks}
+            for c in chunks:
+                if self._chunk_hashes.get(c.id) != c.content_hash:
+                    fresh_chunks.append(c)
+        if fresh_chunks:
+            fresh_vecs = b.embed([c.text for c in fresh_chunks])
+            fresh_ids = [c.id for c in fresh_chunks]
+            for c in fresh_chunks:
+                self._chunk_hashes[c.id] = c.content_hash
+        return fresh_ids, fresh_vecs, current_ids
+
+    def _swap_vectors(self, updates: dict, fresh_ids, fresh_vecs, current_ids) -> None:
+        """The touched files' vectors swapped in -- the caller holds ``_lock``."""
+        # F1: a touched file's vanished chunk ids -- span-shifted by
+        # the edit, or all of them when the file was deleted -- are
+        # orphans and must be dropped before the fresh ones go in.
+        # Guarding on `not in current_ids` (never a naive "remove
+        # all `{rel}#` then add fresh") keeps the hash-skip
+        # optimization correct: an edit to a LATE symbol must not
+        # drop an EARLIER unchanged (and therefore skipped) chunk
+        # that's still current.
+        stale = [i for i in self.vectors.ids()
+                 if "#" in i
+                 and i.split("#", 1)[0] in updates                          # a touched file
+                 and i not in current_ids.get(i.split("#", 1)[0], set())]   # no longer a current chunk
+        if stale:
+            self.vectors.remove(stale)
+            for i in stale:
+                self._chunk_hashes.pop(i, None)
+        if fresh_ids:
+            self.vectors.add(fresh_ids, fresh_vecs)
+        if stale or fresh_ids:
+            self._vectors_dirty = True
 
     def apply_changes(self, rel_paths) -> None:
         # Parse off-lock (file I/O + tree-sitter parse don't touch shared
@@ -220,45 +327,33 @@ class IntelService:
         if self.index is None:
             return
         updates = {}
+        stats = {}
         for rel in rel_paths:
             ap = os.path.join(self.root, rel)
             if not os.path.exists(ap):
                 updates[rel] = None  # deleted -> drop from the index
+                stats[rel] = None
                 continue
             try:
+                st = os.stat(ap)        # before the read: an edit after it differs at the next start
                 with open(ap, "r", encoding="utf-8") as f:
                     fi = indexer.parse_file(rel, f.read())
-            except (OSError, UnicodeDecodeError):
+            except UnicodeDecodeError:
+                fi = None               # not text any more: out of the index, as a full build leaves it
+            except OSError:
                 continue
-            if fi is not None:
-                updates[rel] = fi
+            updates[rel] = fi
+            stats[rel] = [st.st_mtime_ns, st.st_size]
 
         # Embed compute (chunk + backend inference) stays off-lock, mirroring
         # the parse-then-swap pattern above -- only the vector-store mutation
         # happens under `_lock`. Skipped entirely when there's no live vector
         # store or the backend is unavailable (fail-soft, F5's fallback).
         embed_ready = self.vectors is not None and self._get_backend() is not None
-        fresh_ids: list = []
-        fresh_vecs = None
-        current_ids: dict[str, set] = {}   # edited rel -> its FULL current chunk-id set
-        if embed_ready:
-            b = self._get_backend()
-            fresh_chunks = []
-            for rel, fi in updates.items():
-                if fi is None:
-                    continue  # deleted -- current_ids[rel] stays absent, so ALL its
-                              # ids are caught as stale below
-                chunks = indexer.chunk_file(self.root, fi)
-                current_ids[rel] = {c.id for c in chunks}
-                for c in chunks:
-                    if self._chunk_hashes.get(c.id) != c.content_hash:
-                        fresh_chunks.append(c)
-            if fresh_chunks:
-                fresh_vecs = b.embed([c.text for c in fresh_chunks])
-                fresh_ids = [c.id for c in fresh_chunks]
-                for c in fresh_chunks:
-                    self._chunk_hashes[c.id] = c.content_hash
+        embedded = self._embed_updates(updates) if embed_ready else None
 
+        # HEAD moved (a pull, a checkout, a commit): the cache goes under the new one (cheap: one rev-parse)
+        ref = _git_ref(self.root)
         self.sync_vault(list(updates))    # only the changed files go to the vault
         with self._lock:
             for rel, fi in updates.items():
@@ -266,26 +361,77 @@ class IntelService:
                     self.index.files.pop(rel, None)
                 else:
                     self.index.files[rel] = fi
+            for rel, st in stats.items():
+                if st is None:
+                    self._stats.pop(rel, None)
+                else:
+                    self._stats[rel] = st
+            if ref and ref != self.git_ref:
+                self.git_ref = ref
+                self.index.git_ref = ref
+                self._vectors_dirty = True     # the vector cache is keyed by HEAD too
             self.graph = CodeGraph(self.index)
-            if embed_ready:
-                # F1: a touched file's vanished chunk ids -- span-shifted by
-                # the edit, or all of them when the file was deleted -- are
-                # orphans and must be dropped before the fresh ones go in.
-                # Guarding on `not in current_ids` (never a naive "remove
-                # all `{rel}#` then add fresh") keeps the hash-skip
-                # optimization correct: an edit to a LATE symbol must not
-                # drop an EARLIER unchanged (and therefore skipped) chunk
-                # that's still current.
-                stale = [i for i in self.vectors.ids()
-                         if "#" in i
-                         and i.split("#", 1)[0] in updates                          # a touched file
-                         and i not in current_ids.get(i.split("#", 1)[0], set())]   # no longer a current chunk
-                if stale:
-                    self.vectors.remove(stale)
-                    for i in stale:
-                        self._chunk_hashes.pop(i, None)
-                if fresh_ids:
-                    self.vectors.add(fresh_ids, fresh_vecs)
+            if embedded is not None:
+                self._swap_vectors(updates, *embedded)
+        if updates:
+            self._save_soon()
+
+    # ── the index cache kept current: saved after changes, debounced ─────────
+
+    def _save_soon(self) -> None:
+        """Save the cache ``SAVE_DEBOUNCE_S`` after the first unsaved change -- never once per change (a branch
+        switch is one write); not pushed back by later changes, so a session that edits without pause still saves."""
+        if not self.git_ref:
+            return
+        with self._save_guard:
+            if self._save_timer is not None:
+                return
+            t = threading.Timer(SAVE_DEBOUNCE_S, self._save_from_timer)
+            t.daemon = True
+            t.name = "webbee-index-save"
+            self._save_timer = t
+        t.start()
+
+    def _save_from_timer(self) -> None:
+        with self._save_guard:
+            self._save_timer = None
+        self._save_cache()
+
+    def flush_cache(self) -> None:
+        """Save a pending change now (a quit, a test) instead of at the timer."""
+        with self._save_guard:
+            t, self._save_timer = self._save_timer, None
+        if t is not None:
+            t.cancel()
+            self._save_cache()
+
+    def _save_cache(self) -> None:
+        """The index, the stats of its files and (when they changed) the vectors, into the cache. Fail-soft."""
+        if self.index is None or not self.git_ref:
+            return
+        with self._lock:
+            snap = ProjectIndex(git_ref=self.git_ref)
+            snap.files = dict(self.index.files)
+            stats = dict(self._stats)
+            vecs = None
+            if self._vectors_dirty and self.vectors is not None:
+                vecs = self.vectors.to_arrays()
+                self._vectors_dirty = False
+        try:
+            store.save(self.cache_dir, self.repo_key, snap, stats)
+            b = self._get_backend() if vecs is not None else None
+            if b is not None:
+                store.save_vectors(self.cache_dir, self.repo_key, snap.git_ref, b.model_id, *vecs)
+        except Exception as exc:        # a full disk or a gone cache dir never touches the live index
+            log.warning("index cache save failed: %s", exc)
+
+    # ── freshness: the watcher reports its end ───────────────────────────
+
+    def watcher_ended(self, reason: str) -> None:
+        """The file watcher stopped (watchfiles missing, the OS refused, it crashed): an edit from now on reaches the
+        index only through the agent's own writes -- the index is no longer known fresh, and says why."""
+        self.fresh = False
+        self.stale_reason = f"the file watcher stopped ({reason}): edits made since may be missing from the index"
 
     def _sync_vault(self, rels=None, history: bool = True) -> dict:
         """The workspace (``rels=None``: every indexable file, with the git history's co-change links) or the
@@ -372,29 +518,89 @@ class IntelService:
             return out
 
 
-    def sync_now(self) -> dict:
+    def sync_now(self, wait_s: float | None = None) -> dict:
         """The kernel asks before a code question (frame phase A): the workspace reaches the vault now -- a full
         listing, so an edit no watcher reported (a shell edit) is sent too; the vault's plan picks the changed files.
-        The git history is not re-read. ``{repo_key, synced_at, ...counts}`` or ``{ok: False, content}``."""
+        The git history is not re-read. It goes through the one sync worker and waits at most ``SYNC_NOW_WAIT_S``
+        (before, it blocked the tool call on _sync_lock behind any running sync); past that the request stays
+        queued and the answer is "sync busy". ``{repo_key, synced_at, ...counts}`` or ``{ok: False, content}``."""
         if self.vault_client_factory is None:
             return {"ok": False, "content": "this session cannot reach the cloud"}
-        if not self.last_sync and not self._sync_lock.acquire(blocking=False):
+        if not self.last_sync and self._sync_busy():
             # the repo's first sync (a whole repo: extract + embed) is still running: never wait behind it
             return {"ok": False, "content": "the first code sync of this repo is still running"}
-        if not self.last_sync:
-            self._sync_lock.release()
-        out = self._sync_vault(None, history=False)
+        wait = SYNC_NOW_WAIT_S if wait_s is None else wait_s
+        ticket = self._sync_request(None, history=False)
+        with self._sync_cv:
+            done = self._sync_cv.wait_for(lambda: self._sync_done >= ticket, timeout=wait)
+            out = dict(self._sync_out) if done else {}
+        if not done:
+            age = self.sync_state()["synced_s_ago"]
+            return {"ok": False, "content": f"sync busy: a code sync of this workspace is still running after "
+                                            f"{wait:g}s; this one is queued behind it -- the map was last synced "
+                                            + (f"{age}s ago" if age is not None else "never this session")}
         if not out.get("repo_key") and not out.get("repos"):
             return {"ok": False, "content": str(out.get("partial_reason") or self.last_sync_error
                                                 or "the code sync to the vault failed")}
         return {**out, "synced_at": time.time()}
 
     def sync_vault(self, rels=None, history: bool = True) -> None:
-        """Off the caller's thread: the build and the watcher never wait for the cloud."""
+        """Off the caller's thread: the build and the watcher never wait for the cloud. Queued to the one sync
+        worker, merged with what is already pending."""
         if self.vault_client_factory is None:
             return
-        threading.Thread(target=self._sync_vault, args=(rels, history), name="webbee-code-sync",
-                         daemon=True).start()
+        self._sync_request(rels, history)
+
+    def _sync_busy(self) -> bool:
+        """A sync runs or waits to run."""
+        with self._sync_cv:
+            queued = self._sync_running or self._sync_full or bool(self._sync_rels)
+        return queued or self._sync_lock.locked()
+
+    def _sync_request(self, rels, history: bool) -> int:
+        """Queue a sync; the number of the worker's run that will carry it. A full listing supersedes the
+        pending changed paths (it lists them too); changed paths beside a pending full one add nothing."""
+        with self._sync_cv:
+            if rels is None:
+                self._sync_full = True
+                self._sync_history = self._sync_history or history
+                self._sync_rels.clear()
+            elif not self._sync_full:
+                self._sync_rels.update(dict.fromkeys(rels))
+            ticket = self._sync_taken + 1
+            if self._sync_worker is None and (self._sync_full or self._sync_rels):
+                self._sync_worker = threading.Thread(target=self._sync_loop, name="webbee-code-sync", daemon=True)
+                self._sync_worker.start()
+            elif not (self._sync_full or self._sync_rels):
+                ticket = self._sync_done   # nothing to send (no changed path): nothing to wait for
+            return ticket
+
+    def _sync_loop(self) -> None:
+        """The one sync worker: takes what is pending, merged, until nothing is; then ends."""
+        while True:
+            with self._sync_cv:
+                if not self._sync_full and not self._sync_rels:
+                    self._sync_worker = None
+                    self._sync_cv.notify_all()
+                    return
+                rels = None if self._sync_full else list(self._sync_rels)
+                history = self._sync_history
+                self._sync_full, self._sync_history = False, False
+                self._sync_rels = {}
+                self._sync_taken += 1
+                run = self._sync_taken
+                self._sync_running = True
+            try:
+                out = self._sync_vault(rels, history)
+            except Exception as exc:       # never the worker's end: the next request still goes
+                log.warning("code sync to the vault failed: %s", exc)
+                self.last_sync_error = f"{type(exc).__name__}: {exc}"[:300]
+                out = {}
+            with self._sync_cv:
+                self._sync_running = False
+                self._sync_done = run
+                self._sync_out = out or {}
+                self._sync_cv.notify_all()
 
     def sync_if_due(self, now: float | None = None) -> bool:
         """A full sync of the workspace off the caller's thread when the last one the vault took is older than
@@ -404,7 +610,7 @@ class IntelService:
             return False
         if (now if now is not None else time.time()) - self.last_sync_ok_at < SYNC_DUE_S:
             return False
-        if self._sync_lock.locked():
+        if self._sync_busy():
             return False
         self.sync_vault(None, history=False)
         return True
@@ -454,6 +660,9 @@ class IntelService:
             # fresh = the index reflects the files on disk: built this session (or loaded for this
             # HEAD) and every change the watcher or the agent's own writes reported applied
             "index_fresh": self.index is not None and self.fresh,
+            # why not: the watcher stopped (missing, refused by the OS, crashed) -- an edit may be missing
+            **({"index_stale_reason": self.stale_reason} if self.index is not None and not self.fresh
+               and self.stale_reason else {}),
             # the cloud code map: when this session last synced it, and why the last sync failed if it did
             "code_map": self.sync_state(),
             "git_ref": self.git_ref[:12],
