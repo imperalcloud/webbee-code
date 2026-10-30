@@ -92,6 +92,14 @@ async def replay_thread(cfg, token_provider, sink) -> int:
         return 0  # replay is best-effort; never block boot
 
 
+def _quietly(fn) -> None:
+    """Run ``fn`` at exit; a failure is never printed over the user's terminal."""
+    try:
+        fn()
+    except Exception:
+        pass
+
+
 async def start_intel(cfg, workspace: str, intel_factory):
     """Off-loop intel build (indexing does sync file I/O + subprocess). Any
     failure here (missing extra, bad repo, etc.) must degrade to
@@ -100,6 +108,11 @@ async def start_intel(cfg, workspace: str, intel_factory):
     try:
         svc = (intel_factory or _default_intel_factory)(cfg, workspace)
         await asyncio.to_thread(svc.build)
+        flush = getattr(svc, "flush_cache", None)
+        if flush is not None:
+            # the changes of the last seconds reach the index cache when webbee quits, not only at its timer
+            import atexit
+            atexit.register(lambda: _quietly(flush))
         from webbee.intel import watch
         watcher_task = asyncio.ensure_future(watch.watch_workspace(svc.root, svc.apply_changes))
         # its end is always collected: an exception is never printed when webbee quits ("Task exception was never

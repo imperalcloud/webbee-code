@@ -430,3 +430,24 @@ def test_clean_close_backoff_is_capped():
     for _ in range(20):
         d = min(d * 2, ST._CLEAN_CLOSE_MAX)
     assert d == ST._CLEAN_CLOSE_MAX == 10.0
+
+
+def test_plan_mode_runs_only_the_tools_that_read():
+    """Security review 2026-10-30: a denylist let rollback / checkpoint (and any new tool) run in plan mode."""
+    from webbee.tools import PLAN_SAFE_TOOLS, LocalToolExecutor
+    for t in ("rollback", "checkpoint", "bash", "shell", "write_file", "edit_file", "multi_edit", "a_new_tool"):
+        assert t not in PLAN_SAFE_TOOLS
+    executor_tools = {n[3:] for n in dir(LocalToolExecutor) if n.startswith("_t_")}
+    assert PLAN_SAFE_TOOLS <= executor_tools                          # every allowed name is a real tool
+
+
+def test_the_result_store_is_the_users_own(tmp_path, monkeypatch):
+    import os
+    import stat
+    import webbee.session as S
+    monkeypatch.setattr(S, "_RESULT_CACHE_DIR", str(tmp_path / "results"))
+    store = S._ResultStore("sess-1", "task-1")
+    store.put("req-1", "read_file", {"ok": True, "content": "secret text"})
+    files = [os.path.join(dp, f) for dp, _d, fs in os.walk(tmp_path / "results") for f in fs]
+    assert files and all(stat.S_IMODE(os.stat(f).st_mode) == 0o600 for f in files)
+    assert stat.S_IMODE(os.stat(store.dir).st_mode) == 0o700

@@ -9,6 +9,13 @@ from datetime import datetime
 # Tools that MUTATE the workspace -> auto-checkpoint before each run
 # (mirrors the kernel write tier; rollback snapshots itself, so not listed).
 _WRITE_TIER = {"write_file", "edit_file", "multi_edit", "shell", "bash"}
+# The tools plan mode runs -- the ones that only read (an allowlist: a checkpoint, a rollback, a command, an edit or
+# any tool added later is refused in plan mode until it is named here -- security review 2026-10-30)
+PLAN_SAFE_TOOLS = frozenset({
+    "read_file", "read_symbol", "outline", "list_dir", "glob", "grep", "search_code", "orient", "repo_profile",
+    "graph_slice", "impact_of_change", "contract_slice", "diff", "read_url", "web_search", "view_image",
+    "inspect_page", "intel_sync_local", "intel_sync_remote",
+})
 
 # Informational stale-view warning appended to a SUCCESSFUL edit/write when
 # the on-disk file is newer than the agent's last read (external edit under

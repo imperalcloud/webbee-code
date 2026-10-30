@@ -181,10 +181,16 @@ class _ResultStore:
             return
         try:
             first = not os.path.isdir(self.dir)
-            os.makedirs(self.dir, exist_ok=True)
+            # the user's own: a tool's output may hold anything it read (security review 2026-10-30)
+            os.makedirs(self.dir, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(self.dir, 0o700)
+            except OSError:
+                pass
             path = self._path(rid)
             tmp = f"{path}.{os.getpid()}.tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({**rec, "task_id": self.task_id, "req_id": rid, "at": time.time()}, f,
                           ensure_ascii=False, default=str)
             os.replace(tmp, path)                     # atomic: a crash mid-write never leaves half a record
@@ -532,7 +538,7 @@ class AgentSession:
         carry_frame = None   # an already-pulled frame (the stream won)
         _t0 = _monotonic()   # W1 Task 10: own-task watchdog start
         _own_frames = False  # -> True the instant ANY non-foreign frame lands
-        from webbee.tools import _WRITE_TIER
+        from webbee.tools import _WRITE_TIER, PLAN_SAFE_TOOLS
         self._executor = executor           # stop() kills what it still runs
         store = _ResultStore(session_id, task_id)
         loop = asyncio.get_running_loop()
@@ -625,7 +631,7 @@ class AgentSession:
                                       "not run twice")
                             except Exception:
                                 pass
-                    elif self.mode == "plan" and tool in _WRITE_TIER:
+                    elif self.mode == "plan" and tool not in PLAN_SAFE_TOOLS:
                         # M3: plan mode is read-only on THIS side too -- the
                         # kernel's consent gate is the first wall, this is the
                         # second (a tool_request is otherwise run unconditionally).

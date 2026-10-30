@@ -415,7 +415,7 @@ def test_toolbar_drops_hints_before_numbers_when_narrow():
 def test_toolbar_without_width_is_byte_identical_to_pre_0336_callers():
     """`width` is optional: omitted (or 0 = headless/unknown) keeps the full
     line, so every existing caller and test is unaffected."""
-    assert build_toolbar("plan", 10, 2) == build_toolbar("plan", 10, 2, width=0)
+    assert build_toolbar("plan", 10, 2, tier_now=0.0) == build_toolbar("plan", 10, 2, width=0, tier_now=0.0)
 
 
 def test_busy_and_consent_toolbars_ignore_width():
@@ -423,8 +423,10 @@ def test_busy_and_consent_toolbars_ignore_width():
     already and must not change shape."""
     assert build_toolbar("default", 1, 1, consent=True, width=40) == \
         build_toolbar("default", 1, 1, consent=True)
-    assert build_toolbar("default", 1, 1, busy=True, current="x", width=40) == \
-        build_toolbar("default", 1, 1, busy=True, current="x")
+    # the tier's shimmer animates with the clock: both rows at one instant (two calls a tick apart differed, one run
+    # of the suite in five)
+    assert build_toolbar("default", 1, 1, busy=True, current="x", width=40, tier_now=0.0) == \
+        build_toolbar("default", 1, 1, busy=True, current="x", tier_now=0.0)
 
 
 # --------------------------------------------------------------------------
