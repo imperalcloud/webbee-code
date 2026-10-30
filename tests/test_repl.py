@@ -2187,7 +2187,8 @@ def test_close_command_closes_the_new_tab_and_notes_the_survivor():
     sink, agent = _run(read_line=_lines("/new /tmp", "/close", "/tabs", "/exit"))
     assert any("server-side" in n and "/new" in n for n in sink.notes)
     listing = sink.notes[-1]
-    assert "●0" in listing and "1" not in listing.replace("/tmp", "")
+    # no tab 1 is left -- by its row, never by any "1" in the text (a workspace folder named with a 1 failed it)
+    assert "●0" in listing and not any(ln.lstrip().startswith(("○1", "●1")) for ln in listing.split("\n"))
 
 
 def test_tabs_list_note_contains_one_line_per_tab_with_glyphs():
