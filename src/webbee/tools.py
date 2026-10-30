@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime
 
@@ -55,6 +56,47 @@ def _truncated(text: str, cap: int, unit: str = "chars") -> str:
     return (t[:head] +
             f"\n\n… ⚠ TRUNCATED: {dropped:,} of {len(t):,} {unit} hidden here -- showing the first {head:,} and the "
             f"last {tail:,}. Narrow the command (head/tail/grep) to see the middle.\n\n" + t[-tail:])
+
+
+def _norm(text: str, eol: str) -> str:
+    """``text`` in the file's own line endings' working form: a CRLF file is edited as ``\n`` text."""
+    return text.replace("\r\n", "\n") if eol == "\r\n" else text
+
+
+def _read_text(p: str) -> tuple:
+    """``(text, eol)`` of a file read with its line endings kept (2026-10-30 review: a text-mode read and write turned a
+    CRLF file into LF -- or an LF file into CRLF on Windows -- whole, on every edit, while the diff showed one line):
+    a file whose every line ends in CRLF is worked on as ``\n`` text and written back in CRLF; any other file as it
+    is."""
+    with open(p, "r", encoding="utf-8", newline="") as f:
+        raw = f.read()
+    crlf = raw.count("\r\n")
+    eol = "\r\n" if crlf and crlf == raw.count("\n") else "\n"
+    return _norm(raw, eol), eol
+
+
+def _write_text(p: str, text: str, eol: str = "\n") -> None:
+    """Write ``text`` (``\n`` lines) in ``eol`` line endings, atomically: a temporary file beside it, then a rename
+    (2026-10-30 review: open "w" truncated first -- a crash or a full disk left a cut source file). The file's mode
+    is kept."""
+    import tempfile
+    data = _norm(text, eol).replace("\n", "\r\n") if eol == "\r\n" else text
+    d = os.path.dirname(p) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".webbee-", suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(data)
+        try:
+            os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+        except OSError:
+            pass                          # a new file: the default mode
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _stop_group(proc, posix: bool) -> None:
@@ -212,6 +254,19 @@ class LocalToolExecutor:
         # read_file, or this executor's own write) -- powers the stale-edit
         # warning. In-instance only: one executor == one coding session.
         self._read_mtimes: dict[str, int] = {}
+        # the commands running now (bash): a stop (Esc) ends them and every process they started (cancel_running)
+        self._running: set = set()
+        self._running_lock = threading.Lock()
+
+    def cancel_running(self) -> int:
+        """Stop every command this executor is running now and every process it started (2026-10-30 review: Esc
+        cancelled the turn, while the command -- a deploy, a migration -- ran on in its thread for up to an hour).
+        Returns how many were stopped."""
+        with self._running_lock:
+            procs = [p for p in self._running if p.poll() is None]
+        for p in procs:
+            _stop_group(p, os.name != "nt")
+        return len(procs)
 
     def resolve_in_workspace(self, path: str) -> str:
         full = os.path.realpath(os.path.join(self.root, path))
@@ -505,16 +560,16 @@ class LocalToolExecutor:
         rel = self._rel(a)
         p = self.resolve_in_workspace(rel)
         stale = self._stale_note(p)
-        before = ""
+        before, eol = "", "\n"
         try:
-            with open(p, "r", encoding="utf-8") as f:
-                before = f.read()
+            before, eol = _read_text(p)     # an existing CRLF file stays CRLF
         except OSError:
             pass          # new file -- diff against "" (a pure addition)
         after = a.get("content", a.get("contents", ""))
         os.makedirs(os.path.dirname(p) or self.root, exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(after)
+        if eol == "\r\n":
+            after = _norm(after, eol)
+        _write_text(p, after, eol)
         self._note_own_write(p)
         self._reindex(os.path.relpath(p, self.root))
         out = {"ok": True, "content": f"wrote {rel}" + stale}
@@ -531,8 +586,8 @@ class LocalToolExecutor:
         new = a.get("new", a.get("new_string", ""))
         if not old:
             return {"ok": False, "content": "edit_file requires 'old' (the text to replace)"}
-        with open(p, "r", encoding="utf-8") as f:
-            text = f.read()
+        text, eol = _read_text(p)
+        old, new = _norm(old, eol), _norm(new, eol)
         n = text.count(old)
         if n == 0:
             near = nearest_text(text, old)
@@ -546,8 +601,7 @@ class LocalToolExecutor:
                     f"old string occurs {n} times; add surrounding context to make it "
                     f"unique, or pass replace_all=true to replace every occurrence"}
         after = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(after)
+        _write_text(p, after, eol)
         self._note_own_write(p)
         self._reindex(os.path.relpath(p, self.root))
         note = f" ({n} occurrences)" if replace_all and n > 1 else ""
@@ -584,11 +638,11 @@ class LocalToolExecutor:
                 problems.append(f"edit {i} ({rel}): 'old' is required")
                 continue
             try:
-                with open(p, "r", encoding="utf-8") as f:
-                    text = f.read()
+                text, eol = _read_text(p)
             except OSError as err:
                 problems.append(f"edit {i} ({rel}): {type(err).__name__}: {err}")
                 continue
+            old, new = _norm(old, eol), _norm(new, eol)
             n = text.count(old)
             if n != 1:
                 near = nearest_text(text, old) if n == 0 else ""
@@ -611,8 +665,7 @@ class LocalToolExecutor:
         applied = []
         originals: dict = {}
         for p, rel, old, new in staged:
-            with open(p, "r", encoding="utf-8") as f:
-                text = f.read()
+            text, eol = _read_text(p)
             if rel not in originals:
                 originals[rel] = text
             if text.count(old) != 1:
@@ -620,8 +673,7 @@ class LocalToolExecutor:
                         f"multi_edit stopped at {rel}: an earlier edit in this batch changed "
                         f"the text around 'old' (applied so far: {', '.join(applied) or 'none'}); "
                         f"re-read the file and retry the remaining edits"}
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(text.replace(old, new, 1))
+            _write_text(p, text.replace(old, new, 1), eol)
             self._note_own_write(p)
             applied.append(rel)
         for rel in dict.fromkeys(applied):
@@ -631,8 +683,7 @@ class LocalToolExecutor:
         diffs = []
         for p, rel, _old, _new in staged:
             if rel in originals:
-                with open(p, "r", encoding="utf-8") as f:
-                    after = f.read()
+                after, _eol = _read_text(p)
                 d = _unified_diff(rel, originals.pop(rel), after)
                 if d:
                     diffs.append(d)
@@ -715,6 +766,8 @@ class LocalToolExecutor:
             **({"start_new_session": True} if posix else
                {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}))
         timed_out = False
+        with self._running_lock:
+            self._running.add(proc)
         try:
             raw, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -724,6 +777,9 @@ class LocalToolExecutor:
                 raw, _ = proc.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 raw = b""
+        finally:
+            with self._running_lock:
+                self._running.discard(proc)
         out = _decoded(raw or b"")
         if timed_out:
             out += (f"\n[timed out after {timeout} s -- the command and every process it started were stopped; "
