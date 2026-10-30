@@ -702,7 +702,17 @@ class LocalToolExecutor:
         if cp is None:
             return {"ok": False, "content": "checkpoint failed (shadow git error)"}
         note = "created" if cp.get("changed") else "no changes since the last checkpoint"
-        return {"ok": True, "content": f"checkpoint cp-{cp.get('n')} ({cp.get('id')}): {note}"}
+        # what it holds and what it does not, said (2026-10-30: a checkpoint of a folder of repositories held none of
+        # their files and said "created")
+        nested = list(cp.get("nested") or [])
+        uncovered = list(cp.get("uncovered") or [])
+        extra = (f"; holds the nested repositories {', '.join(nested[:8])}" + (" ..." if len(nested) > 8 else "")
+                 if nested else "")
+        if uncovered:
+            extra += "; NOT in it: " + "; ".join(f"{p} ({w})" for p, w in uncovered[:8]) + (
+                f" and {len(uncovered) - 8} more" if len(uncovered) > 8 else "")
+        return {"ok": True, "content": f"checkpoint cp-{cp.get('n')} ({cp.get('id')}): {note}{extra}",
+                **({"uncovered": [list(x) for x in uncovered]} if uncovered else {})}
 
     def _t_diff(self, a: dict) -> dict:
         if self.shadow is None:

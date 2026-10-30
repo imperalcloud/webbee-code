@@ -77,3 +77,13 @@ def test_a_stop_ends_the_running_command_and_its_children(tmp_path):
     except OSError:
         alive = False
     assert not alive and ex.cancel_running() == 0
+
+
+def test_a_checkpoint_says_what_it_holds_and_what_it_does_not(tmp_path):
+    class Shadow:
+        def checkpoint(self, label):
+            return {"id": "abc", "n": 3, "changed": True, "nested": ["wpanel/core/gateway"],
+                    "uncovered": [("data/big.bin", "over 20 MB")]}
+    ex = T.LocalToolExecutor(str(tmp_path), shadow=Shadow())
+    r = ex.run("checkpoint", {"label": "x"})
+    assert "wpanel/core/gateway" in r["content"] and "NOT in it: data/big.bin (over 20 MB)" in r["content"]
