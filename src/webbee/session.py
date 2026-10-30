@@ -1,4 +1,7 @@
 import asyncio
+import hashlib
+import json
+import os
 import time
 from collections import OrderedDict, deque
 
@@ -39,6 +42,193 @@ _SEEN_KEEP = 64   # kernel re-dispatch only ever targets the CURRENT pending
                   # req_id -- a small recency window is enough; unbounded full
                   # results (file bodies, bash output) were the many-hour-
                   # marathon RAM leak (W1 front-1).
+
+
+# Kernel silence on THIS turn (2026-10-30 review M7): the dock showed
+# "working" forever when the kernel workflow died -- nothing on the stream ever
+# says so. Past the first bound the user is told (and the wait goes on: a long
+# brain step is legal); past the second the turn ends honestly, the same way
+# the foreign-only deadline above ends it. A request the kernel still sends
+# later is picked up by the idle attach poll. Only the turn's OWN frames (and
+# our own result posts) count as activity; a local tool run or a consent
+# prompt is never timed.
+_KERNEL_QUIET_NOTE_S = 10 * 60.0
+_KERNEL_QUIET_END_S = 30 * 60.0
+
+# The result channel's size bound (2026-10-30 review H5): a view_image result
+# carries the whole image as base64, and a big one came back 413 -- the old
+# code took any 4xx as delivered, so the kernel waited out its tool-wait
+# expiry (up to ~65 min). A result is cut to this before it is posted, with an
+# honest note of what was cut.
+_RESULT_MAX_BYTES = 4 * 1024 * 1024
+
+# Executed-result record on disk (2026-10-30 review H6): attach() makes the
+# kernel re-send the pending request, and the in-memory `seen` map is new for
+# every _serve_stream -- so a crash/kill between running a tool and posting its
+# result ran it AGAIN (bash twice, an edit applied twice). Each executed
+# tool_request's result is written here BEFORE it is posted; a req_id found
+# here re-posts the stored result instead of running again.
+_RESULT_CACHE_DIR = os.path.expanduser("~/.cache/webbee/results")   # test seam: monkeypatch this name
+_RESULT_KEEP = 64                       # per session -- the same recency window as _SEEN_KEEP
+_RESULT_STORE_MAX_BYTES = 1024 * 1024   # one stored result; a bigger one is kept cut (it ran once already)
+_RESULT_STORE_TTL_S = 24 * 3600.0       # the server keeps 24h of stream -- an older record is never re-sent
+_RESULT_DIR_TTL_S = 7 * 24 * 3600.0     # whole session folders untouched this long are removed
+
+
+def _json_bytes(obj) -> int:
+    return len(json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+def _cut_text(text: str, max_bytes: int) -> str:
+    return text.encode("utf-8")[:max(0, max_bytes)].decode("utf-8", errors="ignore")
+
+
+def _cap_result(out: dict, limit: int = _RESULT_MAX_BYTES) -> dict:
+    """`out` ({"req_id", "result"}) cut to at most `limit` bytes of JSON. A
+    result that fits is returned unchanged. Otherwise big non-text fields (a
+    view_image `image_data`) are dropped and named, then `content` is cut with
+    a note of how much was sent; if even that does not fit, only ok + the cut
+    content go. Never raises."""
+    try:
+        total = _json_bytes(out)
+    except Exception:
+        return out
+    if total <= limit:
+        return out
+    res = out.get("result")
+    res = dict(res) if isinstance(res, dict) else {"ok": False, "content": str(res)}
+    notes = []
+    for key in [k for k, v in res.items() if k != "content" and isinstance(v, str) and len(v) > 64 * 1024]:
+        size = len(res.pop(key))
+        if key == "image_data":
+            res["native_vision"] = False
+            notes.append(f"[image not sent: {size} bytes of image data is over the "
+                         f"{limit // (1024 * 1024)} MB a result can carry -- shrink or crop it and view it again]")
+        else:
+            notes.append(f"[{key} not sent: {size} bytes]")
+    content = str(res.get("content", ""))
+    note = "\n".join(notes)
+    capped = {"req_id": out.get("req_id"), "result": {**res, "content": content + ("\n" + note if note else "")}}
+    if _json_bytes(capped) <= limit:
+        return capped
+    content_bytes = len(content.encode("utf-8"))
+    cut_note = (f"\n… [result cut: {content_bytes} bytes of output, only the start is sent -- "
+                f"a result can carry at most {limit // (1024 * 1024)} MB]")
+    rest = {**res, "content": ""}
+    budget = limit - _json_bytes({"req_id": out.get("req_id"), "result": rest}) - _json_bytes(note + cut_note) - 1024
+    if budget < limit // 2:     # other big fields (a huge diff) -- send only ok + the cut text
+        rest = {"ok": bool(res.get("ok"))}
+        budget = limit - 4096 - _json_bytes(note + cut_note)
+    # JSON escaping can grow text (quotes, control chars): halve until it fits
+    while True:
+        head = _cut_text(content, budget)
+        capped = {"req_id": out.get("req_id"),
+                  "result": {**rest, "content": head + ("\n" + note if note else "") + cut_note}}
+        if _json_bytes(capped) <= limit or budget <= 0:
+            return capped
+        budget //= 2
+
+
+class _ResultStore:
+    """On-disk record of this session's executed tool_request results, one
+    small JSON file per req_id under _RESULT_CACHE_DIR/<session>. Keyed by
+    task_id + req_id (a req_id's counter can restart in a new kernel run; a
+    turn's task_id cannot repeat) and checked against the tool name and age, so
+    a stale record is never mistaken for this request. A write-tier tool is
+    marked `started` before it runs: a crash during the run leaves the mark,
+    and the re-sent request answers "outcome unknown, not run again" instead
+    of applying the change twice. Fail-soft both ways: an unreadable or
+    unwritable cache is exactly today's behaviour (the tool runs)."""
+
+    def __init__(self, session_id: str, task_id: str) -> None:
+        self.task_id = str(task_id or "")
+        self.enabled = bool(session_id and self.task_id)
+        h = hashlib.sha256(str(session_id).encode("utf-8")).hexdigest()[:16]
+        self.dir = os.path.join(_RESULT_CACHE_DIR, h)
+
+    def _path(self, rid) -> str:
+        h = hashlib.sha256(f"{self.task_id}\0{rid}".encode("utf-8")).hexdigest()[:24]
+        return os.path.join(self.dir, h + ".json")
+
+    def get(self, rid, tool: str):
+        """The stored {"req_id", "result"} for `rid`, or None (not run here)."""
+        if not self.enabled or not rid:
+            return None
+        try:
+            with open(self._path(rid), encoding="utf-8") as f:
+                rec = json.load(f)
+            if (rec.get("task_id") != self.task_id or rec.get("req_id") != rid
+                    or rec.get("tool") != tool or time.time() - float(rec.get("at", 0)) > _RESULT_STORE_TTL_S):
+                return None
+            if rec.get("state") == "started":
+                return {"req_id": rid, "result": {
+                    "ok": False,
+                    "content": (f"{tool} was started before webbee stopped and its outcome is unknown -- "
+                                "not run again; check the workspace (git status, read the file) before retrying")}}
+            out = rec.get("out")
+            return out if isinstance(out, dict) else None
+        except Exception:
+            return None
+
+    def mark_started(self, rid, tool: str) -> None:
+        self._write(rid, {"state": "started", "tool": tool})
+
+    def put(self, rid, tool: str, out: dict) -> None:
+        self._write(rid, {"state": "done", "tool": tool, "out": _cap_result(out, _RESULT_STORE_MAX_BYTES)})
+
+    def _write(self, rid, rec: dict) -> None:
+        if not self.enabled or not rid:
+            return
+        try:
+            first = not os.path.isdir(self.dir)
+            os.makedirs(self.dir, exist_ok=True)
+            path = self._path(rid)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({**rec, "task_id": self.task_id, "req_id": rid, "at": time.time()}, f,
+                          ensure_ascii=False, default=str)
+            os.replace(tmp, path)                     # atomic: a crash mid-write never leaves half a record
+            self._prune()
+            if first:
+                self._prune_old_sessions()
+        except Exception:
+            pass
+
+    def _prune(self) -> None:
+        names = [n for n in os.listdir(self.dir) if n.endswith(".json")]
+        if len(names) <= _RESULT_KEEP:
+            return
+        paths = sorted((os.path.join(self.dir, n) for n in names), key=os.path.getmtime)
+        for p in paths[:len(paths) - _RESULT_KEEP]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def _prune_old_sessions(self) -> None:
+        import shutil
+        now = time.time()
+        for n in os.listdir(_RESULT_CACHE_DIR):
+            p = os.path.join(_RESULT_CACHE_DIR, n)
+            try:
+                if p != self.dir and os.path.isdir(p) and now - os.path.getmtime(p) > _RESULT_DIR_TTL_S:
+                    shutil.rmtree(p, ignore_errors=True)
+            except OSError:
+                pass
+
+
+def _cancel_running(executor) -> None:
+    """Kill the commands the executor still runs in its worker thread (Esc /
+    stop, 2026-10-30 review H3): cancelling the asyncio task leaves the thread
+    -- and its subprocess, up to 3600 s -- running. `cancel_running` is
+    optional (an older or fake executor lacks it); never raises."""
+    fn = getattr(executor, "cancel_running", None)
+    if fn is None:
+        return
+    try:
+        fn()
+    except Exception:
+        pass
 
 
 def _remember(seen: OrderedDict, rid, out) -> None:
@@ -117,6 +307,7 @@ class AgentSession:
         self.session_id: str = ""
         self.steps: deque = deque(maxlen=200)
         self._task_id: str = ""
+        self._executor = None  # the running turn's LocalToolExecutor -- stop() kills its commands
         self._intel = intel  # IntelService, or None (base install / boot failure)
         self._shadow = shadow  # ShadowGit, or None (git unavailable / boot failure)
         # W4b T5: "" (tab-1 / the fallback loop's only slot) keeps every turn's
@@ -341,17 +532,44 @@ class AgentSession:
         carry_frame = None   # an already-pulled frame (the stream won)
         _t0 = _monotonic()   # W1 Task 10: own-task watchdog start
         _own_frames = False  # -> True the instant ANY non-foreign frame lands
+        from webbee.tools import _WRITE_TIER
+        self._executor = executor           # stop() kills what it still runs
+        store = _ResultStore(session_id, task_id)
+        loop = asyncio.get_running_loop()
+        _last_own = loop.time()             # M7: the turn's own last activity
+        _quiet_noted = False
         try:
             while True:
                 if carry_frame is not None:
                     frame, carry_frame = carry_frame, None
                 else:
-                    if carry_task is not None:
-                        pull, carry_task = carry_task, None
-                    else:
-                        pull = asyncio.ensure_future(stream.__anext__())
+                    if carry_task is None:
+                        carry_task = asyncio.ensure_future(stream.__anext__())
+                    # The pending pull stays in carry_task while it is awaited,
+                    # so the finally below retires it on any exit (Esc, the
+                    # silence deadline) -- asyncio.wait never cancels it.
+                    quiet = loop.time() - _last_own
+                    bound = _KERNEL_QUIET_END_S if _quiet_noted else _KERNEL_QUIET_NOTE_S
+                    done, _ = await asyncio.wait({carry_task}, timeout=max(0.0, bound - quiet))
+                    if not done:
+                        quiet = loop.time() - _last_own
+                        if quiet >= _KERNEL_QUIET_END_S:
+                            _note = getattr(sink, "note", None)
+                            if _note is not None:
+                                _note(f"⚠ no activity from the kernel for {int(quiet // 60)} min — this turn is "
+                                      "ended here; anything the kernel still sends is picked up when the "
+                                      "terminal is idle")
+                            return ""
+                        if not _quiet_noted and quiet >= _KERNEL_QUIET_NOTE_S:
+                            _quiet_noted = True
+                            _note = getattr(sink, "note", None)
+                            if _note is not None:
+                                _note(f"⏳ no activity from the kernel for {int(quiet // 60)} min — "
+                                      "still waiting (Esc stops the turn)")
+                        continue
+                    pull, carry_task = carry_task, None
                     try:
-                        frame = await pull
+                        frame = pull.result()
                     except StopAsyncIteration:
                         break
                 ftype = frame.get("type")
@@ -378,6 +596,7 @@ class AgentSession:
                         return ""
                     continue
                 _own_frames = True
+                _last_own, _quiet_noted = loop.time(), False
 
                 # Live steer topology: a Telegram/panel-steered turn keeps THIS
                 # client's task_id (the terminal stays the sole executor) with
@@ -388,9 +607,38 @@ class AgentSession:
                 if ftype == "tool_request":
                     rid = frame.get("req_id")
                     sid = str(rid or "")
+                    tool = str(frame.get("tool", "") or "")
+                    stored = None if rid in seen else await asyncio.to_thread(store.get, rid, tool)
                     if rid in seen:
                         seen.move_to_end(rid)
                         out = seen[rid]
+                    elif stored is not None:
+                        # H6: ran before this client restarted (or was killed
+                        # mid-run) -- the kernel re-sent it on reconnect; never
+                        # run it twice.
+                        out = stored
+                        _remember(seen, rid, out)
+                        _note = getattr(sink, "note", None)
+                        if _note is not None:
+                            try:
+                                _note(f"↺ {tool} already ran before the reconnect — its result is sent again, "
+                                      "not run twice")
+                            except Exception:
+                                pass
+                    elif self.mode == "plan" and tool in _WRITE_TIER:
+                        # M3: plan mode is read-only on THIS side too -- the
+                        # kernel's consent gate is the first wall, this is the
+                        # second (a tool_request is otherwise run unconditionally).
+                        out = {"req_id": rid, "result": {
+                            "ok": False,
+                            "content": f"plan mode: {tool} changes files/runs commands -- not run"}}
+                        _pb = getattr(sink, "plan_blocked", None)
+                        if _pb is not None:
+                            try:
+                                _pb(tool)
+                            except Exception:
+                                pass
+                        _remember(seen, rid, out)
                     else:
                         # UI rendering is guarded so it can never block the
                         # result POST below (an unposted result hangs the kernel
@@ -400,7 +648,19 @@ class AgentSession:
                                 sink.tool_start(_tag + frame.get("tool", ""), frame.get("args", {}))
                             except Exception:
                                 pass
-                        out = await asyncio.to_thread(handle_tool_request, frame, executor)
+                        if tool in _WRITE_TIER:
+                            await asyncio.to_thread(store.mark_started, rid, tool)
+                        try:
+                            out = await asyncio.to_thread(handle_tool_request, frame, executor)
+                        except asyncio.CancelledError:
+                            # H3: Esc cancels this await, not the worker thread --
+                            # kill the command it runs, then let the cancel through.
+                            _cancel_running(executor)
+                            raise
+                        out = _cap_result(out)
+                        # H6: written BEFORE the post -- a crash after this line
+                        # re-sends the result instead of running the tool again.
+                        await asyncio.to_thread(store.put, rid, tool, out)
                         res = out["result"]
                         if _first_time(sid, finished):
                             try:
@@ -424,13 +684,14 @@ class AgentSession:
                             except Exception:
                                 pass
                         _remember(seen, rid, out)
-                    await self._post_result(client, session_id, out)
+                    await self._post_result(client, session_id, out, sink=sink, tool=tool)
+                    _last_own, _quiet_noted = loop.time(), False
 
                 elif ftype == "confirm_request":
                     rid = frame.get("req_id")
                     if rid in seen:
                         seen.move_to_end(rid)
-                        await self._post_result(client, session_id, seen[rid])
+                        await self._post_result(client, session_id, seen[rid], sink=sink)
                     else:
                         if self.mode == "plan":
                             sink.plan_blocked(frame.get("tool", ""))
@@ -445,7 +706,8 @@ class AgentSession:
                             break
                         if race.out is not None:
                             _remember(seen, rid, race.out)
-                            await self._post_result(client, session_id, race.out)
+                            await self._post_result(client, session_id, race.out, sink=sink)
+                        _last_own, _quiet_noted = loop.time(), False   # a consent wait is the user's, not the kernel's
 
                 elif ftype == "panel_release_required":
                     sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
@@ -570,30 +832,94 @@ class AgentSession:
 
     _result_delays = (0.5, 2.0, 5.0)   # class attr — tests override per instance
 
-    async def _post_result(self, client, session_id: str, out: dict) -> None:
-        # Never raises into the stream loop. W1: bounded transient retries —
-        # the kernel dedups by req_id, so a duplicate post is safe, and this
-        # cuts outage recovery from the kernel's tool-wait expiry (up to
-        # 65min for bash) to seconds. Final fallback unchanged: give up
-        # silently, kernel re-dispatches the same req_id.
-        for delay in (0.0,) + tuple(self._result_delays):
+    async def _post_result(self, client, session_id: str, out: dict, *, sink=None, tool: str = "") -> bool:
+        """POST one result under its req_id; True once a 2xx took it. Never
+        raises into the stream loop. W1: bounded transient retries (5xx/408/
+        429, transport errors) -- the kernel dedups by req_id, so a duplicate
+        post is safe. 2026-10-30 review H5: only a 2xx counts as delivered (a
+        413/400/422 used to count too, and the kernel then waited out its
+        tool-wait expiry, up to ~65 min). A 401 refreshes the token once and
+        posts again; any other refusal posts a small {"ok": false} note under
+        the SAME req_id so the kernel moves on with the reason. A result that
+        could not be delivered at all is told to the sink."""
+        url = f"/v1/agent/sessions/{session_id}/result"
+        refreshed = False
+        last = ""
+        verdict = False       # the gateway answered with a non-retryable status
+        delays = list((0.0,) + tuple(self._result_delays))
+        while delays:
+            delay = delays.pop(0)
             if delay:
                 await asyncio.sleep(delay)
             try:
                 headers = await self._headers()
-                r = await client.post(f"/v1/agent/sessions/{session_id}/result",
-                                      json=out, headers=headers)
-                if r.status_code < 500:
-                    return
-            except Exception:
+                r = await client.post(url, json=out, headers=headers)
+            except Exception as e:
+                last, verdict = type(e).__name__, False
                 continue
+            status = int(getattr(r, "status_code", 0) or 0)
+            if 200 <= status < 300:
+                return True
+            last = f"{status} {getattr(r, 'reason_phrase', '') or ''}".strip()
+            if status == 401 and not refreshed:
+                refreshed = True
+                _fr = getattr(self.token_provider, "force_refresh", None)
+                if _fr is not None:
+                    try:
+                        await _fr()
+                    except Exception:
+                        pass
+                delays.insert(0, 0.0)          # post again at once with the new token
+                continue
+            if _is_transient_status(status):
+                verdict = False
+                continue
+            verdict = True
+            break
+        size = 0
+        try:
+            size = _json_bytes(out)
+        except Exception:
+            pass
+        rid = out.get("req_id") if isinstance(out, dict) else None
+        if verdict and rid is not None:
+            # The gateway refused THIS body (too large, malformed, expired
+            # auth that survived a refresh): a small note still unblocks the
+            # kernel, with the reason, instead of a silent wait.
+            note = {"req_id": rid, "result": {
+                "ok": False, "content": f"result could not be delivered: {last}, {size} bytes"}}
+            try:
+                headers = await self._headers()
+                r = await client.post(url, json=note, headers=headers)
+                if 200 <= int(getattr(r, "status_code", 0) or 0) < 300:
+                    self._tell(sink, f"⚠ the result of {tool or 'a tool'} could not be delivered ({last}, "
+                                     f"{size} bytes) — the kernel was told it failed")
+                    return False
+            except Exception:
+                pass
+        self._tell(sink, f"⚠ the result of {tool or 'a tool'} could not be delivered to the kernel "
+                         f"({last or 'no answer'}) — it is sent again when the kernel asks for it again")
+        return False
+
+    @staticmethod
+    def _tell(sink, text: str) -> None:
+        _note = getattr(sink, "note", None) if sink is not None else None
+        if _note is None:
+            return
+        try:
+            _note(text)
+        except Exception:
+            pass
 
     async def stop(self) -> None:
         """P5g: server-side stop for Esc/Ctrl-C. Posts a cancel for the
         in-flight turn so the kernel tears down server-side (not just the
         local asyncio task). Fail-soft — the local task.cancel() the dock
         already does is what actually tears the UI down, so a network error
-        here must never raise into the key-binding handler."""
+        here must never raise into the key-binding handler. The commands the
+        local executor still runs are killed first (review H3): the thread a
+        cancelled tool runs in does not stop with the task."""
+        _cancel_running(getattr(self, "_executor", None))
         if not self.session_id:
             return
         try:

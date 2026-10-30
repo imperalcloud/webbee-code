@@ -76,3 +76,14 @@ def _reset_mode_store_repo_key_cache():
     yield
     mode_store._KEY_CACHE.clear()
     tier_store._KEY_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_result_cache(tmp_path, monkeypatch):
+    """2026-10-30 review H6: every executed tool_request's result is written to
+    `~/.cache/webbee/results/<session>/` before it is posted (so a re-sent
+    request is never run twice). Tests reuse session/task/req ids freely
+    ("sid1"/"OURS"/"r1"), so an un-isolated run would replay one test's stored
+    result into the next -- redirected per test, same rationale as above."""
+    import webbee.session as session
+    monkeypatch.setattr(session, "_RESULT_CACHE_DIR", str(tmp_path / "webbee-result-cache"))

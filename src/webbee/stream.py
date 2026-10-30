@@ -11,6 +11,13 @@ from httpx_sse import aconnect_sse
 _BACKOFF_BASE = 1.0
 _BACKOFF_MAX = 15.0
 
+# 2026-10-30 review M7: a response the server ENDED cleanly (no error) was
+# reconnected at once, again and again -- a finished session got hammered in a
+# tight loop. A clean close now waits too, doubling up to the cap; a frame
+# resets it (the stream is alive again).
+_CLEAN_CLOSE_BASE = 0.5
+_CLEAN_CLOSE_MAX = 10.0
+
 
 class StreamAuthError(Exception):
     """Raised for 401 (post-refresh) and every OTHER 4xx except 408/429 — the
@@ -57,6 +64,7 @@ async def stream_frames(client, session_id: str, headers_provider, *,
     backoff = _BACKOFF_BASE
     attempt = 0
     auth_retried = False   # ONE forced refresh per outage window
+    clean_delay = _CLEAN_CLOSE_BASE
     while True:
         try:
             headers = await headers_provider()          # refresh inside try
@@ -104,7 +112,11 @@ async def stream_frames(client, session_id: str, headers_provider, *,
                         last_id = sse.id
                     frame = _parse_frame(sse)
                     if frame is not None:
+                        clean_delay = _CLEAN_CLOSE_BASE
                         yield frame
+            # the server ended the response cleanly: wait before reconnecting
+            await asyncio.sleep(clean_delay)
+            clean_delay = min(clean_delay * 2, _CLEAN_CLOSE_MAX)
         except (httpx.HTTPError, OSError, _TransientStatus, _TransientAuth):
             attempt += 1
             if woke.check():
