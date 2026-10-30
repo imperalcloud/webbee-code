@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.15
+
+* **The cloud code map stays fresh while you work**: every tool call checks when the workspace last reached the code
+  map, and past 5 minutes it syncs again in the background (a full listing; only what changed is sent) -- a shell
+  edit, a `git pull` or a failed start sync no longer leaves the map days old (live: a repository's map was 5 days
+  old while its sessions worked). A folder of repositories syncs each of them.
+* **A failed sync says why**: the reason reaches the kernel's sync answer and the repo profile (`code_map`) instead
+  of a stderr line that corrupted the screen; Webbee's own log goes to `~/.cache/webbee/webbee.log`.
+* **What the code map is sent**: in a git repository the files git tracks or would track -- a `.gitignore`'d file
+  (generated code, a local config with keys) never reaches the cloud; only code files count toward the 20 000-file
+  bound, and a listing past it is sent as partial, so the map never drops the files it did not name.
+* **An edit that misses shows where the text is now**: "old string not found" comes with the closest place in the
+  file, its current lines numbered, how alike it is and the first line that differs (or "different whitespace").
+* **Long command output keeps its end**: the head and the tail are shown, so a test run's summary is never cut off.
+* **A command that times out stops whole**: the command and every process it started are stopped, and what it printed
+  until then comes back; stderr is shown where it was printed; one stray byte no longer turns UTF-8 output into
+  mojibake.
+* `glob` stays inside the workspace and answers at most 2 000 paths; a file written from a sub-folder launch is
+  re-indexed under the repository's root.
+* imperal-mcp 0.8.12 at least.
+
 ## 0.6.14
 
 * imperal-mcp 0.8.10 at least: an agent in another shell sees your running turn (state_lens(conversation=...)).
