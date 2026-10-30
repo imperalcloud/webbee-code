@@ -49,6 +49,15 @@ def _isolate_newtab_mode_cache(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_tab_store_cache(tmp_path, monkeypatch):
+    """2026-10-30: the dock saves and restores its tabs in `~/.cache/webbee/tabs-<repo>.jsonl` -- a real-dock test
+    run left tabs there, the next run restored them (Home + 3 sessions instead of Home + 1) and a keypress test that
+    counts tabs failed one run in two. Redirected per test, same rationale as the caches above."""
+    import webbee.tab_store as tab_store
+    monkeypatch.setattr(tab_store, "_CACHE_DIR", str(tmp_path / "webbee-tabs-cache"))
+
+
+@pytest.fixture(autouse=True)
 def _reset_mode_store_repo_key_cache():
     """2026-07-25: `mode_store._KEY_CACHE` memoises repo_key per workspace so
     Shift-TAB stops paying for a `git remote get-url` on every mode switch

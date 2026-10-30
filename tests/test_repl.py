@@ -2523,6 +2523,19 @@ def test_real_dock_enter_started_turn_lands_in_the_slot_captured_at_keypress(mon
 
     _mute_dock_background_io(monkeypatch)
     created_panes = _spy_output_panes(monkeypatch)
+    # the dock's slots, observed -- every step below waits for the state it needs, never for a fixed time (the fixed
+    # 0.1 s / 0.05 s sleeps lost the race on a loaded machine: the keys landed before the dock had switched)
+    import webbee.repl as R
+    mgrs = []
+
+    class _SpySlots(R.SlotManager):
+        def __init__(self):
+            super().__init__()
+            mgrs.append(self)
+    monkeypatch.setattr(R, "SlotManager", _SpySlots)
+
+    def active_is(i):
+        return bool(mgrs) and len(mgrs[0].slots) > i and mgrs[0].active_idx == i
 
     gate = asyncio.Event()
     agents = []
@@ -2550,14 +2563,13 @@ def test_real_dock_enter_started_turn_lands_in_the_slot_captured_at_keypress(mon
                     auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
                     sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
                     shadow_factory=lambda c, ws: None))
-                await asyncio.sleep(0.1)   # boot: Home(0) + slot A(1), active=1
+                await _until(lambda: bool(mgrs) and len(mgrs[0].slots) == 2 and len(agents) == 1)   # Home + A
 
                 pipe.send_text("/new /tmp\r")          # opens slot B(2), auto-switches active->2
-                await _until(lambda: len(agents) == 2)
-                await asyncio.sleep(0.05)
+                await _until(lambda: len(agents) == 2 and active_is(2))
 
                 pipe.send_text("\x1b1")                 # back to A
-                await asyncio.sleep(0.05)
+                await _until(lambda: active_is(1))
 
                 # No await between these two sends: both land in the pipe's
                 # buffer before the event loop gets a chance to run anything,

@@ -38,8 +38,30 @@ def _quiet_downloads() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
+def _log_to_file() -> None:
+    """Webbee's own log lines go to a file, never to the terminal (2026-10-30 review: with no handler a warning --
+    "code sync to the vault failed" -- went to stderr through Python's fallback and corrupted the full-screen dock,
+    and nobody could read it later): ~/.cache/webbee/webbee.log, rotated at 2 MB."""
+    import logging
+    from logging.handlers import RotatingFileHandler
+    log = logging.getLogger("webbee")
+    if log.handlers:
+        return
+    try:
+        d = os.path.join(os.path.expanduser("~"), ".cache", "webbee")
+        os.makedirs(d, exist_ok=True)
+        h = RotatingFileHandler(os.path.join(d, "webbee.log"), maxBytes=2_000_000, backupCount=2, encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        log.addHandler(h)
+        log.setLevel(logging.INFO)
+    except OSError:
+        log.addHandler(logging.NullHandler())
+    log.propagate = False
+
+
 def main(argv=None) -> None:
     _quiet_downloads()
+    _log_to_file()
     args = build_parser().parse_args(argv)
     cfg = Config.from_env()
 

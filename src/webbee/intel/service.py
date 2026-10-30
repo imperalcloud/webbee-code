@@ -351,7 +351,9 @@ class IntelService:
                         "os": "windows" if os.name == "nt" else "posix", "source": "local", "ref": "",
                         "machine_kind": "local", "git": local_git_identity(root),
                         "local_key": compute_repo_key(root), "listing_complete": rels is None}
-                listing = _local_listing(root, rels)
+                listing, capped = _local_listing_of(root, rels)
+                if capped:      # an incomplete listing never lets the vault drop the files it did not name
+                    meta.update(listing_complete=False, partial_reason=capped)
                 measured = co_change_pairs(root) if rels is None and history else None
                 out = asyncio.run(vault_sync(factory(), meta, listing, read, measured))
             except Exception as exc:
@@ -626,9 +628,43 @@ async def vault_sync(client, meta: dict, listing: list, read, measured=None) -> 
     return await indexer.sync_source(plan, apply, meta, listing, read)
 
 
+# A listing of the whole workspace holds at most this many code files (only indexable files count -- images, docs and
+# build output never spend it); past it the listing is sent as partial, never as complete.
+LISTING_MAX = 20000
+
+
+def _code_files(root: str) -> tuple[list[str], str]:
+    """``(the workspace's code files, why the list is partial or "")``: in a git repository the files git tracks or
+    would track (``git ls-files -co --exclude-standard`` -- a .gitignore'd file, generated code or a local config
+    with keys, never reaches the cloud), else a walk; only indexable files count toward ``LISTING_MAX``."""
+    paths: list[str] = []
+    if os.path.isdir(os.path.join(root, ".git")):
+        try:
+            r = subprocess.run(["git", "-C", root, "ls-files", "-co", "--exclude-standard", "-z"],
+                               capture_output=True, timeout=60)
+            if r.returncode == 0:
+                paths = [p for p in r.stdout.decode("utf-8", "surrogateescape").split("\0") if p]
+        except (OSError, subprocess.SubprocessError):
+            paths = []
+    if not paths:
+        paths = _walk(root, limit=10 * LISTING_MAX)
+    code = [p for p in paths if indexer.indexable(p.replace(os.sep, "/")) and not ignored_path(root, p)]
+    if len(code) > LISTING_MAX:
+        return code[:LISTING_MAX], f"listing capped at {LISTING_MAX} code files"
+    return code, ""
+
+
+def _local_listing_of(root: str, rels=None) -> tuple[list, str]:
+    """``(listing, why it is partial or "")`` -- the whole workspace's code files, or ``rels``."""
+    if rels is not None:
+        return _local_listing(root, rels), ""
+    files, capped = _code_files(root)
+    return _local_listing(root, files), capped
+
+
 def _local_listing(root: str, rels=None) -> list:
     out = []
-    for rel in (rels if rels is not None else _walk(root)):
+    for rel in (rels if rels is not None else _code_files(root)[0]):
         rel = rel.replace(os.sep, "/")
         if not indexer.indexable(rel) or ignored_path(root, rel):
             continue

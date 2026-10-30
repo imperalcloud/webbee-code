@@ -30,6 +30,7 @@ _DIFF_CAP = 4000
 # 200,001 chars uncapped (one `cat` of a big log burned the context), and
 # `grep` returned exactly 200 of 500 real matches with NO marker at all.
 _BASH_OUT_CAP = 30000          # chars of combined stdout+stderr
+_GLOB_MAX = 2000               # paths a glob answers with (the rest counted)
 _GREP_HIT_CAP = 200            # matching lines
 _READ_LINE_CAP = 2000          # lines per read_file call without explicit limit
 # A code file longer than this, read without a window, answers with its OUTLINE first
@@ -41,16 +42,54 @@ _OUTLINE_FIRST_LINES = 600
 
 def _truncated(text: str, cap: int, unit: str = "chars") -> str:
     """PURE. Cap `text`, appending an HONEST marker when anything was dropped.
-    Keeps the HEAD (where errors and headers live) and states how much is gone
+    Keeps the HEAD (where errors and headers live) and the TAIL (where summaries live) and states how much is gone
     so the agent can decide to narrow the command instead of assuming it saw
     everything."""
     t = text or ""
     if len(t) <= cap:
         return t
     dropped = len(t) - cap
-    return (t[:cap] +
-            f"\n\n… ⚠ TRUNCATED: showing first {cap:,} of {len(t):,} {unit} "
-            f"({dropped:,} hidden). Narrow the command (head/tail/grep) to see the rest.")
+    # the head AND the tail (2026-10-30 review: a test run, a build, a compiler print their summary at the END --
+    # kept only by its head, a long pytest run never showed which tests failed)
+    head, tail = cap // 3, cap - cap // 3
+    return (t[:head] +
+            f"\n\n… ⚠ TRUNCATED: {dropped:,} of {len(t):,} {unit} hidden here -- showing the first {head:,} and the "
+            f"last {tail:,}. Narrow the command (head/tail/grep) to see the middle.\n\n" + t[-tail:])
+
+
+def _stop_group(proc, posix: bool) -> None:
+    """Stop a command and every process it started: SIGTERM to its group, SIGKILL 3 s later (Windows: kill it)."""
+    import signal
+    try:
+        if posix:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _decoded(raw: bytes) -> str:
+    """A command's output as text: UTF-8 -- with a stray invalid byte replaced, never the whole output read in a legacy
+    code page (2026-10-30 review: one bad byte turned Cyrillic UTF-8 into cp1251 mojibake); a legacy code page only
+    when the bytes are mostly not UTF-8 (a Windows tool printing cp1251 / cp866)."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    text = raw.decode("utf-8", errors="replace")
+    if text.count("\ufffd") <= max(4, len(text) // 100):
+        return text
+    for enc in ("cp1251", "cp866", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return text
 
 
 def _unified_diff(rel: str, before: str, after: str) -> str:
@@ -97,6 +136,61 @@ def _is_git_dir(dp: str) -> bool:
 
 class OutsideWorkspaceError(Exception):
     pass
+
+
+NEAREST_CONTEXT = 5        # lines shown around the closest match of an edit's 'old' that was not found
+
+
+def nearest_text(text: str, old: str) -> str:
+    """Where ``old`` comes closest in ``text`` when it is not there as written: the file's current lines around it,
+    numbered, with how close it is and the first line that differs -- so the next edit is written from the file, not
+    from memory (live 2026-10-30: 37% of edit_file calls in a day failed "old string not found", each followed by a
+    re-read and a guess). Whitespace-only differences are named as such. "" -- nothing comes close."""
+    import difflib
+    lines = text.split("\n")
+    want = old.split("\n")
+    n = max(1, len(want))
+    if not lines or not old.strip():
+        return ""
+    norm = lambda s: " ".join(s.split())          # noqa: E731
+    flat = [norm(x) for x in lines]
+    target = "\n".join(norm(w) for w in want)
+    # candidate starts: each line of 'old' found in the file votes for where 'old' would begin; with none found, the
+    # file lines closest to its longest line -- only the best candidates are scored (a 10 000-line file in ~0.1 s)
+    where: dict = {}
+    for j, w in enumerate(norm(x) for x in want):
+        if w:
+            for i, x in enumerate(flat):
+                if x == w:
+                    where[i - j] = where.get(i - j, 0) + 1
+    if not where:
+        longest = max(want, key=len)
+        near = difflib.get_close_matches(norm(longest), flat, n=10, cutoff=0.5)
+        j = want.index(longest)
+        for i, x in enumerate(flat):
+            if x in near:
+                where[i - j] = where.get(i - j, 0) + 1
+    starts = sorted(where, key=lambda k: -where[k])[:20]
+    best, at = 0.0, 0
+    for i in starts:
+        i = max(0, min(i, max(0, len(lines) - n)))
+        r = difflib.SequenceMatcher(None, "\n".join(flat[i:i + n]), target, autojunk=False).ratio()
+        if r > best:
+            best, at = r, i
+    if best < 0.5:
+        return ""
+    lo, hi = max(0, at - NEAREST_CONTEXT), min(len(lines), at + n + NEAREST_CONTEXT)
+    shown = "\n".join(f"{k + 1:6d}| {lines[k]}" for k in range(lo, hi))
+    if best == 1.0:
+        head = (f"the text is at line {at + 1} with different whitespace (spaces, tabs or line ends) -- copy it from "
+                "these lines exactly")
+    else:
+        diff = next((k for k in range(n) if at + k < len(lines) and k < len(want)
+                     and lines[at + k] != want[k]), 0)
+        head = (f"the closest place is line {at + 1} ({int(best * 100)}% alike); the first line that differs is "
+                f"line {at + diff + 1}: the file has {lines[at + diff][:160]!r}, your 'old' has {want[diff][:160]!r}"
+                if at + diff < len(lines) and diff < len(want) else f"the closest place is line {at + 1}")
+    return f"{head}. The file now (lines {lo + 1}-{hi}):\n{shown}"
 
 
 class LocalToolExecutor:
@@ -342,7 +436,12 @@ class LocalToolExecutor:
         answers from the text before the agent's own change. Advisory -- never fails a write."""
         try:
             if self.indexer is not None and getattr(self.indexer, "ready", False):
-                self.indexer.apply_changes([rel])
+                # the index's root may be above the launch folder (Webbee started in a sub-folder of the repo,
+                # 2026-10-30 review): the path is the index's, never the launch folder's
+                iroot = getattr(self.indexer, "root", "") or self.root
+                rel = os.path.relpath(os.path.join(self.root, rel), iroot)
+                if not rel.startswith(".."):
+                    self.indexer.apply_changes([rel])
         except Exception:
             pass
 
@@ -436,7 +535,9 @@ class LocalToolExecutor:
             text = f.read()
         n = text.count(old)
         if n == 0:
-            return {"ok": False, "content": "old string not found"}
+            near = nearest_text(text, old)
+            return {"ok": False, "content": "old string not found" + (f" -- {near}" if near else
+                                                                      " (nothing in the file comes close: read it)")}
         _ra = a.get("replace_all")
         replace_all = (_ra.strip().lower() in ("true", "1", "yes")
                        if isinstance(_ra, str) else bool(_ra))
@@ -490,7 +591,9 @@ class LocalToolExecutor:
                 continue
             n = text.count(old)
             if n != 1:
-                problems.append(f"edit {i} ({rel}): 'old' occurs {n} times (must be exactly 1)")
+                near = nearest_text(text, old) if n == 0 else ""
+                problems.append(f"edit {i} ({rel}): 'old' occurs {n} times (must be exactly 1)"
+                                + (f" -- {near}" if near else ""))
                 continue
             if not os.access(p, os.W_OK):
                 problems.append(f"edit {i} ({rel}): file is not writable")
@@ -602,28 +705,35 @@ class LocalToolExecutor:
         env.setdefault("LANG", "en_US.UTF-8")
         env.setdefault("PYTHONIOENCODING", "utf-8")
 
-        proc = subprocess.run(
-            a["command"], shell=True, cwd=self.root,
-            stdin=subprocess.DEVNULL,
-            capture_output=True, timeout=timeout,
-            env=env,
-        )
-        # Robust multi-codec decode: UTF-8 -> cp1251 (Windows RU) -> latin-1 -> surrogateescape
-        raw = (proc.stdout or b"") + (proc.stderr or b"")
-        for enc in ("utf-8", "cp1251", "cp866", "latin-1"):
+        # Its own process group (2026-10-30 review: a timeout killed only /bin/sh -- a dev server or pytest workers it
+        # started kept running, and the output gathered so far was dropped): on a timeout the whole group stops and
+        # what it printed comes back. stderr is merged where it was printed, not appended after stdout.
+        posix = os.name != "nt"
+        proc = subprocess.Popen(
+            a["command"], shell=True, cwd=self.root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+            **({"start_new_session": True} if posix else
+               {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}))
+        timed_out = False
+        try:
+            raw, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _stop_group(proc, posix)
             try:
-                out = raw.decode(enc)
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            out = raw.decode("utf-8", errors="replace")
-
+                raw, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                raw = b""
+        out = _decoded(raw or b"")
+        if timed_out:
+            out += (f"\n[timed out after {timeout} s -- the command and every process it started were stopped; "
+                    "the output above is what it printed until then]")
         full = len(out)
         out = _truncated(out, _BASH_OUT_CAP)
-        return {"ok": proc.returncode == 0,
+        return {"ok": proc.returncode == 0 and not timed_out,
                 "content": out or f"(exit {proc.returncode})",
                 "exit_code": proc.returncode,
+                **({"timed_out": True} if timed_out else {}),
                 "output_chars": full,
                 "truncated": full > _BASH_OUT_CAP}
 
@@ -728,9 +838,18 @@ class LocalToolExecutor:
 
     def _t_glob(self, a: dict) -> dict:
         import glob as _g
-        base = os.path.join(self.root, a["pattern"])
-        rels = [os.path.relpath(p, self.root) for p in _g.glob(base, recursive=True)]
-        return {"ok": True, "content": "\n".join(sorted(rels)) or "(no matches)"}
+        pattern = str(a.get("pattern") or "")
+        # inside the workspace only, and bounded (2026-10-30 review: "/etc/*" or "../../**" listed outside it, and a
+        # "**" over a big tree came back whole)
+        if os.path.isabs(pattern) or ".." in pattern.replace("\\", "/").split("/"):
+            return {"ok": False, "content": "glob: the pattern must stay inside the workspace (no absolute path, no ..)"}
+        base = os.path.join(self.root, pattern)
+        base_real = os.path.realpath(self.root)
+        rels = sorted(os.path.relpath(p, self.root) for p in _g.glob(base, recursive=True)
+                      if os.path.realpath(p) == base_real or os.path.realpath(p).startswith(base_real + os.sep))
+        shown = rels[:_GLOB_MAX]
+        more = f"\n… ⚠ {len(rels) - _GLOB_MAX:,} more match(es) not shown -- narrow the pattern" if len(rels) > _GLOB_MAX else ""
+        return {"ok": True, "content": ("\n".join(shown) + more) or "(no matches)"}
 
     def _t_repo_profile(self, a: dict) -> dict:
         return self._cpc("repo_profile", a)

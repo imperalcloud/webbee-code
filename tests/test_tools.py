@@ -126,18 +126,51 @@ def test_bash_timeout_capped_at_3600(tmp_path, monkeypatch):
     import webbee.tools as T
     captured = {}
 
-    def _fake_run(cmd, **kw):
-        captured.update(kw)
-        class _P:  # minimal CompletedProcess stand-in
-            returncode, stdout, stderr = 0, "ok", ""
-        return _P()
+    class _P:  # minimal Popen stand-in
+        returncode, pid = 0, 0
 
-    monkeypatch.setattr(T.subprocess, "run", _fake_run)
+        def __init__(self, cmd, **kw):
+            pass
+
+        def communicate(self, timeout=None):
+            captured["timeout"] = timeout
+            return b"ok", None
+
+    monkeypatch.setattr(T.subprocess, "Popen", _P)
     ex = T.LocalToolExecutor(str(tmp_path))
     ex.run("bash", {"command": "true", "timeout": 99999})
     assert captured["timeout"] == 3600
     ex.run("bash", {"command": "true"})
     assert captured["timeout"] == 120
+
+
+def test_a_timeout_stops_the_whole_command_and_keeps_what_it_printed(tmp_path):
+    """2026-10-30 review: a timeout killed only /bin/sh -- its children kept running and the output was dropped."""
+    import os
+    import time
+    import webbee.tools as T
+    if os.name == "nt":
+        return
+    pidfile = tmp_path / "child.pid"
+    ex = T.LocalToolExecutor(str(tmp_path))
+    r = ex.run("bash", {"command": f"echo before; sleep 30 & echo $! > {pidfile}; wait", "timeout": 1})
+    assert r["ok"] is False and r.get("timed_out") and "before" in r["content"] and "timed out after 1 s" in r["content"]
+    time.sleep(0.5)
+    child = int(pidfile.read_text().strip())
+    try:
+        os.kill(child, 0)
+        alive = True
+    except OSError:
+        alive = False
+    assert not alive
+
+
+def test_one_bad_byte_never_turns_utf8_output_into_mojibake():
+    import webbee.tools as T
+    raw = "Привет, мир — тесты прошли".encode("utf-8") + b"\xff" + " конец".encode("utf-8")
+    out = T._decoded(raw)
+    assert out.startswith("Привет, мир") and out.endswith("конец")
+    assert T._decoded("Привет".encode("cp1251")) == "Привет"
 
 
 def test_cpc_shim_degrades_without_indexer(tmp_path):
