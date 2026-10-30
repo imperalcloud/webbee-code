@@ -36,7 +36,7 @@ def test_outline_names_the_parts_of_a_declarative_screen():
 
 
 def test_a_big_code_file_read_without_a_window_answers_with_its_outline(tmp_path):
-    (tmp_path / "screens.py").write_text(_screen())
+    (tmp_path / "screens.py").write_text(_screen(pad=4600))                # over the 5000-line whole read
     ex = LocalToolExecutor(str(tmp_path))
     r = ex.run("read_file", {"path": "screens.py"})
     assert r["ok"] and r["outline"] is True

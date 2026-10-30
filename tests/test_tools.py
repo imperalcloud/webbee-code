@@ -676,16 +676,27 @@ def test_grep_under_the_cap_is_not_marked(tmp_path):
 # --- I-TOOLS-PARTIAL-READ -----------------------------------------------------
 
 def test_read_file_window_returns_exactly_that_window(tmp_path):
-    (tmp_path / "big.py").write_text("".join(f"line {i}\n" for i in range(1, 3001)))
+    (tmp_path / "big.py").write_text("".join(f"line {i}\n" for i in range(1, 6001)))
     ex = LocalToolExecutor(str(tmp_path))
     r = ex.run("read_file", {"path": "big.py", "offset": 400, "limit": 5})
     body = r["content"].split("\n", 1)[1]
     assert body.splitlines() == [f"line {i}" for i in range(400, 405)]
-    assert (r["shown_from"], r["shown_to"], r["total_lines"]) == (400, 404, 3000)
+    assert (r["shown_from"], r["shown_to"], r["total_lines"]) == (400, 404, 6000)
+
+
+def test_a_window_of_a_file_that_fits_reads_it_whole(tmp_path):
+    """2026-10-30: a 592-line file read ~40 times in 35-70 line windows -- a file up to 5000 lines is read whole."""
+    (tmp_path / "store.py").write_text("".join(f"line {i}\n" for i in range(1, 593)))
+    ex = LocalToolExecutor(str(tmp_path))
+    r = ex.run("read_file", {"path": "store.py", "offset": 150, "limit": 40})
+    head, body = r["content"].split("\n", 1)
+    assert body == "".join(f"line {i}\n" for i in range(1, 593))           # byte-exact, whole
+    assert "the whole file, 592 lines" in head and "(150-189)" in head
+    assert (r["shown_from"], r["shown_to"], r["truncated"]) == (1, 592, False)
 
 
 def test_read_file_without_a_window_auto_caps_a_huge_file(tmp_path):
-    (tmp_path / "big.py").write_text("".join(f"line {i}\n" for i in range(1, 3001)))
+    (tmp_path / "big.py").write_text("".join(f"line {i}\n" for i in range(1, 6001)))
     ex = LocalToolExecutor(str(tmp_path))
     r = ex.run("read_file", {"path": "big.py"})
     assert r["truncated"] is True and r["shown_to"] == 2000

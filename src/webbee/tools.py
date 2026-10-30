@@ -40,12 +40,17 @@ _DIFF_CAP = 4000
 _BASH_OUT_CAP = 30000          # chars of combined stdout+stderr
 _GLOB_MAX = 2000               # paths a glob answers with (the rest counted)
 _GREP_HIT_CAP = 200            # matching lines
-_READ_LINE_CAP = 2000          # lines per read_file call without explicit limit
-# A code file longer than this, read without a window, answers with its OUTLINE first
-# (CPC outline/read_symbol): live, a 1459-line declarative screen was read in 40-120
-# line windows ~190 times. The outline names every part with its lines; read_symbol
-# reads one part whole; offset/limit still reads any window (limit reads it whole).
-_OUTLINE_FIRST_LINES = 600
+_READ_LINE_CAP = 2000          # lines per read_file call without explicit limit (a file over the whole bound)
+# A file up to this many lines (and chars: a minified one) is read WHOLE, a window asked or
+# not (2026-10-30: a 592-line file was read ~40 times in 35-70 line windows shifted by 5 and
+# edited from a stale memory of it -- the kernel's frame kept a whole read only ~300 lines; it
+# keeps a file whole up to 5000 now, in the cached head). The team's repositories: p99 ~1450
+# lines, the longest 5934.
+_READ_WHOLE_LINES = 5000
+_READ_WHOLE_CHARS = 250_000
+# A longer code file, read without a window, answers with its OUTLINE first (CPC outline /
+# read_symbol); offset/limit reads any window of it.
+_OUTLINE_FIRST_LINES = _READ_WHOLE_LINES
 
 
 def _truncated(text: str, cap: int, unit: str = "chars") -> str:
@@ -397,6 +402,15 @@ class LocalToolExecutor:
         except (TypeError, ValueError):
             limit = 0
         partial = offset > 0 or limit > 0
+        asked = ""
+        if partial and n <= _READ_WHOLE_LINES and len(text) <= _READ_WHOLE_CHARS:
+            # a window of a file that fits is the file whole: its other lines are what the next
+            # step asks for, and a window's line numbers go stale with the first edit
+            asked = (f" [the whole file, {n} lines -- the window you asked "
+                     f"({max(offset, 1)}-{max(offset, 1) + limit - 1 if limit > 0 else n}) is in it; "
+                     f"a file up to {_READ_WHOLE_LINES} lines is always read whole]")
+            offset = limit = 0
+            partial = False
 
         start = max(offset - 1, 0) if offset > 0 else 0
         if start > n:
@@ -420,7 +434,7 @@ class LocalToolExecutor:
             body = text
         else:
             body = "\n".join(lines[start:end])
-        header = self._file_header(os.path.relpath(p, self.root), n, st.st_mtime)
+        header = self._file_header(os.path.relpath(p, self.root), n, st.st_mtime) + asked
         if start or end < n:
             header += (f" [showing lines {start + 1}-{end} of {n}"
                        + ("" if partial else f"; auto-capped at {_READ_LINE_CAP} — "
