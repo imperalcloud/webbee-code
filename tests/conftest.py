@@ -103,3 +103,13 @@ def _isolate_result_cache(tmp_path, monkeypatch):
     result into the next -- redirected per test, same rationale as above."""
     import webbee.session as session
     monkeypatch.setattr(session, "_RESULT_CACHE_DIR", str(tmp_path / "webbee-result-cache"))
+
+
+@pytest.fixture(autouse=True)
+def _never_a_real_server(monkeypatch):
+    """A test never reaches a real server over ssh: ``remote_run`` is replaced unless a test puts its own."""
+    import webbee.tools as wt
+
+    async def refuse(host, argv, timeout=0, cap=0):
+        return -1, b"", f"tests never reach a server ({host})"
+    monkeypatch.setattr(wt, "remote_run", refuse)

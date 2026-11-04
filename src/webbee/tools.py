@@ -1392,6 +1392,118 @@ async def remote_head(host: str, root: str) -> dict:
             conn.close()
 
 
+# ---- the code itself is read where it lives (owner 2026-11-04: the vault holds the code index, never the code) ----
+REMOTE_READ_CAP = 2 * 1024 * 1024      # one file read from a server for its lines
+REMOTE_GREP_LINES = 2000               # matching lines taken from a server's grep
+REMOTE_TIMEOUT_S = 30.0
+
+
+async def remote_run(host: str, argv: list, timeout: float = REMOTE_TIMEOUT_S, cap: int = REMOTE_READ_CAP) -> tuple:
+    """``(exit code, stdout bytes, why)`` of one read-only command on ``host`` over the user's own ssh (their config,
+    agent, known_hosts; ``BatchMode``: never a prompt). Every argument is quoted; at most ``cap`` bytes are kept."""
+    import asyncio
+    import shlex
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", host, "--", shlex.join([str(a) for a in argv]),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL)
+    except OSError as e:
+        return -1, b"", f"ssh could not start: {e}"
+    try:
+        out = await asyncio.wait_for(proc.stdout.readexactly(cap + 1), timeout)
+    except asyncio.IncompleteReadError as e:          # the whole output, under the cap: the command ends itself
+        out = e.partial
+    except asyncio.TimeoutError:
+        out = None
+    try:
+        if out is None or len(out) > cap:              # past the cap or the time: stopped, what came is kept
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            if out is None:
+                return -1, b"", f"{host}: no answer in {int(timeout)} s"
+        err = await asyncio.wait_for(proc.stderr.read(4000), 5)
+        rc = await asyncio.wait_for(proc.wait(), 5)
+        if len(out) > cap:
+            rc = 0
+    except asyncio.TimeoutError:
+        return -1, b"", f"{host}: the command did not end"
+    why = err.decode("utf-8", "replace").strip()[:300] if rc not in (0, 1) and not out else ""
+    return rc, out, why
+
+
+def _remote_refused(path: str) -> str:
+    """Why a server's path is never read (a secret by its name or where it lies -- the same list as a local file)."""
+    from imperal_sdk.universal.kinds import never_read
+    return "this file is never read (a secret by its name or where it lies)" if never_read(path) else ""
+
+
+async def remote_read(host: str, root: str, rel: str, cap: int = REMOTE_READ_CAP) -> dict:
+    """A server file's text for its lines (outline / read_symbol on ``host:<alias>``): ``{text, total_lines, path,
+    truncated, why}``. The path stays under ``root``; never a secret by its name or by where a link leads; at most
+    ``cap`` bytes; nothing is kept or sent anywhere but the answer."""
+    import posixpath
+    base = posixpath.normpath(str(root or "/"))
+    path = posixpath.normpath(posixpath.join(base, str(rel or "")))
+    if not (path == base or path.startswith(base.rstrip("/") + "/")):
+        return {"text": "", "why": f"{rel} is outside {base}"}
+    refused = _remote_refused(path)
+    if refused:
+        return {"text": "", "why": refused}
+    rc, real, why = await remote_run(host, ["readlink", "-f", "--", path], cap=4096)
+    real_path = real.decode("utf-8", "replace").strip() or path
+    if rc != 0 or why:
+        return {"text": "", "why": why or f"{path}: not found on {host}"}
+    refused = _remote_refused(real_path)
+    if refused:
+        return {"text": "", "why": refused}
+    rc, raw, why = await remote_run(host, ["head", "-c", str(cap + 1), "--", real_path], cap=cap + 1)
+    if rc != 0 or why:
+        return {"text": "", "why": why or f"{path}: cannot be read on {host}"}
+    truncated = len(raw) > cap
+    text = raw[:cap].decode("utf-8", "replace")
+    return {"text": text, "total_lines": text.count("\n") + (0 if text.endswith("\n") else 1), "path": path,
+            "truncated": truncated, "why": ""}
+
+
+async def remote_grep(host: str, root: str, pattern: str, k: int = 50, path_glob: str = "",
+                      regex: bool = False) -> dict:
+    """An exact text (or an extended regex) in a server repo's code files, searched ON the server (``git grep``,
+    else ``grep -r``): ``{matches: [{path, line, text}], total, truncated, why}``. Only the code files the index
+    reads (``code_index.indexable``), never a secret; at most ``REMOTE_GREP_LINES`` lines come back."""
+    from imperal_sdk import code_index as ci
+    flag = "-E" if regex else "-F"
+    glob = ["--", path_glob] if path_glob else []
+    rc, out, why = await remote_run(host, ["git", "-C", root, "grep", "-n", "-I", "--no-color", flag, "-e", pattern,
+                                           *glob], cap=REMOTE_GREP_LINES * 400)
+    rel_base = ""
+    if rc not in (0, 1) or why:          # not a git repository there: grep, without the dependency trees
+        rc, out, why = await remote_run(host, ["grep", "-rnI", flag, "--exclude-dir=.git", "--exclude-dir=node_modules",
+                                               "--exclude-dir=venv", "--exclude-dir=.venv", "-e", pattern, root],
+                                        cap=REMOTE_GREP_LINES * 400)
+        rel_base = root.rstrip("/") + "/"
+        if rc not in (0, 1) or why:
+            return {"matches": [], "total": 0, "truncated": False, "why": why or f"grep failed on {host}"}
+    import fnmatch
+    matches, total = [], 0
+    lines = out.decode("utf-8", "replace").split("\n")
+    for ln in lines[:REMOTE_GREP_LINES]:
+        path, sep, rest = ln.partition(":")
+        num, sep2, text = rest.partition(":")
+        if not (sep and sep2 and num.isdigit()):
+            continue
+        if rel_base and path.startswith(rel_base):
+            path = path[len(rel_base):]
+        if not ci.indexable(path) or _remote_refused(path) or (path_glob and not fnmatch.fnmatch(path, path_glob)):
+            continue
+        total += 1
+        if len(matches) < k:
+            matches.append({"path": path, "line": int(num), "text": text[:300]})
+    return {"matches": matches, "total": total, "truncated": total > len(matches) or len(lines) > REMOTE_GREP_LINES,
+            "why": ""}
+
+
 async def remote_sync(client, host: str, root: str, paths: list) -> dict:
     """List and read the repo holding ``root`` on ``host`` over SFTP (the sdk's one walk: .gitignore,
     secrets and dependency trees skipped), extract and embed here, and sync it into the vault through

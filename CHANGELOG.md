@@ -24,6 +24,9 @@
 * A stuck file never stops a build: documents and big sets are built in a process pool of at most 4 processes; a job
   that runs past its time (or whose process dies) is killed and its files retried one by one, a file still stuck is
   skipped and counted as `timeout` in `progress()`.
+* **A server's code is read on the server**: `remote_read` (a file's lines, at most 2 MB, never a secret by its
+  name or where a link leads, never outside the repo) and `remote_grep` (`git grep` there, else `grep -r`; code files
+  only) over your own ssh (`BatchMode`, never a prompt). The vault holds the code index, never the code.
 * Needs `imperal-sdk` 6.4.0 with its `universal-index` extra (pulled in).
 
 ## 0.6.19
