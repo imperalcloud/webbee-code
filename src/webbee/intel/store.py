@@ -23,20 +23,27 @@ from imperal_sdk.code_index import ProjectIndex, FileIndex, Symbol
 # schema 2 holds the OLD id format, so both the index and the vector cache
 # must be treated as a clean miss and rebuilt -- bumping the version is what
 # makes load()/load_vectors() do exactly that.
-SCHEMA_VERSION = 4
+# 5 (2026-11-04): a file's ``kind`` (code | config | document | data | mail | image) is kept -- a schema-4 cache
+# read every document back as code after a restart; a folder without git is cached too (``NO_GIT``) and the
+# checksum tree of the folder (``tree``) is saved with the stats.
+SCHEMA_VERSION = 5
+NO_GIT = "-"           # the cache key of a folder that is no git repository (its stats keep it honest)
 
 
 def _path(cache_dir: str, repo_key: str) -> str:
     return os.path.join(cache_dir, repo_key, "index.json")
 
 
-def save(cache_dir: str, repo_key: str, index: ProjectIndex, stats: dict | None = None) -> None:
+def save(cache_dir: str, repo_key: str, index: ProjectIndex, stats: dict | None = None,
+         tree: dict | None = None) -> None:
     """``stats`` -- ``{relpath: [mtime_ns, size]}`` of every file the walk saw when the index was taken: the next
     start re-parses only the files whose stat differs (edits made while Webbee was closed, uncommitted edits)."""
     p = _path(cache_dir, repo_key)
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    data = {"schema_version": SCHEMA_VERSION, "git_ref": index.git_ref, "stats": stats or {},
-            "files": {k: {"path": v.path, "lang": v.lang, "imports": v.imports, "refs": v.refs,
+    data = {"schema_version": SCHEMA_VERSION, "git_ref": index.git_ref or NO_GIT, "stats": stats or {},
+            "tree": tree or {},
+            "files": {k: {"path": v.path, "lang": v.lang, "kind": getattr(v, "kind", "code"), "imports": v.imports,
+                          "refs": v.refs,
                           "content_hash": v.content_hash, "endpoints": v.endpoints, "schemas": v.schemas,
                           "symbols": [asdict(s) for s in v.symbols]} for k, v in index.files.items()}}
     tmp = p + ".tmp"
@@ -50,6 +57,16 @@ def load(cache_dir: str, repo_key: str, git_ref: str) -> ProjectIndex | None:
     return got[0] if got is not None else None
 
 
+def load_tree(cache_dir: str, repo_key: str) -> dict:
+    """The checksum tree saved with the index (``{dir: hash}``), or ``{}``."""
+    try:
+        with open(_path(cache_dir, repo_key), "r", encoding="utf-8") as f:
+            tree = json.load(f).get("tree") or {}
+        return {str(k): str(v) for k, v in tree.items()} if isinstance(tree, dict) else {}
+    except Exception:
+        return {}
+
+
 def load_with_stats(cache_dir: str, repo_key: str, git_ref: str) -> tuple[ProjectIndex, dict] | None:
     """``(index, {relpath: [mtime_ns, size]})`` saved for this HEAD, or None. A cache from before the stats were kept
     gives ``{}``: every file then counts as changed and is re-parsed once."""
@@ -61,16 +78,17 @@ def load_with_stats(cache_dir: str, repo_key: str, git_ref: str) -> tuple[Projec
     try:
         with open(_path(cache_dir, repo_key), "r", encoding="utf-8") as f:
             data = json.load(f)
-        if data.get("git_ref") != git_ref:
+        if data.get("git_ref") != (git_ref or NO_GIT):
             return None  # stale cache -- the caller falls back to a full re-index
         if data.get("schema_version") != SCHEMA_VERSION:
             return None  # unknown/old on-disk shape -- clean miss, re-index
-        idx = ProjectIndex(git_ref=data.get("git_ref", ""))
+        idx = ProjectIndex(git_ref=git_ref or "")
         for k, v in (data.get("files") or {}).items():
             idx.files[k] = FileIndex(path=v["path"], lang=v["lang"],
                                      imports=v.get("imports", []), refs=v.get("refs", []),
                                      content_hash=v.get("content_hash", ""), endpoints=v.get("endpoints", []),
-                                     schemas=v.get("schemas", []), symbols=[Symbol(**s) for s in v.get("symbols", [])])
+                                     schemas=v.get("schemas", []), symbols=[Symbol(**s) for s in v.get("symbols", [])],
+                                     kind=v.get("kind") or "code")
         stats = {k: list(v) for k, v in (data.get("stats") or {}).items()
                  if isinstance(v, list) and len(v) == 2}
         return idx, stats

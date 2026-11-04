@@ -11,6 +11,19 @@
 * **Never read**: secrets by name, keychains, `.gnupg`, browser profiles, wallets, VPN and cloud credential files, iCloud
   placeholders (reading one would download it) and app packages (`.photoslibrary`, `.app`). A secret written later
   is never read either.
+* **Changes found by checksums, not by rescanning**: every indexed folder has a checksum tree - one hash per directory
+  over the size and time of what is inside (`webbee.intel.tree`). A start from the cache and every refresh compare the
+  trees top down and skip an unchanged directory whole; a git repository is checked through git (HEAD, `git status`
+  and the stats of the files it names) with no walk at all. Measured on a folder of 7 repositories (1862 files): a
+  start from the cache 0.3 s, a refresh with nothing changed 0.17 s, one edited file found in 0.21 s comparing 19
+  directories. `IntelService.load_or_build()`, `refresh()`, `checksum()`.
+* **One listing** for the build, the cache check and every refresh (`_index_listing`): a `.gitignore`'d file of a
+  repository is never read, links and anything but a regular file are skipped.
+* The cache keeps each file's kind (a document was read back as code after a restart) and a folder without git is
+  cached too (it was indexed from scratch at every start). Cache schema 5.
+* A stuck file never stops a build: documents and big sets are built in a process pool of at most 4 processes; a job
+  that runs past its time (or whose process dies) is killed and its files retried one by one, a file still stuck is
+  skipped and counted as `timeout` in `progress()`.
 * Needs `imperal-sdk` 6.4.0 with its `universal-index` extra (pulled in).
 
 ## 0.6.19

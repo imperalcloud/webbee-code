@@ -140,31 +140,55 @@ POOL_MIN_FILES = 500           # below this a build stays in-process (a pool's s
 RECENT_S = 30 * 86400          # "changed lately" -- indexed right after the focus
 
 
-def _index_walk(root: str, focus: str | None = None, limit: int = UNIT_MAX_FILES,
-                exclude: tuple = ()) -> tuple[list[str], dict]:
-    """``(the folder's files the index reads, in priority order; {"placeholder": n, "over_cap": n})``. Order: the
-    focus folder, files changed in the last 30 days (newest first), then by path. Never read: what ``kind_of``
-    refuses (secrets, caches, dependency trees) and iCloud placeholders (reading one downloads it). ``exclude``:
-    root-relative folders another unit indexes (a repository inside a collection), never walked here."""
+def _git_listed(root: str) -> set | None:
+    """The files git tracks or would track in ``root`` (``ls-files -co --exclude-standard``: a .gitignore'd file is
+    never read -- the same rule as the cloud listing), or None when ``root`` is no git repository / git cannot say."""
+    if not os.path.exists(os.path.join(root, ".git")):
+        return None
+    try:
+        r = subprocess.run(["git", "-C", root, "ls-files", "-co", "--exclude-standard", "-z"],
+                           capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return {p.replace(os.sep, "/") for p in r.stdout.decode("utf-8", "surrogateescape").split("\0") if p}
+
+
+def _index_listing(root: str, focus: str | None = None, limit: int = UNIT_MAX_FILES,
+                   exclude: tuple = ()) -> tuple[list, dict, dict]:
+    """``(the folder's files the index reads, in priority order; {relpath: [mtime_ns, size]}; {"placeholder": n,
+    "over_cap": n})`` -- ONE listing for the first build, the cache check and every refresh. Order: the focus folder,
+    files changed in the last 30 days (newest first), then by path. Never read: what ``kind_of`` refuses by the
+    file's name and its real path (secrets, caches, dependency trees), a .gitignore'd file of a git repository,
+    anything but a regular file, and cloud placeholders (reading one downloads it). ``exclude``: root-relative
+    folders another unit indexes (a repository inside a collection), never walked here."""
     from imperal_sdk.universal.index import is_placeholder
     from imperal_sdk.universal.kinds import kind_of
+    import stat as _stat
     found: list[tuple[str, float]] = []
+    stats: dict = {}
     skipped = {"placeholder": 0, "over_cap": 0}
     excluded = {str(e).strip("/") for e in exclude if str(e).strip("/")}
+    listed = _git_listed(root)
     for dp, dns, fns in os.walk(root):
         here = os.path.relpath(dp, root).replace(os.sep, "/")
         dns[:] = sorted(d for d in dns if not skipped_dir(dp, d)
                         and (d if here == "." else f"{here}/{d}") not in excluded)
         for fn in sorted(fns):
-            rel = os.path.relpath(os.path.join(dp, fn), root).replace(os.sep, "/")
+            rel = fn if here == "." else f"{here}/{fn}"
             if is_placeholder(rel):
                 skipped["placeholder"] += 1
                 continue
-            if kind_of(rel) is None:
+            if listed is not None and rel not in listed:
+                continue
+            if kind_of(rel, root=root) is None:
                 continue
             try:
-                st = os.stat(os.path.join(root, rel))
+                st = os.lstat(os.path.join(dp, fn))
             except OSError:
+                continue
+            if not _stat.S_ISREG(st.st_mode):          # a link, a FIFO, a socket: never read
                 continue
             if is_placeholder(rel, st):
                 skipped["placeholder"] += 1
@@ -173,6 +197,7 @@ def _index_walk(root: str, focus: str | None = None, limit: int = UNIT_MAX_FILES
                 skipped["over_cap"] += 1
                 continue
             found.append((rel, st.st_mtime))
+            stats[rel] = [st.st_mtime_ns, st.st_size]
     prefix = (focus or "").strip("/")
     now = time.time()
 
@@ -181,7 +206,33 @@ def _index_walk(root: str, focus: str | None = None, limit: int = UNIT_MAX_FILES
         in_focus = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
         recent = now - mtime <= RECENT_S
         return (0 if in_focus else 1, 0 if recent else 1, -mtime if recent else 0.0, rel)
-    return [rel for rel, _m in sorted(found, key=rank)], skipped
+    return [rel for rel, _m in sorted(found, key=rank)], stats, skipped
+
+
+def _index_walk(root: str, focus: str | None = None, limit: int = UNIT_MAX_FILES,
+                exclude: tuple = ()) -> tuple[list[str], dict]:
+    """``(files in priority order, skipped counts)`` -- ``_index_listing`` without the stats."""
+    rels, _stats, skipped = _index_listing(root, focus, limit, exclude)
+    return rels, skipped
+
+
+POOL_MAX_WORKERS = 4           # parsing holds up to ~0.3 GB per job (imperal_sdk.universal.index.RAW_CAP)
+POOL_CHUNK = 50                # files per pool job
+CHUNK_TIMEOUT_S = 120.0        # one job; past it the job's files are retried one by one
+FILE_TIMEOUT_S = 30.0          # one file; past it the file is skipped as ``timeout``
+
+
+def _kill_pool(pool) -> None:
+    """A pool with a stuck job: its processes killed (a hung extractor never ends by itself), the rest cancelled."""
+    for proc in list((getattr(pool, "_processes", None) or {}).values()):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
 
 
 def _build_chunk(root: str, rels: list) -> dict:
@@ -226,6 +277,9 @@ class IntelService:
         self.last_sync_error = ""          # why the last sync failed; "" -- it did not
         self.stale_reason = ""             # why the index is not known fresh; "" -- it is (or not built)
         self._stats: dict = {}             # relpath -> [mtime_ns, size] of what the index holds, saved with it
+        self._tree: dict = {}              # dir -> hash over self._stats (tree.dir_hashes); {} -- compute it again
+        self._checksum = ""                # tree.repo_checksum at the last check ("" -- no git: walk)
+        self._pool_job = None              # the pool job (None: _build_chunk); a test puts a stuck one here
         self._vectors_dirty = False
         self._save_guard = threading.Lock()
         self._save_timer = None
@@ -269,19 +323,33 @@ class IntelService:
         and uncommitted edits stayed invisible after a restart at that HEAD):
         only the files whose mtime or size differ are re-parsed, files gone
         are dropped, new ones added."""
+        touched, rebuilt = self.load_or_build()
+        self._embed_build(self.index, touched)
+        if rebuilt:
+            self._save_cache()             # this index for the next start (a reconciled one too)
+        self.sync_vault()                 # code graph everywhere: the whole repo into the vault
+
+    def load_or_build(self) -> tuple[dict | None, bool]:
+        """The index from the cache checked against the disk, else built: ``(touched, changed)`` -- ``touched`` the
+        files the check re-read or dropped (None after a full build), ``changed`` whether the index differs from the
+        cache (it should be saved). The check compares the checksum trees top down (``tree.changed_files``): a
+        directory whose hash is unchanged is skipped whole. A folder without git is cached too (``store.NO_GIT``)."""
+        from webbee.intel import tree
         self.git_ref = _git_ref(self.root)
-        walked, skipped = _index_walk(self.root, self.focus, exclude=self.exclude)
+        checksum = tree.repo_checksum(self.root)
+        walked, stats, skipped = _index_listing(self.root, self.focus, exclude=self.exclude)
         self._progress = {"indexed": 0, "total": len(walked), "focus_done": False,
-                          "skipped": {**skipped, "unread": 0}}
-        stats = _stats_of(self.root, walked)
-        cached = store.load_with_stats(self.cache_dir, self.repo_key, self.git_ref) if self.git_ref else None
+                          "skipped": {**skipped, "unread": 0, "timeout": 0}}
+        cached = store.load_with_stats(self.cache_dir, self.repo_key, self.git_ref)
+        new_tree = tree.dir_hashes(stats)
         touched = None                      # None: a full index (no cache); else the files the disk changed
         if cached is None:
             idx = self._build_progressive(walked)
         else:
             idx, old_stats = cached
-            changed = [r for r in walked if r in stats and old_stats.get(r) != stats[r]]
-            gone = sorted((set(idx.files) | set(old_stats)) - set(stats))
+            changed, gone, _compared = tree.changed_files(old_stats, stats,
+                                                          store.load_tree(self.cache_dir, self.repo_key), new_tree)
+            gone = sorted(set(gone) | (set(idx.files) - set(stats)))    # a cached file no longer listed
             reparsed = self._build_files(changed) if changed else {}
             for rel in changed:             # undecodable now: out of the index, as a full build leaves it
                 idx.files.pop(rel, None)
@@ -292,33 +360,126 @@ class IntelService:
         idx.git_ref = self.git_ref
         with self._lock:
             self._stats = stats
+            self._tree = new_tree
+            self._checksum = checksum
             self.index = idx
             self.graph = CodeGraph(idx)
         self._progress.update(indexed=len(walked), focus_done=True)     # every listed file processed (read or unread)
         self.fresh = True
         self.stale_reason = ""
-        self._embed_build(idx, touched)
-        if self.git_ref and (cached is None or touched):
-            self._save_cache()             # this index for the next start (a reconciled one too)
-        self.sync_vault()                 # code graph everywhere: the whole repo into the vault
+        return touched, cached is None or bool(touched)
+
+    def checksum(self) -> str:
+        """The folder's checksum: the root of its checksum tree (``tree[""]``) -- equal checksums, equal listings."""
+        return (self._tree or {}).get("", "")
+
+    def refresh(self) -> dict:
+        """The index catches up with the disk without a watcher: a git repository whose checksum (HEAD, status, the
+        stats of what it names) is unchanged answers at once, with no walk; else one listing, its checksum tree
+        compared top down with the index's, and only the changed files read. A file that left the listing but is
+        still on disk (now .gitignore'd, now named like a secret) leaves the index unread.
+        ``{changed, gone, unlisted, compared}`` or ``{"unchanged": True}``."""
+        from webbee.intel import tree
+        if self.index is None:
+            return {}
+        checksum = tree.repo_checksum(self.root)
+        if checksum and checksum == self._checksum:
+            return {"unchanged": True}
+        walked, stats, _skipped = _index_listing(self.root, self.focus, exclude=self.exclude)
+        new_tree = tree.dir_hashes(stats)
+        with self._lock:
+            old_stats, old_tree = dict(self._stats), dict(self._tree or {})
+        changed, gone, compared = tree.changed_files(old_stats, stats, old_tree, new_tree)
+        with self._lock:
+            gone = sorted(set(gone) | (set(self.index.files) - set(stats)))
+        deleted = [rel for rel in gone if not os.path.lexists(os.path.join(self.root, rel))]
+        unlisted = [rel for rel in gone if rel not in set(deleted)]
+        if unlisted:
+            self.evict(unlisted)
+        if changed or deleted:
+            self.apply_changes(changed + deleted)
+        with self._lock:
+            self._stats = dict(stats)
+            self._tree = new_tree
+            self._checksum = checksum
+        self._progress["total"] = len(walked)
+        self._progress["indexed"] = len(walked)
+        if unlisted and not (changed or deleted):
+            self._save_soon()
+        return {"changed": len(changed), "gone": len(gone), "unlisted": len(unlisted), "compared": compared}
+
+    def evict(self, rels: list) -> None:
+        """Files out of the index without a read (the lock and the graph rebuild apply_changes uses)."""
+        with self._lock:
+            for rel in rels:
+                if self.index is not None:
+                    self.index.files.pop(rel, None)
+                self._stats.pop(rel, None)
+            self._tree = {}
+            if self.index is not None:
+                self.graph = CodeGraph(self.index)
 
     def _build_files(self, rels: list) -> dict:
-        """These files' index entries: in a process pool for a big set, else here."""
-        if len(rels) < POOL_MIN_FILES:
+        """These files' index entries. A small set of code stays in-process; documents (any extractor can meet a
+        hostile file) and big sets go to a process pool whose stuck jobs are killed (``_build_in_pool``) -- one hung
+        file never stops the build (final review 2026-11-04)."""
+        if not rels:
+            return {}
+        from imperal_sdk.universal.kinds import kind_of
+        if len(rels) < POOL_MIN_FILES and all(kind_of(r) in ("code", "config") for r in rels):
             return indexer.build_index(self.root, rels).files
-        from concurrent.futures import ProcessPoolExecutor
-        workers = max(1, (os.cpu_count() or 2) // 2)
-        size = max(1, -(-len(rels) // workers))
-        parts = [rels[i:i + size] for i in range(0, len(rels), size)]
         try:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                out: dict = {}
-                for files in pool.map(_build_chunk, [self.root] * len(parts), parts):
-                    out.update(files)
-                return out
+            return self._build_in_pool(rels)
         except Exception as exc:          # no pool here (a sandbox, a frozen app): the same work in-process
             log.info("index pool unavailable, building in-process: %s", exc)
             return indexer.build_index(self.root, rels).files
+
+    def _build_in_pool(self, rels: list) -> dict:
+        """Jobs of ``POOL_CHUNK`` files on at most ``POOL_MAX_WORKERS`` processes; a job past ``CHUNK_TIMEOUT_S`` (or
+        whose process died) has its pool killed and its files retried one per job; a single file past
+        ``FILE_TIMEOUT_S`` is skipped as ``timeout`` (counted in ``progress``)."""
+        workers = max(1, min(POOL_MAX_WORKERS, (os.cpu_count() or 2) // 2))
+        size = POOL_CHUNK if len(rels) >= POOL_CHUNK * workers else max(1, -(-len(rels) // workers))
+        out: dict = {}
+        hung = self._run_pool([rels[i:i + size] for i in range(0, len(rels), size)], workers, CHUNK_TIMEOUT_S, out)
+        if hung:
+            still = self._run_pool([[r] for part in hung for r in part], workers, FILE_TIMEOUT_S, out)
+            for part in still:
+                log.warning("index: %s did not finish in %ss -- skipped", part[0], FILE_TIMEOUT_S)
+                self._progress.setdefault("skipped", {}).setdefault("timeout", 0)
+                self._progress["skipped"]["timeout"] += 1
+        return out
+
+    def _run_pool(self, parts: list, workers: int, timeout: float, out: dict) -> list:
+        """Run ``parts`` in waves of ``workers`` jobs (each job's clock starts with it); the parts that did not end
+        in ``timeout`` or whose process died. A pool that cannot start raises (the caller builds in-process)."""
+        from concurrent.futures import ProcessPoolExecutor, wait
+        hung: list = []
+        pending = list(parts)
+        pool = None
+        try:
+            while pending:
+                if pool is None:
+                    pool = ProcessPoolExecutor(max_workers=workers)
+                wave, pending = pending[:workers], pending[workers:]
+                job = getattr(self, "_pool_job", None) or _build_chunk      # tests put a stuck job here
+                futs = {pool.submit(job, self.root, part): part for part in wave}
+                done, not_done = wait(futs, timeout=timeout)
+                broken = False
+                for f in done:
+                    try:
+                        out.update(f.result())
+                    except Exception:     # the job's process died (a crash, out of memory): its files are retried
+                        hung.append(futs[f])
+                        broken = True
+                hung.extend(futs[f] for f in not_done)
+                if not_done or broken:
+                    _kill_pool(pool)
+                    pool = None
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=True)
+        return hung
 
     def _build_progressive(self, walked: list) -> ProjectIndex:
         """A first build in published steps: the focus folder first, then ``BUILD_BATCH`` files at a time -- the index
@@ -447,6 +608,7 @@ class IntelService:
             return
         updates = {}
         stats = {}
+        to_read: list = []
         for rel in rel_paths:
             ap = os.path.join(self.root, rel)
             if not os.path.exists(ap):
@@ -459,14 +621,16 @@ class IntelService:
                 continue
             from imperal_sdk.universal.index import is_placeholder
             from imperal_sdk.universal.kinds import kind_of
-            if kind_of(rel) is None or is_placeholder(rel, st):
+            if kind_of(rel, root=self.root) is None or is_placeholder(rel, st):
                 updates[rel] = None     # the same gates as the walk: never read, out of the index
                 stats[rel] = None
                 continue
-            # the same reading as a build (every kind through its view); not readable now: out of the index
-            fi = indexer.build_index(self.root, [rel]).files.get(rel)
-            updates[rel] = fi
+            to_read.append(rel)
             stats[rel] = [st.st_mtime_ns, st.st_size]
+        # the same reading as a build (every kind through its view, a hung file killed); not readable now: out
+        read = self._build_files(to_read) if to_read else {}
+        for rel in to_read:
+            updates[rel] = read.get(rel)
 
         # Embed compute (chunk + backend inference) stays off-lock, mirroring
         # the parse-then-swap pattern above -- only the vector-store mutation
@@ -496,6 +660,7 @@ class IntelService:
             self.graph = CodeGraph(self.index)
             if embedded is not None:
                 self._swap_vectors(updates, *embedded)
+            self._tree = {}                    # the stats moved: the tree is computed again at the next check
         if updates:
             self._save_soon()
 
@@ -504,8 +669,6 @@ class IntelService:
     def _save_soon(self) -> None:
         """Save the cache ``SAVE_DEBOUNCE_S`` after the first unsaved change -- never once per change (a branch
         switch is one write); not pushed back by later changes, so a session that edits without pause still saves."""
-        if not self.git_ref:
-            return
         with self._save_guard:
             if self._save_timer is not None:
                 return
@@ -530,18 +693,22 @@ class IntelService:
 
     def _save_cache(self) -> None:
         """The index, the stats of its files and (when they changed) the vectors, into the cache. Fail-soft."""
-        if self.index is None or not self.git_ref:
+        if self.index is None:
             return
+        from webbee.intel import tree
         with self._lock:
             snap = ProjectIndex(git_ref=self.git_ref)
             snap.files = dict(self.index.files)
             stats = dict(self._stats)
+            if not self._tree:
+                self._tree = tree.dir_hashes(stats)
+            dirs = dict(self._tree)
             vecs = None
             if self._vectors_dirty and self.vectors is not None:
                 vecs = self.vectors.to_arrays()
                 self._vectors_dirty = False
         try:
-            store.save(self.cache_dir, self.repo_key, snap, stats)
+            store.save(self.cache_dir, self.repo_key, snap, stats, dirs)
             b = self._get_backend() if vecs is not None else None
             if b is not None:
                 store.save_vectors(self.cache_dir, self.repo_key, snap.git_ref, b.model_id, *vecs)
