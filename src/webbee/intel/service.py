@@ -65,6 +65,9 @@ def _git_ref(root: str) -> str:
 # marker below, which is a fact about the directory rather than a guess about
 # its name.
 _SKIP_DIRS = frozenset({"node_modules", "site-packages", "__pycache__"})
+# macOS packages: an app's or a media library's insides, not the person's files (universal index, 2026-11-04)
+_APP_PACKAGES = (".app", ".photoslibrary", ".musiclibrary", ".tvlibrary", ".photolibrary", ".aplibrary",
+                 ".migratedphotolibrary", ".imovielibrary", ".fcpbundle", ".logicx", ".band")
 
 
 def _is_virtualenv(path: str) -> bool:
@@ -79,7 +82,8 @@ def skipped_dir(parent: str, name: str) -> bool:
     """The ONE rule for what the index never reads (the full walk and the watcher alike):
     every dotted directory (.git, .next build output, .venv, caches, .webbee), the
     dependency caches, and any virtualenv by its marker."""
-    return name.startswith(".") or name in _SKIP_DIRS or _is_virtualenv(os.path.join(parent, name))
+    return (name.startswith(".") or name in _SKIP_DIRS or name.endswith(_APP_PACKAGES)
+            or _is_virtualenv(os.path.join(parent, name)))
 
 
 def ignored_path(root: str, path: str) -> bool:
@@ -136,16 +140,21 @@ POOL_MIN_FILES = 500           # below this a build stays in-process (a pool's s
 RECENT_S = 30 * 86400          # "changed lately" -- indexed right after the focus
 
 
-def _index_walk(root: str, focus: str | None = None, limit: int = UNIT_MAX_FILES) -> tuple[list[str], dict]:
+def _index_walk(root: str, focus: str | None = None, limit: int = UNIT_MAX_FILES,
+                exclude: tuple = ()) -> tuple[list[str], dict]:
     """``(the folder's files the index reads, in priority order; {"placeholder": n, "over_cap": n})``. Order: the
     focus folder, files changed in the last 30 days (newest first), then by path. Never read: what ``kind_of``
-    refuses (secrets, caches, dependency trees) and iCloud placeholders (reading one downloads it)."""
+    refuses (secrets, caches, dependency trees) and iCloud placeholders (reading one downloads it). ``exclude``:
+    root-relative folders another unit indexes (a repository inside a collection), never walked here."""
     from imperal_sdk.universal.index import is_placeholder
     from imperal_sdk.universal.kinds import kind_of
     found: list[tuple[str, float]] = []
     skipped = {"placeholder": 0, "over_cap": 0}
+    excluded = {str(e).strip("/") for e in exclude if str(e).strip("/")}
     for dp, dns, fns in os.walk(root):
-        dns[:] = sorted(d for d in dns if not skipped_dir(dp, d))
+        here = os.path.relpath(dp, root).replace(os.sep, "/")
+        dns[:] = sorted(d for d in dns if not skipped_dir(dp, d)
+                        and (d if here == "." else f"{here}/{d}") not in excluded)
         for fn in sorted(fns):
             rel = os.path.relpath(os.path.join(dp, fn), root).replace(os.sep, "/")
             if is_placeholder(rel):
@@ -185,9 +194,11 @@ def _build_chunk(root: str, rels: list) -> dict:
 
 
 class IntelService:
-    def __init__(self, root: str, repo_key: str, cache_dir: str = "", focus: str | None = None) -> None:
+    def __init__(self, root: str, repo_key: str, cache_dir: str = "", focus: str | None = None,
+                 exclude: tuple = ()) -> None:
         self.root = os.path.realpath(root)
         self.focus = focus
+        self.exclude = tuple(exclude)
         self._progress = {"indexed": 0, "total": 0, "skipped": {"placeholder": 0, "over_cap": 0, "unread": 0},
                           "focus_done": False}
         self.repo_key = repo_key
@@ -259,7 +270,7 @@ class IntelService:
         only the files whose mtime or size differ are re-parsed, files gone
         are dropped, new ones added."""
         self.git_ref = _git_ref(self.root)
-        walked, skipped = _index_walk(self.root, self.focus)
+        walked, skipped = _index_walk(self.root, self.focus, exclude=self.exclude)
         self._progress = {"indexed": 0, "total": len(walked), "focus_done": False,
                           "skipped": {**skipped, "unread": 0}}
         stats = _stats_of(self.root, walked)
@@ -445,6 +456,12 @@ class IntelService:
             try:
                 st = os.stat(ap)        # before the read: an edit after it differs at the next start
             except OSError:
+                continue
+            from imperal_sdk.universal.index import is_placeholder
+            from imperal_sdk.universal.kinds import kind_of
+            if kind_of(rel) is None or is_placeholder(rel, st):
+                updates[rel] = None     # the same gates as the walk: never read, out of the index
+                stats[rel] = None
                 continue
             # the same reading as a build (every kind through its view); not readable now: out of the index
             fi = indexer.build_index(self.root, [rel]).files.get(rel)
@@ -749,8 +766,11 @@ class IntelService:
         # snapshot -- never re-touch the live dict, which apply_changes (run
         # off-loop by the watcher, F3) may be resizing concurrently.
         with self._lock:
-            files = list((self.index or ProjectIndex()).files.values())
+            every = list((self.index or ProjectIndex()).files.values())
             embedded_chunks = len(self.vectors.ids()) if self.vectors else 0
+            # the profile is the map of the CODE: a summary that leaves this process never names a document's
+            # sections (security review 2026-11-04); other kinds are only counted
+            files = [fi for fi in every if getattr(fi, "kind", "code") in ("code", "config")]
             vectors_ready = self.vectors_ready
             content_hashes = sorted(fi.content_hash for fi in files if fi.content_hash)
             endpoints = [e for fi in files for e in fi.endpoints]
@@ -768,6 +788,8 @@ class IntelService:
             "evidence_version": 1,
             "content_digest": digest,
             "file_count": len(files),
+            "other_kinds": dict(Counter(getattr(fi, "kind", "code") for fi in every
+                                        if getattr(fi, "kind", "code") not in ("code", "config"))),
             "languages": dict(langs),
             "symbol_kinds": dict(kinds),
             "top_symbols": top,               # capped at _MAX_PROFILE_SAMPLE

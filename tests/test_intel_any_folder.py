@@ -68,3 +68,30 @@ def test_a_big_folder_is_built_in_a_process_pool_with_the_same_result(tmp_path, 
     inline = IntelService(str(f), "k3", cache_dir=str(tmp_path / "c2"))
     inline.build()
     assert pooled.index.files == inline.index.files and len(pooled.index.files) == 30
+
+
+def test_excluded_folders_and_app_packages_are_never_walked(tmp_path):
+    f = tmp_path / "Documents"
+    (f / "repo" / "src").mkdir(parents=True)
+    (f / "Photos Library.photoslibrary").mkdir()
+    (f / "repo" / "src" / "a.py").write_text("x = 1\n")
+    (f / "Photos Library.photoslibrary" / "p.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    (f / "memo.md").write_text("# Memo\n")
+    order, _ = _index_walk(str(f), exclude=("repo",))
+    assert order == ["memo.md"]
+
+
+def test_a_secret_written_later_is_never_read_and_the_profile_names_no_document(tmp_path, monkeypatch):
+    folder = _folder(tmp_path)
+    svc = IntelService(str(folder), "k5", cache_dir=str(tmp_path / "c5"))
+    svc.build()
+    (folder / "credentials.json").write_text('{"key": "x"}')
+    import builtins
+    opened = []
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open", lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1])
+    svc.apply_changes(["credentials.json"])
+    monkeypatch.setattr(builtins, "open", real_open)
+    assert "credentials.json" not in svc.index.files and not any("credentials.json" in o for o in opened)
+    prof = svc.repo_profile()
+    assert not any("Agreement" in s for s in prof["top_symbols"]) and prof["other_kinds"]["document"] >= 2
