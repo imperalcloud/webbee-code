@@ -27,7 +27,9 @@
 * **A server's code is read on the server**: `remote_read` (a file's lines, at most 2 MB, never a secret by its
   name or where a link leads, never outside the repo) and `remote_grep` (`git grep` there, else `grep -r`; code files
   only) over your own ssh (`BatchMode`, never a prompt). The vault holds the code index, never the code.
-* Needs `imperal-sdk` 6.4.0 with its `universal-index` extra (pulled in).
+* **Login survives a non-JSON answer**: the device login's token poll crashed on a balancer's page
+  (`JSONDecodeError`); it now keeps polling (the fix lives in `imperal-mcp` 0.9.0, now the floor).
+* Needs `imperal-sdk` 6.4.1 with its `universal-index` extra and `imperal-mcp` 0.9.0 (pulled in).
 
 ## 0.6.19
 
