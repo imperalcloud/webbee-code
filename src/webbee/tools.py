@@ -1002,7 +1002,11 @@ class LocalToolExecutor:
 
     def _cpc_local(self, verb: str, a: dict) -> dict:
         if self.indexer is None:
-            return {"ok": False, "content": "intel not available; install webbee[intel]"}
+            from webbee import boot
+            why = boot.INTEL_DOWN_REASON or "the code index is not running in this session"
+            return {"ok": False, "content": f"intel not available: {why}. It ships with webbee (no extra to install); "
+                                            "restart webbee in the repository, and if it repeats, see "
+                                            "~/.cache/webbee/tui-stderr.log"}
         from webbee.intel import query
         if verb == "repo_profile":
             return query.repo_profile(self.indexer)

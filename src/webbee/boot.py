@@ -7,6 +7,11 @@ import asyncio
 import os
 import subprocess
 
+# Why the code index is NOT running in this process ("" while it runs or before the boot). The boot swallows the
+# failure so the REPL never crashes -- but a tool that needs the index must be able to say the real reason instead of
+# guessing ("install webbee[intel]" was wrong since 0.7.0: intel ships in the base install).
+INTEL_DOWN_REASON = ""
+
 
 def _git_branch(workspace: str) -> str:
     try:
@@ -105,6 +110,7 @@ async def start_intel(cfg, workspace: str, intel_factory):
     failure here (missing extra, bad repo, etc.) must degrade to
     (None, None), never crash the boot -- coding still works, just
     without repo intelligence. Returns (intel, watcher_task)."""
+    global INTEL_DOWN_REASON
     try:
         svc = (intel_factory or _default_intel_factory)(cfg, workspace)
         await asyncio.to_thread(svc.build)
@@ -118,8 +124,10 @@ async def start_intel(cfg, workspace: str, intel_factory):
         # its end is always collected: an exception is never printed when webbee quits ("Task exception was never
         # retrieved", live 2026-10-25)
         watcher_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        INTEL_DOWN_REASON = ""
         return svc, watcher_task
-    except Exception:
+    except Exception as exc:
+        INTEL_DOWN_REASON = f"the code index failed to start: {type(exc).__name__}: {str(exc)[:200]}"
         return None, None
 
 
@@ -155,10 +163,12 @@ async def boot_workspace(cfg, workspace: str, intel_factory, shadow_factory) -> 
     behavior per job (a crash in one never blocks the others or the boot),
     just concurrent instead of serial."""
     async def _intel_job():
+        global INTEL_DOWN_REASON
         if cfg.intel_enabled:
             # Guarded off-loop build + watcher; any failure degrades to
             # intel=None, never crashes the boot (start_intel above).
             return await start_intel(cfg, workspace, intel_factory)
+        INTEL_DOWN_REASON = "the code index is turned off in this configuration (intel_enabled = false)"
         return None, None
 
     (intel, watcher_task), shadow, git_branch = await asyncio.gather(

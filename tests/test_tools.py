@@ -178,6 +178,21 @@ def test_cpc_shim_degrades_without_indexer(tmp_path):
     ex = LocalToolExecutor(str(tmp_path))            # indexer=None
     out = ex.run("graph_slice", {"symbols": ["x"]})
     assert out["ok"] is False and "intel not available" in out["content"]
+    assert "install webbee[intel]" not in out["content"]   # intel ships in the base install since 0.7.0
+
+
+def test_cpc_shim_says_why_the_index_is_down(tmp_path, monkeypatch):
+    import asyncio
+    from webbee import boot
+    from webbee.tools import LocalToolExecutor
+
+    def broken_factory(cfg, ws):
+        raise PermissionError("cannot write the index cache")
+    monkeypatch.setattr(boot, "INTEL_DOWN_REASON", "")
+    assert asyncio.run(boot.start_intel(object(), str(tmp_path), broken_factory)) == (None, None)
+    out = LocalToolExecutor(str(tmp_path)).run("impact_of_change", {"symbols": ["x"]})
+    assert out["ok"] is False
+    assert "PermissionError: cannot write the index cache" in out["content"]
 
 
 def test_cpc_graph_slice_coerces_stringified_symbols(tmp_path):
