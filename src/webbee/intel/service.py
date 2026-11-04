@@ -129,9 +129,67 @@ def _walk(root: str, limit: int = 20000) -> list[str]:
     return out
 
 
+# ---- universal index (phase 2, 2026-11-04): any folder, every file kind, the focus first ----
+UNIT_MAX_FILES = 100_000       # one index unit (spec 2026-11-03 §3.2); a bigger folder is split by imperal-mcp
+BUILD_BATCH = 2_000            # files per published step of a first build: answers come before the whole folder
+POOL_MIN_FILES = 500           # below this a build stays in-process (a pool's start costs more than it saves)
+RECENT_S = 30 * 86400          # "changed lately" -- indexed right after the focus
+
+
+def _index_walk(root: str, focus: str | None = None, limit: int = UNIT_MAX_FILES) -> tuple[list[str], dict]:
+    """``(the folder's files the index reads, in priority order; {"placeholder": n, "over_cap": n})``. Order: the
+    focus folder, files changed in the last 30 days (newest first), then by path. Never read: what ``kind_of``
+    refuses (secrets, caches, dependency trees) and iCloud placeholders (reading one downloads it)."""
+    from imperal_sdk.universal.index import is_placeholder
+    from imperal_sdk.universal.kinds import kind_of
+    found: list[tuple[str, float]] = []
+    skipped = {"placeholder": 0, "over_cap": 0}
+    for dp, dns, fns in os.walk(root):
+        dns[:] = sorted(d for d in dns if not skipped_dir(dp, d))
+        for fn in sorted(fns):
+            rel = os.path.relpath(os.path.join(dp, fn), root).replace(os.sep, "/")
+            if is_placeholder(rel):
+                skipped["placeholder"] += 1
+                continue
+            if kind_of(rel) is None:
+                continue
+            try:
+                st = os.stat(os.path.join(root, rel))
+            except OSError:
+                continue
+            if is_placeholder(rel, st):
+                skipped["placeholder"] += 1
+                continue
+            if len(found) >= limit:
+                skipped["over_cap"] += 1
+                continue
+            found.append((rel, st.st_mtime))
+    prefix = (focus or "").strip("/")
+    now = time.time()
+
+    def rank(item):
+        rel, mtime = item
+        in_focus = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
+        recent = now - mtime <= RECENT_S
+        return (0 if in_focus else 1, 0 if recent else 1, -mtime if recent else 0.0, rel)
+    return [rel for rel, _m in sorted(found, key=rank)], skipped
+
+
+def _build_chunk(root: str, rels: list) -> dict:
+    """One process-pool job: these files' index entries (the pool's children run at a lower priority)."""
+    try:
+        os.nice(10)
+    except (AttributeError, OSError):
+        pass
+    return indexer.build_index(root, rels).files
+
+
 class IntelService:
-    def __init__(self, root: str, repo_key: str, cache_dir: str = "") -> None:
+    def __init__(self, root: str, repo_key: str, cache_dir: str = "", focus: str | None = None) -> None:
         self.root = os.path.realpath(root)
+        self.focus = focus
+        self._progress = {"indexed": 0, "total": 0, "skipped": {"placeholder": 0, "over_cap": 0, "unread": 0},
+                          "focus_done": False}
         self.repo_key = repo_key
         self.cache_dir = cache_dir or os.path.expanduser("~/.cache/webbee/intel")
         self.index: ProjectIndex | None = None
@@ -201,17 +259,19 @@ class IntelService:
         only the files whose mtime or size differ are re-parsed, files gone
         are dropped, new ones added."""
         self.git_ref = _git_ref(self.root)
-        walked = _walk(self.root)
+        walked, skipped = _index_walk(self.root, self.focus)
+        self._progress = {"indexed": 0, "total": len(walked), "focus_done": False,
+                          "skipped": {**skipped, "unread": 0}}
         stats = _stats_of(self.root, walked)
         cached = store.load_with_stats(self.cache_dir, self.repo_key, self.git_ref) if self.git_ref else None
         touched = None                      # None: a full index (no cache); else the files the disk changed
         if cached is None:
-            idx = indexer.build_index(self.root, walked)
+            idx = self._build_progressive(walked)
         else:
             idx, old_stats = cached
             changed = [r for r in walked if r in stats and old_stats.get(r) != stats[r]]
             gone = sorted((set(idx.files) | set(old_stats)) - set(stats))
-            reparsed = indexer.build_index(self.root, changed).files if changed else {}
+            reparsed = self._build_files(changed) if changed else {}
             for rel in changed:             # undecodable now: out of the index, as a full build leaves it
                 idx.files.pop(rel, None)
             idx.files.update(reparsed)
@@ -223,12 +283,60 @@ class IntelService:
             self._stats = stats
             self.index = idx
             self.graph = CodeGraph(idx)
+        self._progress.update(indexed=len(walked), focus_done=True)     # every listed file processed (read or unread)
         self.fresh = True
         self.stale_reason = ""
         self._embed_build(idx, touched)
         if self.git_ref and (cached is None or touched):
             self._save_cache()             # this index for the next start (a reconciled one too)
         self.sync_vault()                 # code graph everywhere: the whole repo into the vault
+
+    def _build_files(self, rels: list) -> dict:
+        """These files' index entries: in a process pool for a big set, else here."""
+        if len(rels) < POOL_MIN_FILES:
+            return indexer.build_index(self.root, rels).files
+        from concurrent.futures import ProcessPoolExecutor
+        workers = max(1, (os.cpu_count() or 2) // 2)
+        size = max(1, -(-len(rels) // workers))
+        parts = [rels[i:i + size] for i in range(0, len(rels), size)]
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                out: dict = {}
+                for files in pool.map(_build_chunk, [self.root] * len(parts), parts):
+                    out.update(files)
+                return out
+        except Exception as exc:          # no pool here (a sandbox, a frozen app): the same work in-process
+            log.info("index pool unavailable, building in-process: %s", exc)
+            return indexer.build_index(self.root, rels).files
+
+    def _build_progressive(self, walked: list) -> ProjectIndex:
+        """A first build in published steps: the focus folder first, then ``BUILD_BATCH`` files at a time -- the index
+        answers (and says how far it is: ``progress``) long before a home folder is done."""
+        idx = ProjectIndex(git_ref=self.git_ref)
+        prefix = (self.focus or "").strip("/")
+        n_focus = sum(1 for r in walked if prefix and (r == prefix or r.startswith(prefix + "/")))
+        steps = ([walked[:n_focus]] if n_focus else []) + [walked[i:i + BUILD_BATCH]
+                                                           for i in range(n_focus, len(walked), BUILD_BATCH)]
+        done = 0
+        for k, step in enumerate(steps):
+            files = self._build_files(step)
+            done += len(step)
+            idx.files.update(files)
+            self._progress["skipped"]["unread"] += len(step) - len(files)
+            self._progress["indexed"] = done            # processed so far; ``skipped.unread`` says how many were not readable
+            if done >= n_focus:
+                self._progress["focus_done"] = True
+            if k == 0 or k % 5 == 0 or k == len(steps) - 1:
+                with self._lock:              # published: search and outline see what is built so far
+                    self.index = idx
+                    self.graph = CodeGraph(idx)
+        return idx
+
+    def progress(self) -> dict:
+        """How far the index is: ``{indexed, total, skipped: {placeholder, over_cap, unread}, focus_done}`` --
+        ``indexed`` counts the listed files processed (``unread`` of them could not be read: encrypted, broken, over
+        their cap); ``indexed == total`` means the build is done."""
+        return {**self._progress, "skipped": dict(self._progress["skipped"])}
 
     def _embed_build(self, idx: ProjectIndex, touched: dict | None = None) -> None:
         # Off-loop already (build() is called via asyncio.to_thread from the
@@ -336,12 +444,10 @@ class IntelService:
                 continue
             try:
                 st = os.stat(ap)        # before the read: an edit after it differs at the next start
-                with open(ap, "r", encoding="utf-8") as f:
-                    fi = indexer.parse_file(rel, f.read())
-            except UnicodeDecodeError:
-                fi = None               # not text any more: out of the index, as a full build leaves it
             except OSError:
                 continue
+            # the same reading as a build (every kind through its view); not readable now: out of the index
+            fi = indexer.build_index(self.root, [rel]).files.get(rel)
             updates[rel] = fi
             stats[rel] = [st.st_mtime_ns, st.st_size]
 
