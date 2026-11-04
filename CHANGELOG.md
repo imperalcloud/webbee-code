@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+
+* **A missing code index says why**: when the index did not start (a failure while building it, or it is turned off),
+  `impact_of_change`, `graph_slice` and the other code-map tools now name the real reason instead of the wrong
+  "install webbee[intel]" -- the index has shipped in the base install since 0.7.0, there is nothing to install.
+* Needs imperal-mcp 0.9.1 (install commands that work on Debian 12+, Ubuntu 23.04+ and Homebrew: `pipx` / `uv tool`).
+
 ## 0.7.0
 
 * **The local index takes any folder and every file kind**: open webbee in a home folder, a folder of contracts or a
