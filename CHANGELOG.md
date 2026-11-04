@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0
+
+* **The local index takes any folder and every file kind**: open webbee in a home folder, a folder of contracts or a
+  Kotlin app - code in 20+ languages, documents (DOCX, PDF, ODT, legacy DOC, Markdown, HTML), sheets (XLSX, CSV),
+  slides, mail (EML, MBOX) and image metadata are indexed. The folder you work in is indexed first, then what changed
+  in the last 30 days, then the rest; a big folder builds in a process pool.
+* **Only code leaves the machine**: what the vault may get is unchanged - code and resolution configs. Documents, mail
+  and sheets stay in the local index.
+* **Never read**: secrets by name, keychains, `.gnupg`, browser profiles, wallets, VPN and cloud credential files, iCloud
+  placeholders (reading one would download it) and app packages (`.photoslibrary`, `.app`). A secret written later
+  is never read either.
+* Needs `imperal-sdk` 6.4.0 with its `universal-index` extra (pulled in).
+
 ## 0.6.19
 
 * **Another agent's message to a running session stays on screen**: it printed only as a queue-panel row that left the
