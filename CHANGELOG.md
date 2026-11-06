@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.2
+
+* **The code graph answers correctly** (06.11 report):
+  * `impact_of_change` lists the files that really use a symbol, with the line, the user and the depth. A
+    function nobody calls had answered 481 unrelated files.
+  * Files that only share the name are listed apart under `by_name`.
+  * An unknown symbol is reported as such, never as "0 users".
+* **Every major language is linked**:
+  * Go, Rust, Java, Kotlin, C#, PHP, Ruby;
+  * TS/JS monorepos (workspace packages, tsconfig `extends`, default exports, CommonJS, `.mts/.cts`);
+  * Vue, Svelte and Astro components;
+  * members through typed fields, constructors and return types.
+* **Projects of every ecosystem** are recognised (`Cargo.toml`, `go.mod`, `pom.xml`, `*.csproj`, `composer.json`,
+  `Gemfile` ...), locally and on servers.
+* `.gitignore` rules apply in folders without git and on machines without a git binary (Windows).
+* Needs imperal-mcp 0.9.2 and imperal-sdk 6.5.0.
+
 ## 0.7.1
 
 * **A missing code index says why**: when the index did not start (a failure while building it, or it is turned off),
