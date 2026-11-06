@@ -186,14 +186,101 @@ def contract_slice(svc, query: str = "", kind: str = "all", k: int = 50) -> dict
     return _env(items[:limit], has_more=len(items) > limit)
 
 
+# The local answer of ``impact_of_change`` computes links the way the vault's graph does (imperal_sdk.code_links,
+# 2026-11-06): before, a file "depended" on a symbol when the bare NAME appeared in it, and each depth step pulled in
+# every definition of every hit file -- a function nobody calls answered 481 files (06.11 report).
+_SCOPE_LANGS = ("python", "typescript", "tsx", "javascript")
+_CONFIG_NAMES = ("pyproject.toml", "setup.cfg", "package.json", "jsconfig.json")
+_FACTS: dict = {}            # (root, path, content_hash) -> BlobFacts | None: a file parsed once per content
+_FACTS_MAX = 60000
+_READ_MAX = 2_000_000
+
+
+def _read(root: str, rel: str):
+    import os
+    try:
+        full = os.path.join(root, rel)
+        if os.path.getsize(full) > _READ_MAX:
+            return None
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _is_config(rel: str) -> bool:
+    import posixpath
+    b = posixpath.basename(rel).lower()
+    return b in _CONFIG_NAMES or (b.startswith("tsconfig") and b.endswith(".json"))
+
+
+def linker(svc):
+    """The repo's resolver (``imperal_sdk.code_links.Linker``) for the index's current graph -- built once per graph
+    (a rebuilt graph builds it again), each file parsed once per content."""
+    import os
+    g = svc.graph
+    if getattr(svc, "_linker_graph", None) is g and getattr(svc, "_linker", None) is not None:
+        return svc._linker
+    from imperal_sdk import code_index as ci
+    from imperal_sdk.code_links import Linker
+    root = str(getattr(svc, "root", "") or "")
+    if len(_FACTS) > _FACTS_MAX:
+        _FACTS.clear()
+    facts: dict = {}
+    for path, fi in list(svc.index.files.items()):
+        if getattr(fi, "lang", "") not in _SCOPE_LANGS:
+            continue
+        key = (root, path, getattr(fi, "content_hash", ""))
+        if key not in _FACTS:
+            text = _read(root, path) if root else None
+            _FACTS[key] = ci.scope_facts(path, text) if text is not None else None
+        facts[path] = _FACTS[key]
+    configs = []
+    cands = {p for p in svc.index.files if _is_config(p)}
+    if root:
+        cands |= {n for n in os.listdir(root) if _is_config(n)} if os.path.isdir(root) else set()
+    for rel in sorted(cands):
+        text = _read(root, rel) if root else None
+        if text is None:
+            continue
+        try:
+            kind, data = ci.parse_config(rel, text)
+        except Exception:
+            continue
+        configs.append({"path": rel.replace("\\", "/"), "kind": kind, "data": data})
+    lk = Linker(facts, configs)
+    svc._linker, svc._linker_graph = lk, g
+    return lk
+
+
 def impact_of_change(svc, symbols) -> dict:
+    """Files that use ``symbols`` (resolved links: line, user, depth through the enclosing definition), code before
+    tests; ``by_name`` -- files that only share a name (a method on a local, a language without scope facts), marked
+    and bounded; ``resolved`` -- the definitions found (none: "not a definition in this index", never "0 users")."""
     if svc is None or svc.graph is None:
         return {"ok": False, "content": "index not ready"}
     if isinstance(symbols, str):
         symbols = [symbols]
-    files = svc.graph.dependents_of(list(symbols or []), depth=3)
-    items = [{"id": f, "title": f, "kind": "file"} for f in sorted(files)]
-    return _env(items)
+    from imperal_sdk.code_links import BY_NAME_SHOWN, impact, is_test_path
+    syms = [str(s) for s in (symbols or []) if str(s).strip()]
+    out = impact(linker(svc), syms, depth=2)
+    # languages without scope facts: their uses are known by name only -- listed with the other by-name files
+    names = {s.split("::")[-1].split(":")[-1].rsplit(".", 1)[-1] for s in syms}
+    known = {b["path"] for b in out["by_name"]} | {i["id"] for i in out["data"]["items"]}
+    extra = []
+    for path, fi in svc.index.files.items():
+        if getattr(fi, "lang", "") in _SCOPE_LANGS or path in known:
+            continue
+        if names & set(getattr(fi, "refs", ()) or ()):
+            extra.append({"path": path, "line": 0, "name": "", "group": "tests" if is_test_path(path) else "code",
+                          "note": "no scope facts for this language: by name"})
+    if extra:
+        out["by_name_count"] = int(out.get("by_name_count") or 0) + len(extra)
+        out["by_name"] = sorted(out["by_name"] + extra, key=lambda b: (b["group"] == "tests", b["path"]))[:BY_NAME_SHOWN]
+    if not out["resolved"]:
+        out["note"] = f"{', '.join(syms)}: not a definition in this index"
+    out["link"] = "resolved locally (the vault's rules); by_name lists name-only matches apart"
+    return out
 
 
 def orient(svc, q) -> dict:

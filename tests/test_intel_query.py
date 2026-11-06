@@ -5,7 +5,7 @@ from webbee.intel import query
 
 
 def _svc(tmp_path):
-    (tmp_path / "a.py").write_text("def alpha():\n    return beta()\n")
+    (tmp_path / "a.py").write_text("from b import beta\n\n\ndef alpha():\n    return beta()\n")
     (tmp_path / "b.py").write_text("def beta():\n    return 1\n")
     s = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c")); s.build(); return s
 
@@ -83,3 +83,32 @@ def test_search_code_kind_filter_does_not_nullify_vector_arm(tmp_path, monkeypat
     monkeypatch.setattr(query, "_lexical_search", lambda *a, **k: [])
     r = query.search_code(svc, "beta", kind="function")
     assert r["ok"] and any(i["title"] == "beta" for i in r["data"]["items"])
+
+
+# 06.11 report: a function nobody calls answered hundreds of files (links by bare name, depth through every def of a
+# hit file). The local answer now follows the vault's rules (imperal_sdk.code_links).
+
+def _svc2(tmp_path):
+    (tmp_path / "core.py").write_text("def used():\n    return 1\n\n\ndef lonely():\n    return 2\n")
+    (tmp_path / "user.py").write_text("from core import used\n\n\ndef run():\n    return used()\n")
+    (tmp_path / "other.py").write_text("def go(obj):\n    return obj.lonely()\n\n\ndef used_twice():\n    return 3\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_core.py").write_text("from core import used\n\n\ndef test_used():\n    assert used()\n")
+    s = IntelService(str(tmp_path), "rk2", cache_dir=str(tmp_path / "c")); s.build(); return s
+
+
+def test_impact_nobody_calls_is_empty_and_by_name_is_apart(tmp_path):
+    r = query.impact_of_change(_svc2(tmp_path), ["lonely"])
+    assert r["data"]["items"] == [] and r["resolved"] == ["core.py::lonely"]
+    assert [b["path"] for b in r["by_name"]] == ["other.py"]
+
+
+def test_impact_resolved_users_code_before_tests(tmp_path):
+    r = query.impact_of_change(_svc2(tmp_path), ["used"])
+    assert [i["id"] for i in r["data"]["items"]] == ["user.py", "tests/test_core.py"]
+    assert r["data"]["items"][0]["user"] == "run" and r["data"]["items"][0]["line"] == 5
+
+
+def test_impact_unknown_symbol_says_so(tmp_path):
+    r = query.impact_of_change(_svc2(tmp_path), ["nope"])
+    assert r["data"]["items"] == [] and "not a definition" in r["note"]

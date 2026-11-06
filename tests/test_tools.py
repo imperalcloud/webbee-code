@@ -202,7 +202,7 @@ def test_cpc_graph_slice_coerces_stringified_symbols(tmp_path):
     # false negative the brain reads as "no callers".
     pytest.importorskip("tree_sitter")
     from webbee.intel.service import IntelService
-    (tmp_path / "a.py").write_text("def alpha():\n    return beta()\n")
+    (tmp_path / "a.py").write_text("from b import beta\n\n\ndef alpha():\n    return beta()\n")   # a real import: links are resolved
     (tmp_path / "b.py").write_text("def beta():\n    return 1\n")
     svc = IntelService(str(tmp_path), "rk", cache_dir=str(tmp_path / "c"))
     svc.build()
