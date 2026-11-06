@@ -243,16 +243,17 @@ def mcp_installed(which=safe_which, run=subprocess.run) -> dict:
     real = os.path.realpath(exe)
     py = os.path.join(os.path.dirname(real), "python.exe" if _WINDOWS else "python")
     out = {"tool": tool_of(real), "python": py, "prefix": os.path.dirname(os.path.dirname(real)), "version": "",
-           "code": False}
+           "code": False, "webbee": ""}
     # asked twice when it says "no code extra": a reinstall is never made on one odd answer (live 2026-10-25: right after
     # another install the first answer said no webbee, the next ones yes)
     for _ in range(2):
         try:
             got = run([py, "-c", _NO_CWD + "import importlib.metadata as m, importlib.util as u; "
-                                 "print(m.version('imperal-mcp'), u.find_spec('webbee') is not None)"],
+                                 "w = u.find_spec('webbee') is not None; "
+                                 "print(m.version('imperal-mcp'), w, m.version('webbee') if w else '')"],
                       capture_output=True, text=True, timeout=20)
-            version, code = (str(got.stdout or "").split() + ["", ""])[:2]
-            out.update(version=version, code=code == "True")
+            version, code, webbee = (str(got.stdout or "").split() + ["", "", ""])[:3]
+            out.update(version=version, code=code == "True", webbee=webbee)
         except Exception:
             pass
         if out["code"] or not out["version"]:
@@ -260,14 +261,19 @@ def mcp_installed(which=safe_which, run=subprocess.run) -> dict:
     return out
 
 
-def mcp_command(inst: dict, newest, uv, pipx, wheel=None, source: str = "pypi"):
+def mcp_command(inst: dict, newest, uv, pipx, wheel=None, source: str = "pypi", webbee_newest=None):
     """The one command that makes the shell's imperal-mcp the newest with its code extra -- by the tool that installed
     it (uv, else pipx, for a new install) -- or None when it already is, or nothing can do it. ``source`` "git": from
     the stable branches, imperal-sdk and webbee beside it, and an install recorded by a version is moved onto the
-    branch even when its version is the newest (what ``pipx reinstall`` / ``uv tool upgrade`` would put back)."""
+    branch even when its version is the newest (what ``pipx reinstall`` / ``uv tool upgrade`` would put back). The
+    webbee beside it (its code tools) follows webbee's own releases: one newer than it holds upgrades the environment
+    too (live 2026-11-06: webbee 0.7.7 out, imperal-mcp unchanged, its environment kept webbee 0.7.6)."""
     git = source == "git"
     recorded = bool(inst) and on_stable(inst.get("tool") or "", inst.get("prefix") or "", MCP_ENV_SPECS)
-    if inst and inst.get("version") and inst.get("version") == newest and inst.get("code") and (recorded or not git):
+    behind = git and bool(inst) and bool(inst.get("webbee")) and bool(webbee_newest) \
+        and _ver(inst.get("webbee")) < _ver(webbee_newest)
+    if inst and inst.get("version") and inst.get("version") == newest and inst.get("code") and (recorded or not git) \
+            and not behind:
         return None
     if inst and not inst.get("version"):
         return None                         # it did not answer: a working install is never replaced blind
@@ -512,9 +518,13 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
                     say(f"🐝 webbee could not update itself -- run: {_show(cmd)}")
         mcp_newest, mcp_source = _newest(MCP, git, fetch, stable)
         inst = mcp_installed(which, run)
-        cmd = mcp_command(inst, mcp_newest, uv, pipx, wheel, source=mcp_source)
+        cmd = mcp_command(inst, mcp_newest, uv, pipx, wheel, source=mcp_source,
+                          webbee_newest=newest if source == "git" else None)
         if cmd:
-            what = (f"imperal-mcp {inst.get('version') or '?'} -> {mcp_newest or 'source'}" if inst
+            what = (f"imperal-mcp {inst.get('version') or '?'} -> {mcp_newest or 'source'}"
+                    + (f", webbee beside it {inst.get('webbee')} -> {newest}"
+                       if source == "git" and inst.get("webbee") and _ver(inst.get("webbee")) < _ver(newest) else "")
+                    if inst
                     else f"imperal-mcp {mcp_newest or 'from source'}") + (" (git, stable)" if mcp_source == "git" else "")
             say(f"🐝 updating {what} ...")
             if _run(cmd, run):

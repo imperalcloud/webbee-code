@@ -469,3 +469,21 @@ def test_a_git_release_that_does_not_import_is_put_back_by_its_own_tag(tmp_path,
                             stable=lambda d, git: "0.7.5", prefix=venv)
     assert ["/bin/pipx", "install", "--force", au.git_spec("webbee", "v0.7.4")] in run.calls
     assert any("put 0.7.4 back" in s for s in said)
+
+
+def test_the_webbee_beside_imperal_mcp_follows_webbee_s_releases(tmp_path):
+    uv = tmp_path / "uv" / "tools" / "imperal-mcp"
+    uv.mkdir(parents=True)
+    (uv / "uv-receipt.toml").write_text("".join(
+        f'{{ name = "x", git = "{u}?rev=stable" }}\n' for u in au.REPOS.values()))
+    inst = {"tool": "uv", "python": str(uv / "bin" / "python"), "prefix": str(uv), "version": "0.9.5", "code": True,
+            "webbee": "0.7.6"}
+    assert au.mcp_command(inst, "0.9.5", "/bin/uv", None, source="git", webbee_newest="0.7.6") is None
+    assert au.mcp_command(inst, "0.9.5", "/bin/uv", None, source="git", webbee_newest="0.7.7") == [
+        "/bin/uv", "tool", "install", "--force", "--refresh", "--with", SDK_G, "--with", WB, MCP_G]
+    run = _Run(stdout="0.9.5 True 0.7.6")
+    exe = uv / "bin" / "imperal-mcp"
+    exe.parent.mkdir()
+    exe.write_text("")
+    got = au.mcp_installed(which=lambda n: str(exe), run=run)
+    assert got["webbee"] == "0.7.6" and got["code"] is True
