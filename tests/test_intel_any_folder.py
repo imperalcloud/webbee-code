@@ -95,3 +95,24 @@ def test_a_secret_written_later_is_never_read_and_the_profile_names_no_document(
     assert "credentials.json" not in svc.index.files and not any("credentials.json" in o for o in opened)
     prof = svc.repo_profile()
     assert not any("Agreement" in s for s in prof["top_symbols"]) and prof["other_kinds"]["document"] >= 2
+
+
+
+def test_gitignore_applies_without_git(tmp_path, monkeypatch):
+    """06.11 report: in a folder without git (or on a machine without the git binary) no .gitignore applied."""
+    from webbee.intel import service
+    (tmp_path / ".gitignore").write_text("dumps/\n*.png\n")
+    (tmp_path / "dumps").mkdir()
+    (tmp_path / "dumps" / "big.sql").write_text("x")
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG")
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / ".gitignore").write_text("local.py\n")
+    (tmp_path / "sub" / "local.py").write_text("y = 1\n")
+    (tmp_path / "sub" / "keep.py").write_text("z = 1\n")
+    rels, _stats, _skipped = service._index_listing(str(tmp_path))
+    assert "app.py" in rels and "sub/keep.py" in rels
+    assert not {"dumps/big.sql", "shot.png", "sub/local.py"} & set(rels)
+    # the same with git present but failing (no binary): the rules still apply
+    monkeypatch.setattr(service, "_git_listed", lambda root: None)
+    assert "sub/local.py" not in service._index_listing(str(tmp_path))[0]

@@ -171,16 +171,30 @@ def _index_listing(root: str, focus: str | None = None, limit: int = UNIT_MAX_FI
     skipped = {"placeholder": 0, "over_cap": 0}
     excluded = {str(e).strip("/") for e in exclude if str(e).strip("/")}
     listed = _git_listed(root)
+    # no git answer (a folder that is no repository, the repositories inside it, a machine without git -- Windows,
+    # a minimal Linux): every .gitignore on the way applies, read here (06.11 report: none applied, ~19.6k dump and
+    # screenshot files were indexed). The same parser as the SFTP listing (imperal_sdk.code_index.gitignore_rules).
+    from imperal_sdk.code_index import gitignore_rules, gitignored
+    rules: list | None = None if listed is not None else []
     for dp, dns, fns in os.walk(root):
         here = os.path.relpath(dp, root).replace(os.sep, "/")
+        if rules is not None and ".gitignore" in fns:
+            try:
+                with open(os.path.join(dp, ".gitignore"), encoding="utf-8", errors="replace") as fh:
+                    rules = rules + gitignore_rules(fh.read(), "" if here == "." else here)
+            except OSError:
+                pass
         dns[:] = sorted(d for d in dns if not skipped_dir(dp, d)
-                        and (d if here == "." else f"{here}/{d}") not in excluded)
+                        and (d if here == "." else f"{here}/{d}") not in excluded
+                        and not (rules and gitignored(rules, d if here == "." else f"{here}/{d}", True)))
         for fn in sorted(fns):
             rel = fn if here == "." else f"{here}/{fn}"
             if is_placeholder(rel):
                 skipped["placeholder"] += 1
                 continue
             if listed is not None and rel not in listed:
+                continue
+            if rules and gitignored(rules, rel, False):
                 continue
             if kind_of(rel, root=root) is None:
                 continue
