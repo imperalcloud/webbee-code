@@ -1370,7 +1370,7 @@ async def _no_repo_at(sftp, ci, root: str) -> str:
         names = {e.filename for e in await sftp.readdir(repo_root)}
     except Exception:
         names = set()
-    if not names & (set(getattr(ci, "_REPO_MARKERS", (".git",))) | set(getattr(ci, "_MANIFESTS", ()))):
+    if not ci.is_project_root(names):
         return f"{root} is in no repository (no .git or project manifest at it or above)"
     return ""
 

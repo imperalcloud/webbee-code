@@ -1004,9 +1004,8 @@ class IntelService:
 
 # ── code graph everywhere (plan 3 Tasks 7, 9): the local workspace in the vault's one graph ─────────
 
-# what makes a folder a project for the code graph: version control or a manifest of an indexable language at its root
-# (the sdk's config names; Python and JS/TS are what the index reads)
-_MANIFESTS = tuple(indexer.CONFIG_NAMES) + ("setup.py", "requirements.txt", "tsconfig.json")
+# what makes a folder a project for the code graph: version control or any ecosystem's manifest at its root -- the
+# sdk's one rule (``indexer.is_project_root``: Cargo.toml, go.mod, pom.xml, *.csproj, composer.json, Gemfile, ...)
 
 
 SUB_REPOS_MAX = 40     # a folder of projects: at most this many of its repositories are synced
@@ -1039,7 +1038,7 @@ def is_repository(root: str) -> bool:
         names = set(os.listdir(root))
     except OSError:
         return False
-    return ".git" in names or any(m in names for m in _MANIFESTS)
+    return indexer.is_project_root(names)
 
 
 _MACHINE_ID_FILE = os.path.join(os.path.expanduser("~"), ".local", "share", "webbee", "machine-id")
