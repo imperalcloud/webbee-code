@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.10
+
+* Needs imperal-mcp 0.9.7: from a folder of repositories, the MCP's search and orient answers follow one order
+  (an exact name, then the vault's score), and impact keeps the vault's `changed_together` list and count.
+
 ## 0.7.9
 
 Field report 06.11 #3 (a folder of nine repositories on Kubuntu):
