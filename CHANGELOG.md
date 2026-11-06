@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.11
+
+* Needs imperal-mcp 0.9.8: `contract_slice` lists only the endpoints a symbol reaches, with no substring matches.
+* The same day's vault and gateway: one file's callers are each a user (schema 12), the vault resolves links off its
+  event loop, and the gateway waits for a code answer up to 30 s instead of 3 s. A restart that syncs many repos
+  no longer leaves a folder's repos reading "no synced copy".
+
 ## 0.7.10
 
 * Needs imperal-mcp 0.9.7: from a folder of repositories, the MCP's search and orient answers follow one order
