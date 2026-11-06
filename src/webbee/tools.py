@@ -724,7 +724,8 @@ class LocalToolExecutor:
             return {"ok": False, "content": "reversibility is unavailable (no shadow git)"}
         cp = self.shadow.checkpoint(str(a.get("label", "") or "manual"))
         if cp is None:
-            return {"ok": False, "content": "checkpoint failed (shadow git error)"}
+            why = str(getattr(self.shadow, "last_error", "") or "") or "shadow git error"
+            return {"ok": False, "content": f"checkpoint failed: {why}"}
         note = "created" if cp.get("changed") else "no changes since the last checkpoint"
         # what it holds and what it does not, said (2026-10-30: a checkpoint of a folder of repositories held none of
         # their files and said "created")

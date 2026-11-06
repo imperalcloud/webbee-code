@@ -309,3 +309,26 @@ def test_a_path_keeps_its_first_letter_when_the_first_line_is_unstaged(tmp_path,
         return real(*args)
     monkeypatch.setattr(sg, "_git", fake)
     assert sg.checkpoint("x")["paths"] == ["imperal_kernel/x.py", "tests/t.py"]
+
+
+# ── field report 06.11 #3: "checkpoint failed (shadow git error)" five times, its cause never shown ──
+def test_a_failed_checkpoint_says_why(tmp_path, monkeypatch):
+    from webbee import checkpoints as cpm
+    from webbee.tools import LocalToolExecutor
+    sg, root = _sg(tmp_path)
+    _write(root, "a.py", "x = 1\n")
+
+    def slow(deadline):
+        raise cpm._Budget()
+    monkeypatch.setattr(sg, "_stage", slow)
+    assert sg.checkpoint("x") is None and "took longer than" in sg.last_error
+    out = LocalToolExecutor(str(root), shadow=sg).run("checkpoint", {"label": "x"})
+    assert out["ok"] is False and "took longer than" in out["content"] and "shadow git error" not in out["content"]
+
+    def git_fails(deadline):
+        sg.last_error = "adding 3 files to the snapshot failed: fatal: unable to index file"
+        return False, [], []
+    monkeypatch.setattr(sg, "_stage", git_fails)
+    assert sg.checkpoint("y") is None and "unable to index file" in sg.last_error
+    monkeypatch.undo()
+    assert sg.checkpoint("z") and sg.last_error == ""                # a good one clears it

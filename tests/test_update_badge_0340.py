@@ -68,3 +68,27 @@ def test_check_update_bg_reuses_the_same_cache_file_home_uses(tmp_path):
     asyncio.run(_check_update_bg(state2, fetch=_fetch, cache_path=cache))
     assert calls["n"] == 1
     assert state2["checked"] is True
+
+
+# ── field report 06.11 #3: upgraded during the session, the old process ran on unsaid ──
+def test_an_upgrade_during_the_session_is_said_until_the_restart():
+    import asyncio
+
+    from webbee import __version__
+    from webbee.repl import _installed_watch
+    from webbee.update import installed_version, restart_notice
+    assert restart_notice("0.7.8", "0.7.9").startswith("\U0001f41d webbee v0.7.9 is installed, this session still runs v0.7.8")
+    assert restart_notice("0.7.8", "0.7.8") == "" and restart_notice("0.7.8", "") == ""
+    assert installed_version()                                  # this test's own environment answers
+    state, said = {"notice": ""}, []
+    ticks = iter([None, asyncio.CancelledError()])
+
+    async def sleep(_s):
+        t = next(ticks)
+        if t is not None:
+            raise t
+    try:
+        asyncio.run(_installed_watch(state, invalidate=lambda: said.append(1), read=lambda: "99.0.0", sleep=sleep))
+    except asyncio.CancelledError:
+        pass
+    assert f"v99.0.0 is installed, this session still runs v{__version__}" in state["notice"] and said

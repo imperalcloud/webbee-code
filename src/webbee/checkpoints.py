@@ -75,6 +75,12 @@ class _Budget(Exception):
     """The snapshot ran past _SNAPSHOT_BUDGET_S."""
 
 
+def _why(r) -> str:
+    """A failed git run's own words, one short line."""
+    text = " ".join(str(getattr(r, "stderr", "") or getattr(r, "stdout", "") or "").split())
+    return (text[:240] or f"git exited {getattr(r, 'returncode', '?')}")
+
+
 class ShadowGit:
     _DIFF_CAP = 20000
 
@@ -86,6 +92,9 @@ class ShadowGit:
         self.auto_ok = True        # auto-checkpointing enabled (F8 latch below)
         self._auto_fail_streak = 0  # consecutive failed AUTO snapshots
         self.pause_reason = ""      # why auto-checkpointing stopped at once (a too-slow snapshot)
+        # why the last checkpoint failed, said to the agent (field report 06.11 #3: five "checkpoint failed (shadow git
+        # error)" at a folder of nine repositories, the cause -- a budget, a git error -- never shown)
+        self.last_error = ""
 
     def _git(self, *args: str) -> "subprocess.CompletedProcess":
         return self._git_io(list(args))
@@ -243,15 +252,20 @@ class ShadowGit:
         keep, nested, uncovered = self._collect(deadline)
         r = self._git_io(["ls-files", "-z", "-c"], deadline=deadline)
         if r.returncode != 0:
+            self.last_error = f"listing the shadow index failed: {_why(r)}"
             return False, nested, uncovered
         gone = sorted(set(_split_z(r.stdout)) - set(keep))
         for i in range(0, len(gone), _CHUNK):        # first: a gitlink must leave before its files come in
-            if self._git_io(["update-index", "-z", "--force-remove", "--stdin"],
-                            stdin="\0".join(gone[i:i + _CHUNK]) + "\0", deadline=deadline).returncode != 0:
+            g = self._git_io(["update-index", "-z", "--force-remove", "--stdin"],
+                             stdin="\0".join(gone[i:i + _CHUNK]) + "\0", deadline=deadline)
+            if g.returncode != 0:
+                self.last_error = f"removing gone files from the snapshot failed: {_why(g)}"
                 return False, nested, uncovered
         for i in range(0, len(keep), _CHUNK):
-            if self._git_io(["update-index", "-z", "--add", "--remove", "--stdin"],
-                            stdin="\0".join(keep[i:i + _CHUNK]) + "\0", deadline=deadline).returncode != 0:
+            a = self._git_io(["update-index", "-z", "--add", "--remove", "--stdin"],
+                             stdin="\0".join(keep[i:i + _CHUNK]) + "\0", deadline=deadline)
+            if a.returncode != 0:
+                self.last_error = f"adding {len(keep)} files to the snapshot failed: {_why(a)}"
                 return False, nested, uncovered
         return True, nested, uncovered
 
@@ -294,7 +308,9 @@ class ShadowGit:
         `force=True` always records a new checkpoint even with nothing dirty
         -- used by rollback() for its mandatory pre-rollback safety snapshot,
         which must exist even when the workspace already matches HEAD."""
+        self.last_error = ""
         if not self.available:
+            self.last_error = "the shadow history could not be set up for this workspace"
             return None
         try:
             deadline = time.monotonic() + _SNAPSHOT_BUDGET_S
@@ -320,6 +336,7 @@ class ShadowGit:
                 args.append("--allow-empty")      # first-ever baseline / forced snapshot
             c = self._git(*args)
             if c.returncode != 0:
+                self.last_error = f"the snapshot commit failed: {_why(c)}"
                 return None
             sha = self._git("rev-parse", "--short", "HEAD").stdout.strip()
             n = self._count() + 1
@@ -332,8 +349,11 @@ class ShadowGit:
             self._drop_stale_lock()
             self.auto_ok = False
             self.pause_reason = (f"a snapshot of this workspace took longer than {int(_SNAPSHOT_BUDGET_S)}s")
+            self.last_error = (self.pause_reason + " (the staged part is kept: checkpoint again to go on, or "
+                               "checkpoint inside one repository of this folder)")
             return None
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
             return None
 
     def list_checkpoints(self, limit: int = 10) -> list:

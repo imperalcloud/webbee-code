@@ -669,6 +669,28 @@ async def _live_session_watch(cfg, token_provider, workspace, live: dict,
         await _sleep(interval)
 
 
+async def _installed_watch(update_state: dict, *, invalidate=None, every: float = 300.0, read=None,
+                           sleep=None) -> None:
+    """Every few minutes: the webbee on disk against the one running -- an upgrade during the session (pipx, uv, another
+    terminal's start) is said in the toolbar until the restart (field report 06.11 #3). Never raises."""
+    from webbee import __version__
+    from webbee.update import installed_version, restart_notice
+    read = read or installed_version
+    sleep = sleep or asyncio.sleep
+    while True:
+        try:
+            await sleep(every)
+            notice = restart_notice(__version__, await asyncio.to_thread(read))
+            if notice and update_state.get("notice") != notice:
+                update_state["notice"] = notice
+                if invalidate is not None:
+                    invalidate()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
 async def _check_update_bg(update_state: dict, *, invalidate=None,
                            fetch=None, cache_path=None) -> None:
     """One-shot background PyPI freshness check for the toolbar's version
@@ -1928,6 +1950,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 _update_state: dict = {"notice": "", "checked": None}
                 home_slot.bg_tasks.append(asyncio.ensure_future(
                     _check_update_bg(_update_state, invalidate=_invalidate_dock)))
+                home_slot.bg_tasks.append(asyncio.ensure_future(
+                    _installed_watch(_update_state, invalidate=_invalidate_dock)))
 
                 async def _on_line(text: str, slot: SessionSlot) -> None:
                     if await _handle(text, slot) == "exit":

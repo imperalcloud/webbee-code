@@ -80,3 +80,27 @@ def check_for_update(current: str, *, cache_path, now: float, fetch, ttl: float 
     Kept as-is (boot's banner path); `check_update_status` adds the verdict."""
     return _notice_for(current, _resolve_latest(
         current, cache_path=cache_path, now=now, fetch=fetch, ttl=ttl)) or None
+
+
+def installed_version(python: str = "", run=None) -> str:
+    """The webbee version on disk now, read by a fresh interpreter (this process's own metadata is what it started
+    with). "" when it cannot be read. Never raises."""
+    import subprocess
+    import sys
+    run = run or subprocess.run
+    try:
+        got = run([python or sys.executable, "-c", "import sys; sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "
+                   "import importlib.metadata as m; print(m.version('webbee'))"],
+                  capture_output=True, text=True, timeout=20)
+        return str(got.stdout or "").strip() if got.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def restart_notice(running: str, installed: str) -> str:
+    """Field report 06.11 #3: a pipx upgrade during a session left the old process running, and `webbee --version`
+    (read from disk) said the new one. Said in the toolbar until the session restarts."""
+    if installed and _ver(installed) and _ver(installed) != _ver(running):
+        return (f"\U0001f41d webbee v{installed} is installed, this session still runs v{running} "
+                "\u2014 restart webbee to use it")
+    return ""
