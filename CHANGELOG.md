@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.9
+
+Field report 06.11 #3 (a folder of nine repositories on Kubuntu):
+* A failed `checkpoint` says why: the 30 s budget of a big folder, or git's own error. Before, every failure read
+  "checkpoint failed (shadow git error)".
+* An upgrade while a session runs (pipx, uv, another terminal) is shown in the toolbar until you restart webbee.
+  Before, the old process ran on and `webbee --version` read the new one from disk.
+* Needs imperal-mcp 0.9.6 and imperal-sdk 6.5.3. With them, `contract_slice` reaches endpoints through their
+  handlers' calls, and `graph_slice` / `contract_slice` work at a folder of repositories.
+* The kernel side of the same report: co-changed files stand apart from real users in `impact_of_change`,
+  `search_code` follows one score, `orient` shows matches first, repository rows are named, `contract_slice` is in
+  the agent's tools, and `checkpoint` / `diff` / `rollback` come with the code tools.
+
 ## 0.7.8
 
 * The webbee beside the shell's imperal-mcp (its code tools) follows webbee's releases. Live: webbee 0.7.7 was out,
