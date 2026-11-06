@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.6
+
+* **Always the newest release, from git** (06.11: `pipx reinstall webbee` put back 0.6.7 while 0.7.5 was out).
+  * pipx and uv install again what they recorded. The upgrade at the start had recorded a release's own wheel
+    address, so a reinstall went back to that release.
+  * webbee, imperal-mcp and imperal-sdk now come from their repositories' `stable` branch, which each release's CI
+    moves to its tag. The newest release is read from git itself (the tag `stable` stands on), never from an index
+    that trails it.
+  * What pipx / uv record is the branch: `pipx reinstall`, `pipx upgrade --include-injected` and `uv tool upgrade`
+    bring the newest release. An install still recorded by a version is moved onto the branch once, even on the
+    newest release.
+  * `install.sh` installs from the branch too. No git, GitHub out of reach, or the light install of Python 3.7-3.9:
+    PyPI, as before.
+
 ## 0.7.5
 
 * Needs imperal-mcp 0.9.5:
