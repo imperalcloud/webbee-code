@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.3
+
+* **A folder of repositories is a folder** (second 06.11 report).
+  * Repositories nested deeper (`core/<repo>`, `modules/<repo>`) are found, up to four levels.
+  * Each repository syncs on its own, even when the folder's top holds loose scripts or a manifest. Before, the
+    whole folder was one 670-file project.
+  * Imports are resolved inside each repository first; a package another repository provides is linked to it.
+* **The cloud graph answers from the first minute.**
+  * While the session's first sync runs, the vault answers with the keys it confirmed last time, and the answer
+    says so.
+  * "pending" ends with that first run. Before, every tool call queued a sync and the kernel always met one running.
+* **Facts, not names.**
+  * The `read_file` header lists only the files whose references resolve to the file (it said "used by
+    check-paths-agree.py, +50 more").
+  * `graph_slice` callers are the real calls, with line and caller.
+  * `impact_of_change` says in one sentence what it found, including name-only matches as unproven.
+* Python members resolve through typed locals, `self` attributes and return annotations.
+* Needs imperal-mcp 0.9.3 and imperal-sdk 6.5.1.
+
 ## 0.7.2
 
 * **The code graph answers correctly** (06.11 report):
