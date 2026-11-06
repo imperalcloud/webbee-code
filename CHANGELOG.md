@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.8
+
+* The webbee beside the shell's imperal-mcp (its code tools) follows webbee's releases. Live: webbee 0.7.7 was out,
+  imperal-mcp had no new release, and its environment kept webbee 0.7.6 because only imperal-mcp's version was
+  compared.
+
 ## 0.7.7
 
 * `pipx reinstall webbee` brings the newest release for real (live check of 0.7.6: it still gave 0.7.5).
