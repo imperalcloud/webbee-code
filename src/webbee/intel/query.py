@@ -189,8 +189,8 @@ def contract_slice(svc, query: str = "", kind: str = "all", k: int = 50) -> dict
 # The local answer of ``impact_of_change`` computes links the way the vault's graph does (imperal_sdk.code_links,
 # 2026-11-06): before, a file "depended" on a symbol when the bare NAME appeared in it, and each depth step pulled in
 # every definition of every hit file -- a function nobody calls answered 481 files (06.11 report).
-_SCOPE_LANGS = ("python", "typescript", "tsx", "javascript")
-_CONFIG_NAMES = ("pyproject.toml", "setup.cfg", "package.json", "jsconfig.json")
+# which files carry scope facts and which are resolution configs: the SDK's one answer (Python, TS/JS, Vue/Svelte/Astro,
+# Go, Rust, Java, Kotlin, C#, PHP, Ruby; go.mod, Cargo.toml, tsconfig, package.json ...) -- never a list of our own
 _FACTS: dict = {}            # (root, path, content_hash) -> BlobFacts | None: a file parsed once per content
 _FACTS_MAX = 60000
 _READ_MAX = 2_000_000
@@ -209,9 +209,8 @@ def _read(root: str, rel: str):
 
 
 def _is_config(rel: str) -> bool:
-    import posixpath
-    b = posixpath.basename(rel).lower()
-    return b in _CONFIG_NAMES or (b.startswith("tsconfig") and b.endswith(".json"))
+    from imperal_sdk.code_index import is_resolution_config
+    return is_resolution_config(rel)
 
 
 def linker(svc):
@@ -228,7 +227,7 @@ def linker(svc):
         _FACTS.clear()
     facts: dict = {}
     for path, fi in list(svc.index.files.items()):
-        if getattr(fi, "lang", "") not in _SCOPE_LANGS:
+        if not ci.has_scope_facts(path):
             continue
         key = (root, path, getattr(fi, "content_hash", ""))
         if key not in _FACTS:
@@ -261,6 +260,7 @@ def impact_of_change(svc, symbols) -> dict:
         return {"ok": False, "content": "index not ready"}
     if isinstance(symbols, str):
         symbols = [symbols]
+    from imperal_sdk.code_index import has_scope_facts
     from imperal_sdk.code_links import BY_NAME_SHOWN, impact, is_test_path
     syms = [str(s) for s in (symbols or []) if str(s).strip()]
     out = impact(linker(svc), syms, depth=2)
@@ -269,7 +269,7 @@ def impact_of_change(svc, symbols) -> dict:
     known = {b["path"] for b in out["by_name"]} | {i["id"] for i in out["data"]["items"]}
     extra = []
     for path, fi in svc.index.files.items():
-        if getattr(fi, "lang", "") in _SCOPE_LANGS or path in known:
+        if has_scope_facts(path) or path in known:
             continue
         if names & set(getattr(fi, "refs", ()) or ()):
             extra.append({"path": path, "line": 0, "name": "", "group": "tests" if is_test_path(path) else "code",
