@@ -17,6 +17,8 @@ jobs:
       contents: write   # create the GitHub Release for the tag
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the stable branch moves only forward (an ancestor check)
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -28,6 +30,17 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+      # The `stable` branch is what every install from git names (webbee autoupdate, `pipx reinstall`, `uv tool
+      # upgrade`): moved here to the release just published -- only forward, a re-run of an older tag leaves it.
+      - name: Move the stable branch to this release
+        run: |
+          if git ls-remote --exit-code origin refs/heads/stable >/dev/null; then
+            git fetch -q origin stable
+            if git merge-base --is-ancestor HEAD FETCH_HEAD; then
+              echo "stable is already at or past this release"; exit 0
+            fi
+          fi
+          git push origin "HEAD:refs/heads/stable"
       # Mirror the PyPI release as a GitHub Release (so the repo's Releases
       # sidebar tracks the latest version) with notes from CHANGELOG.md.
       - name: Create GitHub Release

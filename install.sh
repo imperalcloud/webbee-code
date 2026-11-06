@@ -1,5 +1,8 @@
 #!/bin/sh
 # Webbee installer — bootstraps uv (which brings its own Python) then installs webbee.
+# Always the newest release, straight from git: webbee, imperal-mcp and imperal-sdk from their repositories'
+# `stable` branch, which every release moves to its tag. uv records the branch, never a version, so running this
+# again, or `uv tool upgrade webbee`, brings the newest release. No git on the machine: the newest from PyPI.
 set -e
 
 if ! command -v uv >/dev/null 2>&1; then
@@ -9,11 +12,17 @@ if ! command -v uv >/dev/null 2>&1; then
   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 fi
 
-echo "Installing webbee…"
-# The code index (tree-sitter) and its semantic arm (model2vec) are BASE
-# dependencies since 0.3.51 — no extras needed. The [intel,intel-embed] names
-# still exist as empty aliases, so older copies of this script keep working.
-uv tool install "webbee"
+GH="https://github.com/imperalcloud"
+if command -v git >/dev/null 2>&1; then
+  echo "Installing webbee (newest release, from git)…"
+  uv tool install --force --refresh \
+    --with "imperal-mcp[code] @ git+$GH/imperal-mcp.git@stable" \
+    --with "imperal-sdk[universal-index] @ git+$GH/imperal-sdk.git@stable" \
+    "webbee @ git+$GH/webbee-code.git@stable"
+else
+  echo "Installing webbee (newest release, from PyPI: no git here)…"
+  uv tool install --force --refresh "webbee"
+fi
 
 echo ""
 echo "✅ webbee installed. Start it with:  webbee"

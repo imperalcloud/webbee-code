@@ -299,3 +299,169 @@ def test_an_upgrader_that_dies_during_the_wait_is_taken_over(tmp_path):
                             which=_which({"pipx": "/bin/pipx"}), run=run, env={}, execv=lambda p, a: None,
                             lock_path=lambda: str(lock), sleep=sleep)
     assert len(slept) == 1 and any("webbee==0.6.5" in c for c in run.calls)
+
+
+# ── owner 2026-11-06: always the newest, from git. Live: `pipx reinstall webbee` put back 0.6.7 while 0.7.5 was out --
+#    pipx had recorded 0.6.7's wheel address and reinstalls its record; the record is now the stable branch ──
+WB, MCP_G, SDK_G = au.git_spec(au.DIST), au.git_spec(au.MCP), au.git_spec(au.SDK)
+H_OLD, H_NEW, H_TAG = "a" * 40, "b" * 40, "c" * 40
+
+
+def _ls_remote(stable_sha):
+    lines = [f"{H_OLD}\trefs/tags/v0.7.4",                       # a lightweight tag
+             f"{H_TAG}\trefs/tags/v0.7.5", f"{H_NEW}\trefs/tags/v0.7.5^{{}}",   # an annotated one: its commit
+             f"{stable_sha}\trefs/heads/stable"]
+    return lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="\n".join(lines) + "\n", stderr="")
+
+
+def test_the_newest_release_is_the_tag_the_stable_branch_stands_on():
+    assert au.stable_version("webbee", "/bin/git", run=_ls_remote(H_NEW)) == "0.7.5"
+    assert au.stable_version("webbee", "/bin/git", run=_ls_remote(H_OLD)) == "0.7.4"
+    assert au.stable_version("webbee", "/bin/git", run=_ls_remote("d" * 40)) is None   # between tags: not a release
+    assert au.stable_version("webbee", None) is None                                    # no git
+    failed = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 128, stdout="", stderr="")   # noqa: E731
+    assert au.stable_version("webbee", "/bin/git", run=failed) is None                  # GitHub out of reach
+    seen = []
+    au.stable_version("imperal-sdk", "/bin/git", run=lambda cmd, **kw: seen.append((cmd, kw)) or 1 / 0)
+    assert seen[0][0][:3] == ["/bin/git", "ls-remote", au.REPOS["imperal-sdk"]]
+    assert seen[0][1]["env"]["GIT_TERMINAL_PROMPT"] == "0"                              # never waits on a prompt
+
+
+def test_the_spec_is_the_branch_never_a_version():
+    assert WB == "webbee @ git+https://github.com/imperalcloud/webbee-code.git@stable"
+    assert MCP_G == "imperal-mcp[code] @ git+https://github.com/imperalcloud/imperal-mcp.git@stable"
+    assert SDK_G == "imperal-sdk[universal-index] @ git+https://github.com/imperalcloud/imperal-sdk.git@stable"
+    assert au.MCP_GIT_SPEC == MCP_G
+
+
+def _pipx_venv(tmp_path, main, injected=()):
+    import json
+    venv = tmp_path / "pipx" / "venvs" / "webbee"
+    venv.mkdir(parents=True)
+    (venv / "pipx_metadata.json").write_text(json.dumps({
+        "main_package": {"package_or_url": main},
+        "injected_packages": {s.split()[0]: {"package_or_url": s} for s in injected}}))
+    return str(venv)
+
+
+def test_what_pipx_and_uv_recorded_is_read(tmp_path):
+    pinned = _pipx_venv(tmp_path / "a", "webbee @ https://files.pythonhosted.org/x/webbee-0.6.7-py3-none-any.whl")
+    assert not au.on_stable("pipx", pinned, ("webbee",))
+    good = _pipx_venv(tmp_path / "b", WB, (MCP_G, SDK_G))
+    assert au.on_stable("pipx", good, ("webbee", "imperal-mcp", "imperal-sdk"))
+    half = _pipx_venv(tmp_path / "c", WB)                                     # its packages still from PyPI
+    assert not au.on_stable("pipx", half, ("webbee", "imperal-mcp"))
+    uv = tmp_path / "uv" / "tools" / "imperal-mcp"
+    uv.mkdir(parents=True)
+    (uv / "uv-receipt.toml").write_text('[tool]\nrequirements = [{ name = "imperal-mcp", extras = ["code"], '
+                                        'specifier = "==0.9.5" }]\n')
+    assert not au.on_stable("uv", str(uv), ("imperal-mcp",))
+    (uv / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [\n'
+        '    { name = "imperal-mcp", extras = ["code"], git = "https://github.com/imperalcloud/imperal-mcp.git?rev=stable" },\n'
+        '    { name = "imperal-sdk", extras = ["universal-index"], git = "https://github.com/imperalcloud/imperal-sdk.git?rev=stable" },\n'
+        '    { name = "webbee", git = "https://github.com/imperalcloud/webbee-code.git?rev=stable" },\n]\n')
+    assert au.on_stable("uv", str(uv), ("imperal-mcp", "imperal-sdk", "webbee"))
+    assert not au.on_stable("pipx", str(tmp_path / "missing"), ("webbee",))   # unreadable: moved, never assumed
+    assert au.on_stable("pip", "/venv", ("webbee",))                          # plain pip keeps no record
+
+
+def test_from_git_each_tool_installs_and_records_the_branch():
+    uv = au.self_command("0.7.5", prefix="/u/.local/share/uv/tools/webbee", env={}, uv="/bin/uv", source="git")
+    assert uv == ["/bin/uv", "tool", "install", "--force", "--refresh", "--with", MCP_G, "--with", SDK_G, WB]
+    px = au.self_command("0.7.5", prefix="/h/.local/pipx/venvs/webbee", env={}, pipx="/bin/pipx", source="git")
+    assert px == [["/bin/pipx", "install", "--force", WB], ["/bin/pipx", "inject", "--force", "webbee", MCP_G, SDK_G]]
+    kept = au.self_command("0.7.5", prefix="/h/.local/pipx/venvs/webbee", env={}, pipx="/bin/pipx", source="git",
+                           record=False)                                    # already on the branch: its own record
+    assert kept == ["/bin/pipx", "upgrade", "--include-injected", "webbee"]
+    pip = au.self_command("0.7.5", prefix="/v", executable="/v/bin/python", env={}, source="git")
+    assert pip == ["/v/bin/python", "-m", "pip", "install", "--upgrade", "--no-cache-dir", WB, MCP_G, SDK_G]
+    light = au.self_command("0.7.5", env={au.LIGHT_ENV: "/usr/bin/python3.7"}, source="git", wheel=None)
+    assert light[-1] == "webbee==0.7.5"                                     # 3.7 builds nothing from source: PyPI
+
+
+def test_the_same_release_recorded_by_a_version_is_moved_onto_the_branch(tmp_path):
+    venv = _pipx_venv(tmp_path, "webbee @ https://files.pythonhosted.org/x/webbee-0.7.5-py3-none-any.whl")
+    run, execd, env, said = _Run(), [], {}, []
+    stable = {"webbee": "0.7.5", "imperal-mcp": "0.9.5"}.get
+    au.upgrade_before_start(["--once"], "0.7.5", say=said.append, fetch=lambda d: 1 / 0, wheel=None,
+                            which=_which({"pipx": "/bin/pipx", "git": "/bin/git"}), run=run, env=env,
+                            execv=lambda p, a: execd.append(a), lock_path=lambda: str(tmp_path / "upgrade.lock"),
+                            stable=lambda d, git: stable(d), prefix=venv)
+    assert ["/bin/pipx", "install", "--force", WB] in run.calls
+    assert ["/bin/pipx", "inject", "--force", "webbee", MCP_G, SDK_G] in run.calls
+    assert execd and any("onto its release branch" in s for s in said)
+
+
+def test_on_the_branch_and_newest_nothing_is_installed(tmp_path, monkeypatch):
+    venv = _pipx_venv(tmp_path, WB, (MCP_G, SDK_G))
+    exe = tmp_path / "pipx" / "venvs" / "imperal-mcp" / "bin" / "imperal-mcp"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    _pipx_venv(tmp_path / "m", MCP_G, (SDK_G, WB))
+    import shutil
+    shutil.copy(tmp_path / "m" / "pipx" / "venvs" / "webbee" / "pipx_metadata.json", exe.parent.parent)
+    monkeypatch.setattr(au, "find_uv", lambda which=None: None)
+    run = _Run(stdout="0.9.5 True")
+    au.upgrade_before_start([], "0.7.5", say=lambda m: None, fetch=lambda d: 1 / 0, wheel=None,
+                            which=_which({"pipx": "/bin/pipx", "git": "/bin/git", "imperal-mcp": str(exe)}), run=run,
+                            env={}, execv=lambda *a: 1 / 0, lock_path=lambda: str(tmp_path / "upgrade.lock"),
+                            stable=lambda d, git: {"webbee": "0.7.5", "imperal-mcp": "0.9.5"}[d], prefix=venv)
+    assert not any("install" in c or "upgrade" in c or "inject" in c for c in run.calls)
+
+
+def test_a_newer_release_on_the_branch_is_taken_by_the_install_s_own_record(tmp_path):
+    venv = _pipx_venv(tmp_path, WB, (MCP_G, SDK_G))
+    run, execd = _Run(), []
+    au.upgrade_before_start([], "0.7.4", say=lambda m: None, fetch=lambda d: 1 / 0, wheel=None,
+                            which=_which({"pipx": "/bin/pipx", "git": "/bin/git"}), run=run, env={},
+                            execv=lambda p, a: execd.append(a), lock_path=lambda: str(tmp_path / "upgrade.lock"),
+                            stable=lambda d, git: "0.7.5", prefix=venv)
+    assert run.calls[0] == ["/bin/pipx", "upgrade", "--include-injected", "webbee"] and execd
+
+
+def test_no_git_or_github_out_of_reach_falls_back_to_pypi(tmp_path):
+    run = _Run()
+    au.upgrade_before_start([], "0.7.4", say=lambda m: None, fetch={"webbee": "0.7.5"}.get, wheel=None,
+                            which=_which({"pipx": "/bin/pipx", "git": "/bin/git"}), run=run, env={},
+                            execv=lambda p, a: None, lock_path=lambda: str(tmp_path / "upgrade.lock"),
+                            stable=lambda d, git: None, prefix="/h/.local/pipx/venvs/webbee")
+    assert run.calls[0][-1] == "webbee==0.7.5"
+
+
+def test_the_shell_s_imperal_mcp_recorded_by_a_version_is_moved_onto_the_branch(tmp_path):
+    uv = tmp_path / "uv" / "tools" / "imperal-mcp"
+    uv.mkdir(parents=True)
+    (uv / "uv-receipt.toml").write_text('[tool]\nrequirements = [{ name = "imperal-mcp", extras = ["code"], '
+                                        'specifier = "==0.9.5" }]\n')
+    inst = {"tool": "uv", "python": str(uv / "bin" / "python"), "prefix": str(uv), "version": "0.9.5", "code": True}
+    assert au.mcp_command(inst, "0.9.5", "/bin/uv", None) is None               # PyPI: nothing to do
+    assert au.mcp_command(inst, "0.9.5", "/bin/uv", None, source="git") == [
+        "/bin/uv", "tool", "install", "--force", "--refresh", "--with", SDK_G, "--with", WB, MCP_G]
+    assert au.mcp_command(dict(inst, version="0.9.6"), "0.9.5", "/bin/uv", None, source="git") is None  # own build
+    assert au.mcp_command({}, "0.9.5", None, "/bin/pipx", source="git") == [
+        ["/bin/pipx", "install", "--force", MCP_G], ["/bin/pipx", "inject", "--force", "imperal-mcp", SDK_G, WB]]
+
+
+def test_the_steps_of_one_install_stop_at_the_first_that_fails():
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+    assert au._run([["/bin/pipx", "install", "x"], ["/bin/pipx", "inject", "y"]], run) is False
+    assert len(calls) == 1
+    shown = au._show([["/bin/pipx", "install", "--force", WB], ["/bin/pipx", "inject", "--force", "webbee", MCP_G]])
+    assert shown == f"/bin/pipx install --force '{WB}' && /bin/pipx inject --force webbee '{MCP_G}'"
+
+
+def test_a_git_release_that_does_not_import_is_put_back_by_its_own_tag(tmp_path, monkeypatch):
+    _checks(monkeypatch, [False, False, True])
+    venv = _pipx_venv(tmp_path, WB, (MCP_G, SDK_G))
+    run, said = _Run(), []
+    au.upgrade_before_start([], "0.7.4", say=said.append, fetch=lambda d: 1 / 0, wheel=None,
+                            which=_which({"pipx": "/bin/pipx", "git": "/bin/git"}), run=run, env={},
+                            execv=lambda *a: 1 / 0, lock_path=lambda: str(tmp_path / "upgrade.lock"),
+                            stable=lambda d, git: "0.7.5", prefix=venv)
+    assert ["/bin/pipx", "install", "--force", au.git_spec("webbee", "v0.7.4")] in run.calls
+    assert any("put 0.7.4 back" in s for s in said)

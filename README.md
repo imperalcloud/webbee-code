@@ -35,6 +35,11 @@ pipx install webbee
 # or:  pip install webbee        (inside a virtual environment)
 ```
 
+Always the newest release: at its start webbee moves itself, imperal-mcp and imperal-sdk onto their git repositories'
+`stable` branch (each release moves it to its tag) and records that branch, never a version. From then on
+`pipx reinstall webbee`, `pipx upgrade --include-injected webbee` and `uv tool upgrade webbee` all bring the newest
+release. Without git on the machine it stays on PyPI.
+
 No Python tools at hand? One line installs [uv](https://docs.astral.sh/uv/) (it brings its own Python) and webbee:
 
 ```sh
