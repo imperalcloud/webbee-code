@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.4
+
+* An impact's second step follows only the definition that uses the symbol (imperal-sdk 6.5.2): a module-level use
+  is never "the whole file".
+* Needs imperal-mcp 0.9.4 and imperal-sdk 6.5.2.
+
 ## 0.7.3
 
 * **A folder of repositories is a folder** (second 06.11 report).
