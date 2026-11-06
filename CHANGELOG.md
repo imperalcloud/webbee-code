@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.5
+
+* Needs imperal-mcp 0.9.5:
+  * a question from a folder of repositories asks them at once;
+  * a repository that did not answer is named, never read as "not a definition".
+
 ## 0.7.4
 
 * An impact's second step follows only the definition that uses the symbol (imperal-sdk 6.5.2): a module-level use
