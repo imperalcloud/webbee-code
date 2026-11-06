@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import json
 import os
 import subprocess
 import sys
@@ -754,9 +755,10 @@ class IntelService:
         if rels is not None:            # a change: only the repositories it touched, with their own paths
             by_repo: dict = {}
             for rel in rels:
-                head, _, tail = str(rel).replace(os.sep, "/").partition("/")
-                if head in subs and tail:
-                    by_repo.setdefault(head, []).append(tail)
+                rel = str(rel).replace(os.sep, "/")
+                head = repo_of(rel, subs)
+                if head and rel != head:
+                    by_repo.setdefault(head, []).append(rel[len(head) + 1:])
             todo = {name: by_repo[name] for name in by_repo}
         else:
             todo = {name: None for name in subs}
@@ -766,6 +768,8 @@ class IntelService:
             if out.get("repo_key"):
                 repos[name] = str(out["repo_key"])
         out = {"repo_key": "", "repos": repos}
+        if repos and rels is None:
+            remember_keys(self.root, out)
         if repos:
             self.last_sync = out
             self.last_sync_ok_at = time.time()
@@ -815,6 +819,8 @@ class IntelService:
                     return out
                 measured = co_change_pairs(root) if rels is None and history else None
                 out = asyncio.run(vault_sync(factory(), meta, listing, read, measured))
+                if out.get("repo_key") and rels is None and os.path.realpath(root) == os.path.realpath(self.root):
+                    remember_keys(root, out)
                 if sig and out.get("repo_key"):
                     self._synced_sigs[root] = (sig, str(out["repo_key"]), time.time())
                 elif rels is not None:
@@ -844,10 +850,16 @@ class IntelService:
         extract + embed, minutes) it answers at once ``{pending}`` -- a state, not a failure. ``wait_s``: tests only."""
         if self.vault_client_factory is None:
             return {"ok": False, "content": "this session cannot reach the cloud"}
-        if not self.last_sync and self._sync_busy():
-            # the repo's first sync (a whole repo: extract + embed) is still running: answered at once, as a state
-            return {"pending": "the first code sync of this workspace is still running -- the local index answers "
-                               "until it ends"}
+        if self._sync_done == 0 and self._sync_busy():
+            # the session's FIRST sync is still running (a whole repo: extract + embed): answered at once, as a state
+            # -- with the keys the vault confirmed for this folder last time, so the cloud graph answers meanwhile
+            # (marked by its age). Only the first run: after it, each answer waits for its own sync (report 06.11 #2:
+            # every tool call queued a sync and every kernel ask met one running -- "pending" for a whole session)
+            known = remembered_keys(self.root)
+            return {"pending": "the first code sync of this workspace is still running -- "
+                               + ("the cloud graph answers from the last confirmed sync"
+                                  if known else "the local index answers until it ends"),
+                    **({"known": known} if known else {})}
         ticket = self._sync_request(None, history=False)
         with self._sync_cv:
             done = self._sync_cv.wait_for(lambda: self._sync_done >= ticket, timeout=wait_s)
@@ -1009,36 +1021,108 @@ class IntelService:
 
 
 SUB_REPOS_MAX = 40     # a folder of projects: at most this many of its repositories are synced
+REPO_DEPTH = 4         # repositories are looked for this deep (~/Projects/<org>/<repo>, a folder's core/<repo>)
+_REPOS_TTL_S = 30.0    # a folder's repositories, remembered this long (is_repository asks on every tool call)
+_REPOS_SEEN: dict = {}
+
+
+def find_repositories(root: str, depth: int = REPO_DEPTH) -> list:
+    """The repositories inside ``root`` (folders holding ``.git``: a directory, or a file in a worktree), as
+    root-relative posix paths, at most ``depth`` levels down -- never under a hidden, skipped or linked folder, never
+    inside another repository (report 06.11 #2: core/wpanel-sdk, modules/wpanel-tickets were one level too deep and
+    the whole folder became one project). The ONE rule for Webbee and imperal-mcp."""
+    key = (os.path.realpath(root), int(depth))
+    hit = _REPOS_SEEN.get(key)
+    if hit and time.monotonic() - hit[0] < _REPOS_TTL_S:
+        return list(hit[1])
+    out: list = []
+    frontier = [""]
+    for _ in range(max(1, int(depth))):
+        nxt: list = []
+        for rel in frontier:
+            here = os.path.join(root, rel) if rel else root
+            try:
+                names = sorted(os.listdir(here))
+            except OSError:
+                continue
+            for name in names:
+                full = os.path.join(here, name)
+                if os.path.islink(full) or not os.path.isdir(full) or skipped_dir(here, name):
+                    continue
+                child = f"{rel}/{name}" if rel else name
+                (out if os.path.exists(os.path.join(full, ".git")) else nxt).append(child)
+        frontier = nxt
+    _REPOS_SEEN[key] = (time.monotonic(), tuple(out))
+    return out
 
 
 def sub_repositories(root: str) -> list:
-    """The repositories directly inside a folder that is none itself: sub-folders with ``.git`` (never a link, never a
-    hidden folder; a manifest alone does not make a sub-folder a project here), sorted, bounded."""
-    try:
-        names = sorted(os.listdir(root))
-    except OSError:
-        return []
-    out = []
-    for name in names:
-        full = os.path.join(root, name)
-        if name.startswith(".") or os.path.islink(full) or not os.path.isdir(full):
-            continue
-        try:
-            if ".git" in os.listdir(full):
-                out.append(name)
-        except OSError:
-            continue
-    return out[:SUB_REPOS_MAX]
+    """The repositories inside a folder that is none itself (``find_repositories``), sorted, bounded."""
+    return find_repositories(root)[:SUB_REPOS_MAX]
 
 
 def is_repository(root: str) -> bool:
-    """A repository the code graph may hold: ``.git`` (a dir, or a file in a worktree) or a project manifest at the
-    root. A home folder or a folder of projects is none -- its repositories are synced one by one (owner 2026-10-25)."""
+    """A repository the code graph may hold as ONE: ``.git`` at the root; without it, a folder holding repositories
+    is a folder of them (each synced on its own -- even with a manifest or loose scripts at the top, report 06.11
+    #2); otherwise any ecosystem's manifest makes it a project without version control. A home folder or a folder
+    of projects is none (owner 2026-10-25)."""
     try:
         names = set(os.listdir(root))
     except OSError:
         return False
+    if ".git" in names:
+        return True
+    if find_repositories(root):
+        return False
     return indexer.is_project_root(names)
+
+
+def repo_of(rel: str, repos) -> str:
+    """The repository of a folder-relative path: the longest repository path it lies under, or ""."""
+    rel = str(rel).replace(os.sep, "/").lstrip("./")
+    best = ""
+    for r in repos or ():
+        if (rel == r or rel.startswith(r + "/")) and len(r) > len(best):
+            best = r
+    return best
+
+
+# the vault's keys of the repositories this machine last synced (a new session answers from the cloud graph while
+# its own first sync still runs -- report 06.11 #2: a whole session ran on the local index)
+_KEYS_FILE = os.path.join(os.path.expanduser("~"), ".local", "share", "webbee", "vault-keys.json")
+
+
+def remembered_keys(root: str) -> dict:
+    """``{repo_key | repos, synced_at}`` the vault last confirmed for ``root`` on this machine, or {}."""
+    try:
+        with open(_KEYS_FILE, encoding="utf-8") as f:
+            got = json.load(f).get(os.path.realpath(root)) or {}
+        return got if isinstance(got, dict) and (got.get("repo_key") or got.get("repos")) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def remember_keys(root: str, out: dict) -> None:
+    keys = {k: out[k] for k in ("repo_key", "repos") if out.get(k)}
+    if not keys:
+        return
+    try:
+        try:
+            with open(_KEYS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            data = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            data = {}
+        data[os.path.realpath(root)] = {**keys, "synced_at": time.time()}
+        if len(data) > 200:          # bounded: the newest roots
+            data = dict(sorted(data.items(), key=lambda kv: -float((kv[1] or {}).get("synced_at") or 0))[:200])
+        os.makedirs(os.path.dirname(_KEYS_FILE), exist_ok=True)
+        tmp = _KEYS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, _KEYS_FILE)
+    except OSError:
+        pass
 
 
 _MACHINE_ID_FILE = os.path.join(os.path.expanduser("~"), ".local", "share", "webbee", "machine-id")

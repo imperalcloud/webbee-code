@@ -538,13 +538,20 @@ def test_read_header_enriched_with_graph_context(tmp_path):
             Symbol("helper", "function", "a.py", 4, 5)]),
         "b.py": FileIndex(path="b.py", lang="python", refs=["Alpha"]),
     })
-    class _Svc:  # duck-typed IntelService: .index + .graph is all the header reads
+    class _Svc:  # duck-typed IntelService: .root + .index + .graph is all the header reads
+        root = str(tmp_path)
         index = idx
         graph = CodeGraph(idx)
     ex = LocalToolExecutor(str(tmp_path), indexer=_Svc())
     header = ex.run("read_file", {"path": "a.py"})["content"].split("\n", 1)[0]
     assert "defines Alpha, helper" in header
     assert "↔ used by b.py" in header
+    # 06.11 #2: a file that only shares a name is no user (it was "used by check-paths-agree.py, +50 more")
+    (tmp_path / "c.py").write_text("print('Alpha')\nAlpha = 1\n")
+    idx.files["c.py"] = FileIndex(path="c.py", lang="python", refs=["Alpha"])
+    _Svc.graph = CodeGraph(idx)
+    header = ex.run("read_file", {"path": "a.py"})["content"].split("\n", 1)[0]
+    assert "↔ used by b.py" in header and "c.py" not in header
     assert "5 lines" in header                    # cheap metadata still present
 
 

@@ -306,7 +306,7 @@ def test_sync_now_waits_for_the_real_sync_and_answers_with_its_confirmation(tmp_
     kernel's request waits for its own sync to end and answers with what the vault took -- never "busy"."""
     import threading
     svc, slow = _service_with_slow_sync(tmp_path, monkeypatch)
-    svc.last_sync = {"repo_key": "k"}                      # not the first sync
+    svc._sync_taken = svc._sync_done = 1                  # not the first sync: a run already ended
     svc.sync_vault(None)
     assert slow.started.wait(5)
     got = {}

@@ -14,22 +14,42 @@ def _sym_item(s) -> dict:
 
 def repo_profile(svc) -> dict:
     p = svc.repo_profile()
-    item = {"id": p["repo_key"], "title": f"repo ({p['file_count']} files)", "kind": "repo", **p}
+    repos = p.get("repos") or []
+    title = (f"folder ({p['file_count']} files, {len(repos)} repositories: {', '.join(repos[:12])}"
+             + (" ..." if len(repos) > 12 else "") + ")") if repos else f"repo ({p['file_count']} files)"
+    item = {"id": p["repo_key"], "title": title, "kind": "folder" if repos else "repo", **p}
     return _env([item])
 
 
 def graph_slice(svc, symbols, depth: int = 1) -> dict:
+    """Each definition a symbol names, with its RESOLVED callers (file, line, the calling definition) and callees
+    (what its body's references resolve to) -- the vault's rules (``imperal_sdk.code_links``). Before, the callers
+    were every definition of every file where the name appeared (report 06.11 #2)."""
     if svc is None or svc.graph is None:
         return {"ok": False, "content": "index not ready"}
     if isinstance(symbols, str):
         symbols = [symbols]
-    g, items = svc.graph, []
+    lk = linker(svc)
+    links = lk.links()
+    items = []
     for name in (symbols or []):
-        for s in g.symbol_table.get(name, []):
-            it = _sym_item(s)
-            it["callers"] = [c.name for c in g.callers_of(name)][:20]
-            it["callees"] = g.callees_of(s)[:20]
+        for path, qual in lk.symbol_targets(str(name)):
+            if not qual:
+                continue
+            d = lk.defs(path).get(qual)
+            it = {"id": f"{path}::{qual}", "title": qual, "kind": getattr(d, "kind", ""),
+                  "subtitle": f"{path}:{getattr(d, 'start_line', 0)}", "signature": getattr(d, "signature", ""),
+                  "path": path, "start_line": getattr(d, "start_line", 0), "end_line": getattr(d, "end_line", 0)}
+            callers = [{"path": src, "user": user or "(module)", "line": line, "kind": kind}
+                       for src, user, kind, line, tp, tq, _o in links
+                       if tp == path and (tq == qual or tq.startswith(qual + ".")) and not (src == path and user == qual)]
+            it["callers"] = callers[:20]
+            it["callers_total"] = len(callers)
+            it["callees"] = sorted({f"{tp}::{tq}" if tq else tp for src, user, _k, _l, tp, tq, _o in links
+                                    if src == path and (user == qual or user.startswith(qual + "."))})[:20]
             items.append(it)
+    if not items:
+        return {**_env([]), "note": f"{', '.join(map(str, symbols or []))}: not a definition in this index"}
     return _env(items)
 
 
@@ -247,7 +267,14 @@ def linker(svc):
         except Exception:
             continue
         configs.append({"path": rel.replace("\\", "/"), "kind": kind, "data": data})
-    lk = Linker(facts, configs)
+    roots = []
+    if root:
+        try:
+            from webbee.intel.service import is_repository, sub_repositories
+            roots = [] if is_repository(root) else sub_repositories(root)
+        except Exception:
+            roots = []
+    lk = Linker(facts, configs, roots)
     svc._linker, svc._linker_graph = lk, g
     return lk
 
@@ -277,6 +304,9 @@ def impact_of_change(svc, symbols) -> dict:
     if extra:
         out["by_name_count"] = int(out.get("by_name_count") or 0) + len(extra)
         out["by_name"] = sorted(out["by_name"] + extra, key=lambda b: (b["group"] == "tests", b["path"]))[:BY_NAME_SHOWN]
+    from imperal_sdk.code_links import impact_summary
+    out["summary"] = impact_summary(syms, out["resolved"], len(out["data"]["items"]), int(out.get("by_name_count") or 0),
+                                    len(out.get("same_file") or []))
     if not out["resolved"]:
         out["note"] = f"{', '.join(syms)}: not a definition in this index"
     out["link"] = "resolved locally (the vault's rules); by_name lists name-only matches apart"
