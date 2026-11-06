@@ -1024,6 +1024,8 @@ SUB_REPOS_MAX = 40     # a folder of projects: at most this many of its reposito
 REPO_DEPTH = 4         # repositories are looked for this deep (~/Projects/<org>/<repo>, a folder's core/<repo>)
 _REPOS_TTL_S = 30.0    # a folder's repositories, remembered this long (is_repository asks on every tool call)
 _REPOS_SEEN: dict = {}
+# a home folder's system trees: never walked for repositories (macOS Library / Applications, Volumes ...)
+_TOP_NEVER = frozenset({"Library", "Applications", "System", "Volumes", "private", "cores", "dev"})
 
 
 def find_repositories(root: str, depth: int = REPO_DEPTH) -> list:
@@ -1047,7 +1049,8 @@ def find_repositories(root: str, depth: int = REPO_DEPTH) -> list:
                 continue
             for name in names:
                 full = os.path.join(here, name)
-                if os.path.islink(full) or not os.path.isdir(full) or skipped_dir(here, name):
+                if (not rel and name in _TOP_NEVER) or os.path.islink(full) or not os.path.isdir(full) \
+                        or skipped_dir(here, name):
                     continue
                 child = f"{rel}/{name}" if rel else name
                 (out if os.path.exists(os.path.join(full, ".git")) else nxt).append(child)
