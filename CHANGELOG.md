@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.7
+
+* `pipx reinstall webbee` brings the newest release for real (live check of 0.7.6: it still gave 0.7.5).
+  * imperal-mcp is installed beside webbee without its code extra. The extra requires webbee, and on a reinstall
+    pipx (uv backend) took that webbee from PyPI over the git one while PyPI's index still showed the release before.
+    webbee's own dependencies already bring what the extra holds.
+  * An install recorded with that extra is moved once onto the corrected record.
+
 ## 0.7.6
 
 * **Always the newest release, from git** (06.11: `pipx reinstall webbee` put back 0.6.7 while 0.7.5 was out).
