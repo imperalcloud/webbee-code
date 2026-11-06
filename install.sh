@@ -16,7 +16,7 @@ GH="https://github.com/imperalcloud"
 if command -v git >/dev/null 2>&1; then
   echo "Installing webbee (newest release, from git)…"
   uv tool install --force --refresh \
-    --with "imperal-mcp[code] @ git+$GH/imperal-mcp.git@stable" \
+    --with "imperal-mcp @ git+$GH/imperal-mcp.git@stable" \
     --with "imperal-sdk[universal-index] @ git+$GH/imperal-sdk.git@stable" \
     "webbee @ git+$GH/webbee-code.git@stable"
 else

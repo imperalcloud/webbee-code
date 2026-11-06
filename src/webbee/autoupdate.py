@@ -35,12 +35,18 @@ REPOS = {DIST: "https://github.com/imperalcloud/webbee-code.git",
 NAMES = {DIST: DIST, MCP: MCP_SPEC, SDK: SDK_SPEC}   # each with the extras its install needs
 
 
-def git_spec(dist: str, ref: str = STABLE) -> str:
+def git_spec(dist: str, ref: str = STABLE, extras: bool = True) -> str:
     """``dist`` (with its extras) from its repository at ``ref`` -- the ``stable`` branch unless a tag is named."""
-    return f"{NAMES[dist]} @ git+{REPOS[dist]}@{ref}"
+    return f"{NAMES[dist] if extras else dist} @ git+{REPOS[dist]}@{ref}"
 
 
 MCP_GIT_SPEC = git_spec(MCP)
+# imperal-mcp beside webbee goes WITHOUT its code extra: the extra requires webbee, and pipx (uv backend) installed
+# that webbee from PyPI over the git one on a reinstall (live 2026-11-06: stable 0.7.6, `pipx reinstall` gave PyPI's
+# 0.7.5). webbee's own dependencies already hold what the extra brings (tree-sitter, the sdk's index).
+MCP_BESIDE_WEBBEE = git_spec(MCP, extras=False)
+WEBBEE_ENV_SPECS = (git_spec(DIST), MCP_BESIDE_WEBBEE, git_spec(SDK))     # webbee's own environment
+MCP_ENV_SPECS = (MCP_GIT_SPEC, git_spec(SDK), git_spec(DIST))             # the shell's imperal-mcp
 PYPI = "https://pypi.org/pypi/{}/json"
 OFF_ENV = "WEBBEE_NO_AUTOUPDATE"           # 1: never upgrade at the start (CI, a pinned setup)
 DONE_ENV = "WEBBEE_UPGRADED"               # set on the restart after a self-upgrade: never twice in a row
@@ -124,9 +130,11 @@ def stable_version(dist: str, git, run=subprocess.run):
         return None
 
 
-def on_stable(tool: str, prefix: str, dists) -> bool:
+def on_stable(tool: str, prefix: str, specs) -> bool:
     """What pipx / uv will install again for the environment at ``prefix`` (``pipx reinstall``, ``pipx upgrade``,
-    ``uv tool upgrade``) names each of ``dists`` by its repository's stable branch. Plain pip keeps no such record."""
+    ``uv tool upgrade``) is ``specs``, each by its repository's stable branch. pipx: each spec exactly as given (an
+    imperal-mcp recorded beside webbee WITH its code extra pulled webbee from PyPI on a reinstall); uv resolves the
+    record as one set, so its repository and branch suffice. Plain pip keeps no such record."""
     try:
         if tool == "pipx":
             import json
@@ -134,11 +142,12 @@ def on_stable(tool: str, prefix: str, dists) -> bool:
                 meta = json.load(f)
             recorded = [str((meta.get("main_package") or {}).get("package_or_url") or "")]
             recorded += [str((p or {}).get("package_or_url") or "") for p in (meta.get("injected_packages") or {}).values()]
-            return all(any(f"git+{REPOS[d]}@{STABLE}" in s for s in recorded) for d in dists)
+            return all(s in recorded for s in specs)
         if tool == "uv":
             with open(os.path.join(prefix, "uv-receipt.toml"), encoding="utf-8") as f:
                 receipt = f.read()
-            return all(f'git = "{REPOS[d]}?rev={STABLE}"' in receipt for d in dists)
+            urls = [s.split(" @ git+", 1)[-1].rsplit("@", 1)[0] for s in specs]
+            return all(f'git = "{u}?rev={STABLE}"' in receipt for u in urls)
     except Exception:
         return False
     return True
@@ -201,7 +210,7 @@ def self_command(version: str, prefix: str = sys.prefix, executable: str = sys.e
     beside it; ``record``: pipx writes its record anew (see ``_git_install``)."""
     light = env.get(LIGHT_ENV)
     if source == "git" and not light:
-        return _git_install(tool_of(prefix), git_spec(DIST, ref), [git_spec(MCP), git_spec(SDK)], uv, pipx,
+        return _git_install(tool_of(prefix), git_spec(DIST, ref), [MCP_BESIDE_WEBBEE, git_spec(SDK)], uv, pipx,
                             executable, DIST, record)
     spec = _spec(DIST, DIST, version, wheel)
     if light:                               # an old Python runs this release through its light install
@@ -257,7 +266,7 @@ def mcp_command(inst: dict, newest, uv, pipx, wheel=None, source: str = "pypi"):
     the stable branches, imperal-sdk and webbee beside it, and an install recorded by a version is moved onto the
     branch even when its version is the newest (what ``pipx reinstall`` / ``uv tool upgrade`` would put back)."""
     git = source == "git"
-    recorded = bool(inst) and on_stable(inst.get("tool") or "", inst.get("prefix") or "", (MCP, SDK, DIST))
+    recorded = bool(inst) and on_stable(inst.get("tool") or "", inst.get("prefix") or "", MCP_ENV_SPECS)
     if inst and inst.get("version") and inst.get("version") == newest and inst.get("code") and (recorded or not git):
         return None
     if inst and not inst.get("version"):
@@ -471,7 +480,7 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
         git = None if light else which("git")     # 3.7's pip builds no package from source: the light install stays on PyPI
         newest, source = _newest(DIST, git, fetch, stable)
         tool = tool_of(prefix)
-        recorded = source != "git" or on_stable(tool, prefix, (DIST, MCP, SDK))
+        recorded = source != "git" or on_stable(tool, prefix, WEBBEE_ENV_SPECS)
         # the same release recorded by a version: moved onto the branch (what pipx/uv would put back on a reinstall)
         if newest and (_ver(newest) > _ver(current) or (not recorded and _ver(newest) == _ver(current))) \
                 and not env.get(DONE_ENV):
