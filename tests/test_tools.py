@@ -1026,3 +1026,37 @@ def test_a_symlinked_remote_repo_is_known_by_its_real_path(monkeypatch):
     ex.run("intel_sync_remote", {"host": "winbox", "root": "/C:/u/proj/Pkg"})
     meta = cloud.calls[0][1]["meta"]
     assert meta["root"] == meta["root_path"] == "/C:/real/proj"
+
+
+def test_auto_checkpoint_off_is_said_and_logged(tmp_path, caplog):
+    """Ignat 06.11 §5: the time machine stopped silently -- no log line, nothing told to the agent or the user."""
+    import logging
+    from webbee.tools import LocalToolExecutor
+    from webbee.checkpoints import ShadowGit
+    sg = ShadowGit(str(tmp_path), "rk_said", cache_dir=str(tmp_path / "c4"))
+    assert sg.ensure()
+    sg.checkpoint = lambda label="": None
+    sg.last_error = "'data' appears as both a file and as a directory"
+    ex = LocalToolExecutor(str(tmp_path), shadow=sg)
+    caplog.set_level(logging.WARNING)
+    outs = [ex.run("write_file", {"path": f"f{i}.txt", "content": str(i)}) for i in range(sg._AUTO_FAIL_LATCH)]
+    assert "auto_checkpoint" not in outs[0]
+    assert "time machine is OFF" in outs[-1]["auto_checkpoint"] and "both a file" in outs[-1]["auto_checkpoint"]
+    assert any("auto-checkpoint" in r.getMessage() for r in caplog.records)
+
+
+def test_auto_checkpoint_off_retries_and_comes_back(tmp_path):
+    from webbee.tools import LocalToolExecutor
+    from webbee.checkpoints import ShadowGit
+    sg = ShadowGit(str(tmp_path), "rk_back", cache_dir=str(tmp_path / "c5"))
+    assert sg.ensure()
+    fail = {"on": True}
+    sg.checkpoint = lambda label="": None if fail["on"] else {"id": "x", "n": 1, "label": label, "changed": True}
+    ex = LocalToolExecutor(str(tmp_path), shadow=sg)
+    for i in range(sg._AUTO_FAIL_LATCH):
+        ex.run("write_file", {"path": f"a{i}.txt", "content": "1"})
+    assert sg.auto_ok is False
+    fail["on"] = False
+    for i in range(sg._AUTO_RETRY_EVERY):
+        ex.run("write_file", {"path": f"b{i}.txt", "content": "2"})
+    assert sg.auto_ok is True

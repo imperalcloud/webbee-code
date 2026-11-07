@@ -518,21 +518,37 @@ class ShadowGit:
                 "nested": nested, "not_restored": [p for p, _w in not_restored], "left_as_is": held}
 
     _AUTO_FAIL_LATCH = 3   # consecutive AUTO failures before pausing auto-checkpointing
+    # writes while paused before one more try: a cause that went away (a symlink fixed, a slow disk) brings the time
+    # machine back instead of leaving it off for the whole session (Ignat 06.11 §5)
+    _AUTO_RETRY_EVERY = 20
 
-    def note_auto_result(self, ok: bool) -> None:
+    def note_auto_result(self, ok: bool) -> bool:
         """Record an AUTO (pre-write) snapshot outcome. A single transient
         failure must NOT disable the session's time machine (final-review F8):
         latch auto-checkpointing OFF only after _AUTO_FAIL_LATCH CONSECUTIVE
         failures; any success resets the streak and re-enables it. A snapshot
-        that ran past the time budget pauses it at once (checkpoint())."""
+        that ran past the time budget pauses it at once (checkpoint()).
+        Returns True exactly when this result turned auto-checkpointing OFF (the caller says so)."""
         if ok:
             self._auto_fail_streak = 0
             self.auto_ok = True
             self.pause_reason = ""
-        else:
-            self._auto_fail_streak += 1
-            if self._auto_fail_streak >= self._AUTO_FAIL_LATCH:
-                self.auto_ok = False
+            return False
+        self._auto_fail_streak += 1
+        if self._auto_fail_streak >= self._AUTO_FAIL_LATCH and self.auto_ok:
+            self.auto_ok = False
+            return True
+        return False
+
+    def auto_due(self) -> bool:
+        """Snapshot before this write? Always while on; while paused, one try every ``_AUTO_RETRY_EVERY`` writes."""
+        if self.auto_ok:
+            return True
+        self._paused_writes = getattr(self, "_paused_writes", 0) + 1
+        if self._paused_writes >= self._AUTO_RETRY_EVERY:
+            self._paused_writes = 0
+            return True
+        return False
 
     def describe(self) -> str:
         """One printable block for the /checkpoints command."""

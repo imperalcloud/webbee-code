@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import subprocess
@@ -301,8 +302,10 @@ class LocalToolExecutor:
                 self.indexer.sync_if_due()
             except Exception:
                 pass
+        _auto_off = ""
+        _due = getattr(self.shadow, "auto_due", None) if self.shadow is not None else None
         if (tool in _WRITE_TIER and self.shadow is not None
-                and getattr(self.shadow, "auto_ok", True)):
+                and (_due() if _due is not None else getattr(self.shadow, "auto_ok", True))):
             # The time machine snapshots BEFORE every mutation -- and must never
             # block or fail the actual work. A SINGLE transient failure must not
             # disable the session (final-review F8): note_auto_result latches
@@ -310,18 +313,25 @@ class LocalToolExecutor:
             # success re-enables it. Manual checkpoint/rollback always try.
             try:
                 _cp = self.shadow.checkpoint(f"pre:{tool}")
-                _note = getattr(self.shadow, "note_auto_result", None)
-                if _note is not None:
-                    _note(_cp is not None)
             except Exception:
-                _note = getattr(self.shadow, "note_auto_result", None)
-                if _note is not None:
-                    _note(False)
+                _cp = None
+            _note = getattr(self.shadow, "note_auto_result", None)
+            if _note is not None and _note(_cp is not None) is True:
+                # said once, when it stops (Ignat 06.11 §5: the time machine stopped with no word anywhere)
+                why = str(getattr(self.shadow, "last_error", "") or getattr(self.shadow, "pause_reason", "") or "")
+                _auto_off = ("time machine is OFF: the automatic snapshot before each change failed "
+                             f"{getattr(self.shadow, '_AUTO_FAIL_LATCH', 3)} times in a row"
+                             + (f" ({why})" if why else "") + " -- tell the user; it retries every "
+                             f"{getattr(self.shadow, '_AUTO_RETRY_EVERY', 20)} changes, a manual checkpoint still tries")
+                logging.getLogger("webbee.checkpoints").warning("auto-checkpoint paused: %s", why or "repeated failures")
         try:
             fn = getattr(self, f"_t_{tool}", None)
             if fn is None:
                 return {"ok": False, "content": f"unknown tool: {tool}"}
-            return fn(args)
+            res = fn(args)
+            if _auto_off and isinstance(res, dict):
+                res["auto_checkpoint"] = _auto_off
+            return res
         except OutsideWorkspaceError as e:
             # Return it as a normal tool result (NEVER re-raise): a re-raise
             # escaped run(), the reverse-channel handler never posted a result,
