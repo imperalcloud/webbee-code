@@ -332,3 +332,17 @@ def test_a_failed_checkpoint_says_why(tmp_path, monkeypatch):
     assert sg.checkpoint("y") is None and "unable to index file" in sg.last_error
     monkeypatch.undo()
     assert sg.checkpoint("z") and sg.last_error == ""                # a good one clears it
+
+
+def test_a_folder_replaced_by_a_symlink_does_not_break_snapshots(tmp_path):
+    """Ignat 06.11 §5: '<symlink>' appears as both a file and as a directory -- every snapshot failed after."""
+    import os
+    from webbee.checkpoints import ShadowGit
+    ws = tmp_path / "ws"
+    (ws / "data").mkdir(parents=True)
+    (ws / "data" / "f.txt").write_text("x")
+    sg = ShadowGit(str(ws), "rk_symlink", cache_dir=str(tmp_path / "cache"))
+    assert sg.ensure() and sg.checkpoint("first") is not None
+    os.rename(ws / "data", tmp_path / "moved")
+    os.symlink(tmp_path / "moved", ws / "data")
+    assert sg.checkpoint("after symlink") is not None, sg.last_error

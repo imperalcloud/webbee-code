@@ -228,9 +228,21 @@ class ShadowGit:
                 files.add(full)
         venvs = {os.path.dirname(p) for p in files if os.path.basename(p) == "pyvenv.cfg"} - {""}
         keep = []
+        linked: dict = {}
+
+        def under_link(parts: list) -> bool:
+            """A parent of the path is now a symlink (a folder replaced by a link): the path is the link's target,
+            not the workspace's -- kept, it made the index hold 'data' as a file AND a directory (Ignat 06.11 §5)."""
+            for i in range(1, len(parts)):
+                parent = "/".join(parts[:i])
+                if parent not in linked:
+                    linked[parent] = os.path.islink(os.path.join(self.root, parent))
+                if linked[parent]:
+                    return True
+            return False
         for p in sorted(files):
             parts = p.split("/")
-            if any(seg in _SKIP_DIRS for seg in parts[:-1]):
+            if any(seg in _SKIP_DIRS for seg in parts[:-1]) or under_link(parts):
                 continue
             if any(p.startswith(v + "/") for v in venvs):
                 continue
