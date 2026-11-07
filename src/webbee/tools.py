@@ -9,7 +9,7 @@ from datetime import datetime
 
 # Tools that MUTATE the workspace -> auto-checkpoint before each run
 # (mirrors the kernel write tier; rollback snapshots itself, so not listed).
-_WRITE_TIER = {"write_file", "edit_file", "multi_edit", "shell", "bash"}
+_WRITE_TIER = {"write_file", "append_file", "edit_file", "multi_edit", "shell", "bash"}
 # The tools plan mode runs -- the ones that only read (an allowlist: a checkpoint, a rollback, a command, an edit or
 # any tool added later is refused in plan mode until it is named here -- security review 2026-10-30)
 PLAN_SAFE_TOOLS = frozenset({
@@ -639,6 +639,26 @@ class LocalToolExecutor:
         if diff:
             out["diff"] = diff
         return out
+
+    def _t_append_file(self, a: dict) -> dict:
+        """Text added to the END of a file (created when missing), on a new line -- a protocol or a log written step
+        by step needs no anchor (Ignat 07.11: 10 of 11 failures were anchors typed from memory)."""
+        rel = self._rel(a)
+        p = self.resolve_in_workspace(rel)
+        add = str(a.get("content", a.get("text", "")) or "")
+        before = ""
+        try:
+            before, _eol = _read_text(p)
+        except OSError:
+            pass
+        os.makedirs(os.path.dirname(p) or self.root, exist_ok=True)
+        sep = "\n" if before and not before.endswith("\n") else ""
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(sep + add)
+        self._note_own_write(p)
+        self._reindex(os.path.relpath(p, self.root))
+        total = (before + sep + add).count("\n") + (0 if (before + sep + add).endswith("\n") else 1)
+        return {"ok": True, "content": f"appended {len(add)} chars to {rel} (now {total} lines)"}
 
     def _t_edit_file(self, a: dict) -> dict:
         rel = self._rel(a)
