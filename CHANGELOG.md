@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.12
+
+* Needs imperal-mcp 0.9.9: impact answers list the code of every repository before tests, never cut the query echo,
+  give the real totals and list one file once; command-line passwords are redacted.
+* The time machine says when it stops (in the tool result and webbee.log) and tries again every 20 changes; a folder
+  replaced by a symlink no longer breaks every snapshot after it.
+* A command that sweeps, reads or writes ~/.ssh is not run: the agent is told to ask the user.
+* New tool `append_file`: text added to the end of a file on a new line, no anchor (the kernel offers it from its
+  next release).
+
 ## 0.7.11
 
 * Needs imperal-mcp 0.9.8: `contract_slice` lists only the endpoints a symbol reaches, with no substring matches.
