@@ -248,6 +248,34 @@ def nearest_text(text: str, old: str) -> str:
     return f"{head}. The file now (lines {lo + 1}-{hi}):\n{shown}"
 
 
+_SSH_DIR = re.compile(r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s'\"]+|/home/[^/\s'\"]+|/root)/\.ssh(?:/([^\s'\";|&)<>]*))?")
+_SSH_WRITERS = re.compile(r"(?:>>?|\btee\b|\bsed\s+-i|\bcp\b|\bmv\b|\brm\b|\bchmod\b|\binstall\b|\bln\b|"
+                          r"\btruncate\b|\bdd\b)")
+_SSH_READERS = re.compile(r"\b(?:cat|less|more|head|tail|base64|xxd|od|strings|scp|rsync|curl|nc|python3?|perl)\b")
+_SSH_HARMLESS = re.compile(r"(?:\.pub|known_hosts(?:\.old)?|config)$")
+
+
+def ssh_guard(command: str) -> str:
+    """Why ``command`` is the user's to allow, or "" (Ignat 06.11 §7.6: every key of ~/.ssh tried on root of 11
+    hosts; ~/.ssh/config rewritten unasked). Mechanical: a path under ~/.ssh with a glob or in a loop (a sweep), a
+    write there, or a reader of a private key's content. Using one key (``ssh -i <key>``), listing the folder,
+    reading a public key, known_hosts or the config stays."""
+    refs = list(_SSH_DIR.finditer(str(command or "")))
+    if not refs:
+        return ""
+    if any(ch in (m.group(1) or "") for m in refs for ch in "*?[") or re.search(r"\bfor\b|\bxargs\b", command):
+        return "sweeps your SSH keys (a glob or a loop over ~/.ssh)"
+    for m in refs:
+        before = command[:m.start()]
+        seg = re.split(r"[;&|]\s*", before)[-1]        # the command this path belongs to
+        if _SSH_WRITERS.search(seg) or re.search(r">>?\s*$", before):
+            return "writes into ~/.ssh"
+        name = m.group(1) or ""
+        if name and not _SSH_HARMLESS.search(name) and _SSH_READERS.search(seg):
+            return "reads a private key"
+    return ""
+
+
 class LocalToolExecutor:
     def __init__(self, workspace_root: str, indexer=None, shadow=None,
                  client_factory=None) -> None:
@@ -771,6 +799,10 @@ class LocalToolExecutor:
         return self._execute_shell(a)
 
     def _execute_shell(self, a: dict) -> dict:
+        why = ssh_guard(str(a.get("command") or ""))
+        if why:
+            return {"ok": False, "content": f"not run: this command {why} -- your SSH keys and config are the "
+                                            "user's; ask the user before touching them (name the host and the key)"}
         timeout = min(int(a.get("timeout", 120) or 120), 3600)
         env = os.environ.copy()
         # Fail-soft non-interactive environment: prevent password/sudo/pinentry prompt hangs
