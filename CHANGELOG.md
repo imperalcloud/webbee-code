@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.13
+
+* Needs imperal-mcp 0.9.12: a subagent's calls go to their own kernel session, never the parent's task facts.
+* A window asked of a file already read whole and unchanged is only that window: the whole file is already in FILES
+  YOU READ (before, 14 windows of one 1605-line file came back whole 14 times).
+* The same day's kernel: one general judge reads every claim of an answer beside the facts that hold it (shown,
+  contradicted, not shown; any language), and a general step review tells the agent in DECISION whether its last
+  steps lead on, which conclusion its own outputs do not support, which decision the work waits on and what it
+  repeats.
+
 ## 0.7.12
 
 * Needs imperal-mcp 0.9.9: impact answers list the code of every repository before tests, never cut the query echo,
