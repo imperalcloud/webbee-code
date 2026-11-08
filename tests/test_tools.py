@@ -717,6 +717,21 @@ def test_a_window_of_a_file_that_fits_reads_it_whole(tmp_path):
     assert (r["shown_from"], r["shown_to"], r["truncated"]) == (1, 592, False)
 
 
+def test_a_window_of_a_file_already_read_whole_is_only_that_window(tmp_path):
+    """Report 2026-11-07 4.2: 14 windows of one 1605-line file each came back whole -- 14 copies in the context."""
+    (tmp_path / "screens.py").write_text("".join(f"line {i}\n" for i in range(1, 1606)))
+    ex = LocalToolExecutor(str(tmp_path))
+    first = ex.run("read_file", {"path": "screens.py", "offset": 1, "limit": 90})
+    assert first["shown_to"] == 1605                                        # the first window is the file whole
+    again = ex.run("read_file", {"path": "screens.py", "offset": 91, "limit": 90})
+    head, body = again["content"].split("\n", 1)
+    assert body.splitlines() == [f"line {i}" for i in range(91, 181)]
+    assert "FILES YOU READ" in head and (again["shown_from"], again["shown_to"]) == (91, 180)
+    (tmp_path / "screens.py").write_text("changed\n" * 10)
+    after = ex.run("read_file", {"path": "screens.py", "offset": 2, "limit": 3})
+    assert after["shown_to"] == 10 and "FILES YOU READ" not in after["content"].splitlines()[0]
+
+
 def test_read_file_without_a_window_auto_caps_a_huge_file(tmp_path):
     (tmp_path / "big.py").write_text("".join(f"line {i}\n" for i in range(1, 6001)))
     ex = LocalToolExecutor(str(tmp_path))

@@ -295,6 +295,9 @@ class LocalToolExecutor:
         # read_file, or this executor's own write) -- powers the stale-edit
         # warning. In-instance only: one executor == one coding session.
         self._read_mtimes: dict[str, int] = {}
+        # files handed back whole, by their mtime then: a window asked of such a file unchanged since is only that
+        # window (report 2026-11-07 4.2: 14 "windows" of one 1605-line file each came back whole -- 14 copies)
+        self._whole_seen: dict[str, int] = {}
         # the commands running now (bash): a stop (Esc) ends them and every process they started (cancel_running)
         self._running: set = set()
         self._running_lock = threading.Lock()
@@ -441,7 +444,11 @@ class LocalToolExecutor:
             limit = 0
         partial = offset > 0 or limit > 0
         asked = ""
-        if partial and n <= _READ_WHOLE_LINES and len(text) <= _READ_WHOLE_CHARS:
+        if partial and self._whole_seen.get(p) == st.st_mtime_ns:
+            asked = (" [you read this file whole before and it has not changed since -- it is whole in "
+                     "FILES YOU READ; here is only the window you asked: search it with grep_code or read a "
+                     "part with read_symbol rather than paging]")
+        elif partial and n <= _READ_WHOLE_LINES and len(text) <= _READ_WHOLE_CHARS:
             # a window of a file that fits is the file whole: its other lines are what the next
             # step asks for, and a window's line numbers go stale with the first edit
             asked = (f" [the whole file, {n} lines -- the window you asked "
@@ -470,6 +477,7 @@ class LocalToolExecutor:
         # is re-joined; a full read hands back the original text untouched.
         if start == 0 and end == n:
             body = text
+            self._whole_seen[p] = st.st_mtime_ns
         else:
             body = "\n".join(lines[start:end])
         header = self._file_header(os.path.relpath(p, self.root), n, st.st_mtime) + asked
