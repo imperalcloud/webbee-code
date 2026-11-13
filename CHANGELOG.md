@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.14
+
+* Needs imperal-sdk 6.6.0 and imperal-mcp 0.9.15 (the imperal-mcp 0.9.14 field test, fixed in every layer).
+* Search answers carry each symbol's doc; a symbol also matches when every word of the query is in its doc, in any
+  language, so a Russian docstring is found by a Russian query.
+* A query mostly in a script the English-only embedding cannot read gets no vector arm: any two Russian texts scored
+  about 0.88 alike, and unrelated code came back first.
+* Cache schema 6: symbols carry their doc, and arrow functions inside components are symbols (sdk EXTRACTOR_VERSION 5).
+
 ## 0.7.13
 
 * Needs imperal-mcp 0.9.12: a subagent's calls go to their own kernel session, never the parent's task facts.
