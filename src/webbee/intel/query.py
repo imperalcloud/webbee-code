@@ -1,5 +1,6 @@
 from __future__ import annotations
 import fnmatch
+import re
 
 
 def _env(items: list[dict], has_more: bool = False) -> dict:
@@ -8,8 +9,15 @@ def _env(items: list[dict], has_more: bool = False) -> dict:
 
 def _sym_item(s) -> dict:
     return {"id": f"{s.path}::{s.name}", "title": s.name, "kind": s.kind,
-            "subtitle": f"{s.path}:{s.start_line}", "signature": s.signature,
+            "subtitle": f"{s.path}:{s.start_line}", "signature": s.signature, "doc": getattr(s, "doc", "") or "",
             "path": s.path, "start_line": s.start_line, "end_line": s.end_line}
+
+
+def _latin_share(q: str) -> float:
+    """The share of the query's letters an English-only embedding reads as words (live 2026-11-13: potion-base-8M
+    splits Cyrillic into one-letter pieces, so any two Russian texts scored ~0.88 alike and unrelated code came first)."""
+    letters = [c for c in q or "" if c.isalpha()]
+    return (sum(1 for c in letters if c.isascii()) / len(letters)) if letters else 1.0
 
 
 def repo_profile(svc) -> dict:
@@ -70,16 +78,21 @@ def _fuse_rrf(arms: list[list[str]], k: int = _RRF_K) -> list[str]:
 
 def _lexical_search(svc, q, kind, path_glob, items_by_id: dict) -> list[str]:
     """U1 substring-over-symbol-table match, extracted verbatim so it can
-    serve as its own RRF arm (and the whole answer when vectors are absent)."""
+    serve as its own RRF arm (and the whole answer when vectors are absent).
+    A symbol also matches when every word of the query (3+ letters, any script) is in its description -- a Russian
+    docstring is found by a Russian query (2026-11-13)."""
     ql, hits = (q or "").lower(), []
+    words = [w for w in re.findall(r"\w+", ql) if len(w) >= 3]
     for name, syms in svc.graph.symbol_table.items():
-        if ql in name.lower():
-            for s in syms:
-                if kind and s.kind != kind:
-                    continue
-                if path_glob and not _fnmatch(s.path, path_glob):
-                    continue
-                hits.append(_sym_item(s))
+        by_name = ql in name.lower()
+        for s in syms:
+            if not by_name and not (words and all(w in (getattr(s, "doc", "") or "").lower() for w in words)):
+                continue
+            if kind and s.kind != kind:
+                continue
+            if path_glob and not _fnmatch(s.path, path_glob):
+                continue
+            hits.append(_sym_item(s))
     hits.sort(key=lambda i: (i["title"].lower() != ql, len(i["title"])))
     ids = []
     for it in hits:
@@ -111,15 +124,15 @@ def _chunk_item(svc, cid: str, score: float) -> dict | None:
         start, end = int(start_s), int(end_s)
     except ValueError:
         return None
-    title, kind = f"{path}:{start}", "chunk"
+    title, kind, doc = f"{path}:{start}", "chunk", ""
     idx = getattr(svc.graph, "index", None) if svc.graph is not None else None
     fi = idx.files.get(path) if idx is not None else None
     if fi is not None:
         for s in fi.symbols:
             if s.start_line <= start and s.end_line >= end:
-                title, kind = s.name, s.kind
+                title, kind, doc = s.name, s.kind, getattr(s, "doc", "") or ""
                 break
-    return {"id": cid, "title": title, "kind": kind,
+    return {"id": cid, "title": title, "kind": kind, "doc": doc,
             "subtitle": f"{path}:{start}", "signature": "",
             "path": path, "start_line": start, "end_line": end, "score": score}
 
@@ -136,7 +149,8 @@ def search_code(svc, q, k: int = 20, kind=None, path_glob=None) -> dict:
     # never turn into an error envelope -- fall through to lexical+graph).
     try:
         b = svc._get_backend() if getattr(svc, "vectors", None) is not None else None
-        if b is not None and svc.vectors is not None:
+        # a query mostly in a script the embedding cannot read gets no vector arm: its "nearest" chunks are noise
+        if b is not None and svc.vectors is not None and _latin_share(q) >= 0.5:
             qv = b.embed_query(q)
             vec_hits = svc.vectors.search(qv, top_n=50)
             vec_ids = []

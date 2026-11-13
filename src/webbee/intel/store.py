@@ -26,7 +26,8 @@ from imperal_sdk.code_index import ProjectIndex, FileIndex, Symbol
 # 5 (2026-11-04): a file's ``kind`` (code | config | document | data | mail | image) is kept -- a schema-4 cache
 # read every document back as code after a restart; a folder without git is cached too (``NO_GIT``) and the
 # checksum tree of the folder (``tree``) is saved with the stats.
-SCHEMA_VERSION = 5
+# 6 (2026-11-13): symbols carry their doc; nested arrow functions are symbols (imperal-sdk EXTRACTOR_VERSION 5)
+SCHEMA_VERSION = 6
 NO_GIT = "-"           # the cache key of a folder that is no git repository (its stats keep it honest)
 
 
