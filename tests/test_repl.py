@@ -2,6 +2,12 @@ import asyncio
 import os
 import re
 
+import pytest
+
+# prompt_toolkit's pipe input feeds no keys to the dock on a Windows runner (Win32 input: every such test timed out,
+# os-check 2026-11-14) -- these drive the real dock and run on Linux and macOS
+_needs_posix_pipe_input = pytest.mark.skipif(os.name == "nt", reason="prompt_toolkit pipe input drives no dock on Windows")
+
 from webbee.account import Account
 from webbee.repl import (_cancel_all_background, _cancel_slot, _exit_dump,
                          _finish_slot, _isolate_workspace, _make_session_slot,
@@ -2435,6 +2441,7 @@ async def _until(pred, timeout=5.0):
         await asyncio.sleep(0.01)
 
 
+@_needs_posix_pipe_input
 def test_real_dock_turn_and_drain_stay_pinned_to_the_originating_slot(monkeypatch):
     # Turn runs in slot A; the user switches active to slot B mid-turn;
     # natural completion drains A's OWN queued line -- it must echo and run
@@ -2510,6 +2517,7 @@ def test_real_dock_turn_and_drain_stay_pinned_to_the_originating_slot(monkeypatc
     asyncio.run(scenario())
 
 
+@_needs_posix_pipe_input
 def test_real_dock_enter_started_turn_lands_in_the_slot_captured_at_keypress(monkeypatch):
     # A FRESH (non-drain) turn: pressing Enter on slot A must land the echo
     # and the agent.run call in A, even when the switch-to-B keystroke is
@@ -2605,6 +2613,7 @@ def test_real_dock_enter_started_turn_lands_in_the_slot_captured_at_keypress(mon
 # REAL dock (same harness as FIX1/FIX3 above) so the actual `_handle` action
 # ladder is what's under test.
 
+@_needs_posix_pipe_input
 def test_home_active_help_renders_into_the_home_pane(monkeypatch):
     import sys
 
@@ -2643,6 +2652,7 @@ def test_home_active_help_renders_into_the_home_pane(monkeypatch):
     asyncio.run(scenario())
 
 
+@_needs_posix_pipe_input
 def test_home_active_steps_yields_open_a_tab_note(monkeypatch):
     import sys
 
@@ -2680,6 +2690,7 @@ def test_home_active_steps_yields_open_a_tab_note(monkeypatch):
     asyncio.run(scenario())
 
 
+@_needs_posix_pipe_input
 def test_home_active_tabs_lists_tabs(monkeypatch):
     import sys
 
@@ -2787,6 +2798,7 @@ def test_land_on_home_when_boot_replay_is_fresh_and_empty(monkeypatch):
     asyncio.run(scenario())
 
 
+@_needs_posix_pipe_input
 def test_land_on_session_when_boot_replay_shows_something(monkeypatch):
     import sys
 
@@ -2911,9 +2923,11 @@ def test_save_pasted_writes_file_and_gitignore(tmp_path):
     assert (tmp_path / ".webbee" / ".gitignore").read_text().strip() == "*"
 
 
-def test_save_pasted_never_raises_on_bad_dir():
+def test_save_pasted_never_raises_on_bad_dir(tmp_path):
     from webbee.repl import _save_pasted
-    assert _save_pasted("/dev/null/nope", "x.png", b"x") == ""
+    a_file = tmp_path / "a-file"
+    a_file.write_text("x")
+    assert _save_pasted(str(a_file / "nope"), "x.png", b"x") == ""      # its parent is a file: no folder on any system
 
 
 def test_boot_workspace_runs_intel_shadow_and_git_branch_concurrently(monkeypatch):

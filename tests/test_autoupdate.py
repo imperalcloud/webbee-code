@@ -1,8 +1,18 @@
 """Owner 2026-10-25: webbee starts on the newest release of itself and of the shell's imperal-mcp (with its code
 extra), on any system -- the upgrade first, then the start."""
+import os
 import subprocess
 
+import pytest
+
 from webbee import autoupdate as au
+
+
+@pytest.fixture(autouse=True)
+def _posix_restart(monkeypatch):
+    """These pin the POSIX restart (exec); the Windows one (run the new release, pass its exit code on) has its own
+    test below -- on a Windows runner every test here took that path and ran a real child (os-check 2026-11-14)."""
+    monkeypatch.setattr(au, "_WINDOWS", False)
 
 
 class _Run:
@@ -168,12 +178,13 @@ def test_the_lock_is_released_before_the_restart_and_a_broken_install_is_done_ag
 
 def test_the_lock_lives_in_webbee_s_own_folder(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "data"))      # Windows: webbee's data folder lives there
     monkeypatch.delenv("WEBBEE_RUNTIME_HOME", raising=False)
     path = au._lock_path()
     assert path.startswith(str(tmp_path / "data")) and path.endswith("upgrade.lock")
-    import os
     import stat
-    assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) & 0o077 == 0     # only this user
+    if os.name != "nt":             # Windows: the user's own profile folder (its ACL), no POSIX mode bits
+        assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) & 0o077 == 0     # only this user
 
 
 # ── an install that does not import is never left on disk: the release before it goes back, by the same tool ──
@@ -528,3 +539,17 @@ def test_the_windows_self_upgrade_frees_the_launcher_before_installing(tmp_path,
                             execv=lambda *a: 1 / 0, env={}, stable=lambda d, g: None, lock_path=None)
     assert seen and all(f"webbee.exe{au.ASIDE}" in n for n in seen[0])     # moved aside while the installer ran
     assert (tmp_path / "webbee.exe").read_text() == "old"                    # failed: put back
+
+
+def test_on_windows_the_new_release_is_run_and_its_exit_code_passed_on(monkeypatch):
+    monkeypatch.setattr(au, "_WINDOWS", True)
+    monkeypatch.setattr(au, "find_uv", lambda which=None: "/bin/uv")
+    monkeypatch.setattr(au, "imports_ok", lambda python, run=None, light=False: True)
+    monkeypatch.setattr(au, "free_launchers", lambda: [])
+    started = []
+    monkeypatch.setattr(au.subprocess, "call", lambda cmd: started.append(cmd) or 7)
+    with pytest.raises(SystemExit) as ex:
+        au.upgrade_before_start(["--mode", "plan"], "0.5.14", say=lambda m: None, fetch={"webbee": "0.6.0"}.get,
+                                wheel=None, which=_which({}), run=_Run(), execv=lambda *a: 1 / 0, env={},
+                                stable=lambda d, g: None, lock_path=None)
+    assert ex.value.code == 7 and started and started[0][-2:] == ["--mode", "plan"]
