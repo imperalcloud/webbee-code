@@ -487,3 +487,44 @@ def test_the_webbee_beside_imperal_mcp_follows_webbee_s_releases(tmp_path):
     exe.write_text("")
     got = au.mcp_installed(which=lambda n: str(exe), run=run)
     assert got["webbee"] == "0.7.6" and got["code"] is True
+
+
+# live 2026-11-14 (Windows): the self-upgrade of a pip / pipx install failed on every start -- the running webbee.exe
+# cannot be overwritten there -- and "v... available" stayed for good
+
+def test_a_running_launcher_is_moved_aside_on_windows_and_put_back_if_the_install_failed(tmp_path):
+    (tmp_path / "webbee.exe").write_text("old launcher")
+    moved = au.free_launchers(dirs=[str(tmp_path)], windows=True)
+    assert [m[0] for m in moved] == [str(tmp_path / "webbee.exe")] and not (tmp_path / "webbee.exe").exists()
+    au.put_back(moved)                                     # the installer wrote none: the old one is back
+    assert (tmp_path / "webbee.exe").read_text() == "old launcher"
+    moved = au.free_launchers(dirs=[str(tmp_path)], windows=True)
+    (tmp_path / "webbee.exe").write_text("new launcher")   # the installer wrote the new one
+    au.put_back(moved)
+    assert (tmp_path / "webbee.exe").read_text() == "new launcher"
+    assert au.sweep_aside(dirs=[str(tmp_path)]) == 1 and sorted(p.name for p in tmp_path.iterdir()) == ["webbee.exe"]
+
+
+def test_elsewhere_no_launcher_is_moved(tmp_path):
+    (tmp_path / "webbee.exe").write_text("x")
+    assert au.free_launchers(dirs=[str(tmp_path)], windows=False) == [] and (tmp_path / "webbee.exe").exists()
+
+
+def test_the_windows_self_upgrade_frees_the_launcher_before_installing(tmp_path, monkeypatch):
+    (tmp_path / "webbee.exe").write_text("old")
+    monkeypatch.setattr(au, "_WINDOWS", True)
+    monkeypatch.setattr(au, "_script_dirs", lambda: [str(tmp_path)])
+    monkeypatch.setattr(au, "find_uv", lambda which=None: "/bin/uv")
+    seen = []
+
+    class _R(_Run):
+        def __call__(self, cmd, **kw):
+            if "install" in cmd:
+                seen.append(sorted(p.name for p in tmp_path.iterdir()))
+            return super().__call__(cmd, **kw)
+    said = []
+    au.upgrade_before_start([], "0.5.14", wheel=lambda d, v: None, say=said.append,
+                            fetch={"webbee": "0.6.0", "imperal-mcp": None}.get, which=_which({}), run=_R(rc=1),
+                            execv=lambda *a: 1 / 0, env={}, stable=lambda d, g: None, lock_path=None)
+    assert seen and all(f"webbee.exe{au.ASIDE}" in n for n in seen[0])     # moved aside while the installer ran
+    assert (tmp_path / "webbee.exe").read_text() == "old"                    # failed: put back

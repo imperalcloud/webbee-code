@@ -2957,3 +2957,25 @@ def test_boot_workspace_runs_intel_shadow_and_git_branch_concurrently(monkeypatc
     assert result["git_branch"] == "main"
     # Serial would take >= 0.4s (0.2 + 0.2); concurrent stays well under that.
     assert elapsed < 0.35, f"boot_workspace took {elapsed:.2f}s -- looks serial, not concurrent"
+
+
+class _FailingLoginAuth(FakeAuth):
+    """The sign-in breaks after (or before) the tokens reach the disk (live 2026-11-14, Windows)."""
+    def __init__(self, saved):
+        super().__init__(logged_in=False)
+        self._saved = saved
+    async def login_device(self, cfg, *, on_prompt=None, open_browser=True):
+        raise ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
+    def load_creds(self):
+        return {"refresh_token": "r"} if self._saved else None
+
+
+def test_a_sign_in_whose_tokens_were_saved_is_signed_in_even_if_a_later_call_broke():
+    sink, agent = _run(read_line=_lines("/login", "/exit"), auth=_FailingLoginAuth(saved=True))
+    assert any("Signed in as (signed in)" in n for n in sink.notes)
+
+
+def test_a_failed_sign_in_is_said_never_an_unhandled_loop_exception():
+    sink, agent = _run(read_line=_lines("/login", "/exit"), auth=_FailingLoginAuth(saved=False))
+    assert any("Sign-in failed: ConnectionResetError" in n and "/login again" in n for n in sink.notes)
+    assert not any("Signed in as" in n for n in sink.notes)

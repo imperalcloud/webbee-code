@@ -24,6 +24,8 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
     kernel MarathonWorkflow) and lets AgentSession attach the CLIENT-detected
     verify_cmd. Non-dock (streams to a plain sink) so a headless / CI launch works;
     the coding REPL (run_repl) is untouched."""
+    from webbee import loop_errors
+    loop_errors.install()           # a server-reset socket is no error on screen (Windows Proactor, 2026-11-14)
     if auth is None:
         from imperal_mcp import auth as _auth
         auth = _auth
@@ -1083,6 +1085,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
     (pane-only; Task 6 fills its content) alongside the first session slot;
     the fallback (non-dock) path stays single-slot with NO Home, so every
     existing fallback-path test keeps its world unchanged."""
+    from webbee import loop_errors
+    loop_errors.install()           # a server-reset socket is no error on screen (Windows Proactor, 2026-11-14)
     if auth is None:
         from imperal_mcp import auth as _auth
         auth = _auth
@@ -1227,10 +1231,24 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 # 0.3.36: on Home `_sink` is None and login_device_flow's
                 # prompt path calls `.note(...)` -- `_SaySink` puts the device
                 # code + URL into Home's own pane instead of crashing.
-                email = await login_device_flow(
-                    cfg, auth, _sink if _sink is not None else _SaySink(slot))
+                # live 2026-11-14 (Windows): an error inside the sign-in -- a reset connection on the e-mail lookup
+                # after the tokens were already saved -- escaped as an unhandled loop exception ("Press ENTER"), the
+                # dock still said signed out, and only a restart showed the user signed in
+                try:
+                    email = await login_device_flow(
+                        cfg, auth, _sink if _sink is not None else _SaySink(slot))
+                except Exception as e:
+                    if not (getattr(auth, "load_creds", None) and auth.load_creds()):
+                        _say(slot, f"Sign-in failed: {type(e).__name__}: {e} -- run /login again.")
+                        return "continue"
+                    email = "(signed in)"          # the tokens are saved: only what came after them failed
                 state["logged_in"] = True
                 _say(slot, f"Signed in as {email}.")
+                # what boot filled while signed out (Home's account, wallet, sessions) is filled again now, not after
+                # its 5-minute staleness
+                if slots.slots and getattr(slots.slots[0], "kind", "") == "home":
+                    _home = slots.slots[0]
+                    _home.bg_tasks.append(asyncio.ensure_future(home.fill_home(_home, **home_fill_kwargs)))
                 return "continue"
             if res.action == "logout":
                 await auth.logout(cfg)

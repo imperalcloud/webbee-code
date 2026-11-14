@@ -2480,8 +2480,13 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
     _swap_history(buf, _a())
 
     tick = asyncio.ensure_future(_ticker())
+    # live 2026-11-14 (Windows, Python 3.11): prompt_toolkit's own loop handler painted every unhandled loop exception
+    # -- a server-reset socket's WinError 10054 in the Proactor's connection-lost callback -- over the dock and stopped
+    # on "Press ENTER to continue...": the loop gets webbee's handler instead (webbee.loop_errors)
+    from webbee import loop_errors
+    loop_errors.install()
     try:
-        await app.run_async()
+        await app.run_async(set_exception_handler=False)
     finally:
         tick.cancel()
     return True

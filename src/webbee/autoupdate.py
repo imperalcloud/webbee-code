@@ -147,7 +147,10 @@ def on_stable(tool: str, prefix: str, specs) -> bool:
             with open(os.path.join(prefix, "uv-receipt.toml"), encoding="utf-8") as f:
                 receipt = f.read()
             urls = [s.split(" @ git+", 1)[-1].rsplit("@", 1)[0] for s in specs]
-            return all(f'git = "{u}?rev={STABLE}"' in receipt for u in urls)
+            # the repository and its branch on one requirement line, however this uv writes the ref (?rev=, @, #):
+            # an exact string a newer uv wrote otherwise would make every start "move" webbee onto the branch again
+            return all(any(u in line and any(m in line for m in (f"rev={STABLE}", f"@{STABLE}", f"#{STABLE}"))
+                           for line in receipt.splitlines()) for u in urls)
     except Exception:
         return False
     return True
@@ -450,6 +453,77 @@ def _roll_back(current: str, newest: str, python: str, light: str, env, uv, pipx
     return False
 
 
+ASIDE = ".old-"                             # webbee.exe.old-<pid>: a running launcher moved out of the installer's way
+
+
+def _script_dirs() -> list:
+    """Where this webbee's launchers stand: beside the running one (a pipx / uv copy in ~/.local/bin), this
+    environment's Scripts, the user scheme's Scripts."""
+    import sysconfig
+    dirs = []
+    if sys.argv and sys.argv[0]:
+        dirs.append(os.path.dirname(os.path.abspath(sys.argv[0])))
+    for scheme in ("", f"{os.name}_user"):
+        try:
+            dirs.append(sysconfig.get_path("scripts", scheme) if scheme else sysconfig.get_path("scripts"))
+        except Exception:
+            pass
+    out = []
+    for d in dirs:
+        if d and os.path.isdir(d) and os.path.normcase(d) not in [os.path.normcase(x) for x in out]:
+            out.append(d)
+    return out
+
+
+def free_launchers(names=(DIST,), dirs=None, windows: "bool | None" = None) -> list:
+    """Windows: each ``<name>.exe`` launcher renamed aside, so the installer can write the new one -- a running .exe
+    can be renamed there, never overwritten (live 2026-11-14: the self-upgrade of a pip / pipx install failed on every
+    start with the old webbee.exe in use, and "v... available" stayed). Returns ``[(path, aside)]`` for
+    ``put_back``. Elsewhere: nothing."""
+    if not (_WINDOWS if windows is None else windows):
+        return []
+    moved = []
+    for d in (dirs if dirs is not None else _script_dirs()):
+        for n in names:
+            path = os.path.join(d, n + ".exe")
+            if os.path.isfile(path):
+                aside = f"{path}{ASIDE}{os.getpid()}"
+                try:
+                    os.replace(path, aside)
+                    moved.append((path, aside))
+                except OSError:
+                    pass
+    return moved
+
+
+def put_back(moved) -> None:
+    """The launchers ``free_launchers`` moved, back where the installer wrote none (an upgrade that failed)."""
+    for path, aside in moved or []:
+        try:
+            if not os.path.exists(path):
+                os.replace(aside, path)
+        except OSError:
+            pass
+
+
+def sweep_aside(dirs=None) -> int:
+    """Launchers an earlier upgrade moved aside, removed once nothing runs them. Returns how many."""
+    n = 0
+    for d in (dirs if dirs is not None else _script_dirs()):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if ".exe" + ASIDE in name:
+                try:
+                    os.remove(os.path.join(d, name))
+                    n += 1
+                except OSError:
+                    pass                    # still running (another session): the next start removes it
+    return n
+
+
 def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe_which, run=subprocess.run,
                          execv=os.execv, env=os.environ, wheel=wheel_url, lock_path=_lock_path,
                          sleep=time.sleep, stable=stable_version, prefix: str = sys.prefix) -> list:
@@ -460,6 +534,8 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
     try:
         if env.get(OFF_ENV) == "1":
             return did
+        if _WINDOWS:
+            sweep_aside()
         lock = lock_path() if lock_path else ""
         if lock and not _lock(lock):
             # another webbee is upgrading this install: wait for it, then start on what it installed
@@ -496,9 +572,12 @@ def upgrade_before_start(argv, current: str, say=print, fetch=latest, which=safe
                 say(f"🐝 updating webbee {current} -> {newest} ..." if _ver(newest) > _ver(current) else
                     f"🐝 moving webbee {current} onto its release branch, so a reinstall brings the newest ...")
                 python = light or sys.executable
+                moved = free_launchers()
                 installed = _run(cmd, run)
                 ok = installed and (imports_ok(python, run, light=bool(light)) or
                                     (_run(cmd, run) and imports_ok(python, run, light=bool(light))))
+                if not installed:
+                    put_back(moved)
                 if not ok and (installed or not imports_ok(python, run, light=bool(light))):
                     # on disk a release that does not import (or an install that broke off halfway): the next start
                     # would run it and stay stuck. The one running now (and any other open session) holds the old

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.16
+
+* Needs imperal-mcp 0.9.19 (Windows sign-in fixes).
+* Windows: a connection the server closed no longer stops the terminal on "Unhandled exception in event loop ...
+  [WinError 10054] ... Press ENTER to continue" -- the dock runs without prompt_toolkit's own loop handler; a reset,
+  aborted or broken connection is dropped, any other loop exception goes to webbee.log, never over the screen.
+* /login: an error inside the sign-in is said ("Sign-in failed: ... run /login again"), never an unhandled exception; a
+  sign-in whose tokens were saved counts as signed in even when a later call broke; Home's account, wallet and
+  sessions are filled again right after it -- no restart needed.
+* Versions said right on every system ("a newer webbee is out" to someone on the newest):
+  - "vX is installed, restart webbee" read the version from the package metadata -- a left-over older install ahead
+    of the real one on sys.path (a user site-packages on Windows) named its version for good; it reads the running
+    package's own file now.
+  - the "available" notice reads the newest release where the start's self-upgrade and `pipx`/`uv tool upgrade`
+    install from (the `stable` branch; PyPI only without git), so the two never disagree.
+  - the upgrade command shown is the one for this install (uv, pipx, or `"<python>" -m pip install -U webbee`).
+  - a version with a suffix (rc, dev, +local) is read by its numbers, never as "older than everything".
+  - Windows: the self-upgrade of a pip / pipx install moves the running webbee.exe aside first (it cannot be
+    overwritten while it runs) and puts it back if the install fails; launchers left aside are removed at a later
+    start.
+  - a uv receipt on the release branch is read however that uv writes the ref (`?rev=`, `@`, `#`).
+
 ## 0.7.15
 
 * Needs imperal-sdk 6.6.1 and imperal-mcp 0.9.16 (the imperal-mcp 0.9.15 field test, report 2, fixed in every layer).
