@@ -317,7 +317,7 @@ class _FakeShadow:
         pass
     def diff(self, since=""):
         return f"DIFF since={since or 'HEAD'}"
-    def rollback(self, to):
+    def rollback(self, to, paths=None, allow_nested=False, own=None):
         self.rolled.append(to)
         return {"ok": True, "content": f"restored to {to}"}
 
@@ -713,7 +713,7 @@ def test_a_window_of_a_file_that_fits_reads_it_whole(tmp_path):
     r = ex.run("read_file", {"path": "store.py", "offset": 150, "limit": 40})
     head, body = r["content"].split("\n", 1)
     assert body == "".join(f"line {i}\n" for i in range(1, 593))           # byte-exact, whole
-    assert "the whole file, 592 lines" in head and "(150-189)" in head
+    assert "NOT applied" in head and "592 lines" in head and "150-189" in head     # 2026-11-13: said plainly
     assert (r["shown_from"], r["shown_to"], r["truncated"]) == (1, 592, False)
 
 

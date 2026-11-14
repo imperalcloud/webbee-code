@@ -444,6 +444,7 @@ class LocalToolExecutor:
             limit = 0
         partial = offset > 0 or limit > 0
         asked = ""
+        dropped = None          # the window asked and not applied (a small file is read whole)
         if partial and self._whole_seen.get(p) == st.st_mtime_ns:
             asked = (" [you read this file whole before and it has not changed since -- it is whole in "
                      "FILES YOU READ; here is only the window you asked: search it with grep_code or read a "
@@ -451,9 +452,13 @@ class LocalToolExecutor:
         elif partial and n <= _READ_WHOLE_LINES and len(text) <= _READ_WHOLE_CHARS:
             # a window of a file that fits is the file whole: its other lines are what the next
             # step asks for, and a window's line numbers go stale with the first edit
-            asked = (f" [the whole file, {n} lines -- the window you asked "
-                     f"({max(offset, 1)}-{max(offset, 1) + limit - 1 if limit > 0 else n}) is in it; "
-                     f"a file up to {_READ_WHOLE_LINES} lines is always read whole]")
+            lo = max(offset, 1)
+            hi = min(lo + limit - 1 if limit > 0 else n, n)
+            # said plainly, and in the answer's fields too (field test 2026-11-13: an agent read "the whole file" as
+            # its window applied)
+            asked = (f" [offset/limit NOT applied: the file is small ({n} lines; up to {_READ_WHOLE_LINES} are read "
+                     f"whole) -- the lines you asked, {lo}-{hi}, are in it]")
+            dropped = [lo, hi]
             offset = limit = 0
             partial = False
 
@@ -487,6 +492,7 @@ class LocalToolExecutor:
                                              f"pass offset/limit for the rest")
                        + "]")
         return {"ok": True, "content": header + "\n" + body,
+                **({"window_applied": False, "asked_window": dropped} if dropped else {}),
                 "shown_from": start + 1, "shown_to": end,
                 "truncated": (start > 0 or end < n),
                 "total_lines": n, "modified": int(st.st_mtime),
@@ -817,7 +823,23 @@ class LocalToolExecutor:
         if not to:
             return {"ok": False, "content":
                     "rollback requires 'checkpoint' (an id, cp-N or N -- see diff/checkpoint output)"}
-        return self.shadow.rollback(to)
+        paths = a.get("paths")
+        if isinstance(paths, str):
+            paths = [paths]
+        return self.shadow.rollback(to, paths=[str(x) for x in paths or []] or None,
+                                    allow_nested=bool(a.get("allow_nested")), own=self._own_paths())
+
+    def _own_paths(self) -> set:
+        """Workspace-relative files this session wrote with its own tools and nobody changed since (their mtime is
+        still the one our write left) -- a rollback may restore them without asking."""
+        own = set()
+        for p, mt in list(self._read_mtimes.items()):
+            try:
+                if os.stat(p).st_mtime_ns == mt:
+                    own.add(os.path.relpath(p, self.root).replace(os.sep, "/"))
+            except OSError:
+                continue
+        return own
 
     def _t_shell(self, a: dict) -> dict:
         return self._execute_shell(a)
@@ -892,7 +914,10 @@ class LocalToolExecutor:
         full = len(out)
         out = _truncated(out, _BASH_OUT_CAP)
         return {"ok": proc.returncode == 0 and not timed_out,
-                "content": out or f"(exit {proc.returncode})",
+                # a failure's code is in the text the agent reads, not only a field (field test 2026-11-13: an agent
+                # wrote "exit=0" for `pwd && git status` that exited 128 -- its text showed only the pwd line first)
+                "content": ((out + (f"\n[exit {proc.returncode}]" if proc.returncode else "")) if out
+                            else f"(exit {proc.returncode})"),
                 "exit_code": proc.returncode,
                 **({"timed_out": True} if timed_out else {}),
                 "output_chars": full,
@@ -1074,6 +1099,21 @@ class LocalToolExecutor:
         return {"ok": True, "content": {"repo_key": out.get("repo_key") or "", "synced_at": out["synced_at"],
                                         **({"repos": out["repos"]} if out.get("repos") else {}), "counts": counts}}
 
+    def _root_in_workspace(self, root) -> "tuple[str, str]":
+        """``(the root's path relative to the workspace, "")`` -- ``""`` for the workspace itself -- or ``("", why)``
+        for a root that is not a folder inside the workspace."""
+        r = str(root or "").strip()
+        if not r or r in (".", "./"):
+            return "", ""
+        full = os.path.realpath(r if os.path.isabs(os.path.expanduser(r)) else os.path.join(self.root, r))
+        base = os.path.realpath(self.root)
+        if not (full == base or full.startswith(base + os.sep)):
+            return "", f"root '{root}' is outside the workspace {base}"
+        if not os.path.isdir(full):
+            return "", f"root '{root}' does not exist (looked for {full}); a relative root is taken from {base}"
+        rel = os.path.relpath(full, base).replace(os.sep, "/")
+        return ("" if rel == "." else rel), ""
+
     def _cpc_local(self, verb: str, a: dict) -> dict:
         if self.indexer is None:
             from webbee import boot
@@ -1082,6 +1122,28 @@ class LocalToolExecutor:
                                             "restart webbee in the repository, and if it repeats, see "
                                             "~/.cache/webbee/tui-stderr.log"}
         from webbee.intel import query
+        sub, why = self._root_in_workspace(a.get("root"))
+        if why:
+            return {"ok": False, "content": why}
+        if sub:
+            # field test 2026-11-13: root="core/wpanel-gateway" and root="non_existent_dir" both answered with the
+            # whole folder's profile -- a search is narrowed to the folder, any other answer says what it covers
+            if verb in ("search_code", "orient"):
+                out = (query.search_code(self.indexer, a.get("query", ""), int(a.get("k", 20) or 20), a.get("kind"),
+                                         f"{sub}/*" if not a.get("path_glob") else f"{sub}/{a.get('path_glob')}")
+                       if verb == "search_code" else query.orient(self.indexer, a.get("query", "")))
+                if verb == "orient" and isinstance(out, dict):
+                    data = out.get("data") if isinstance(out.get("data"), dict) else None
+                    if data is not None and isinstance(data.get("items"), list):
+                        data["items"] = [i for i in data["items"]
+                                         if not isinstance(i, dict) or not i.get("path")
+                                         or str(i.get("path")).startswith(sub + "/")]
+                return out
+            out = self._cpc_local(verb, {k: v for k, v in a.items() if k != "root"})
+            if isinstance(out, dict):
+                out["note"] = (f"root={a.get('root')}: this local index covers {self.root} as a whole -- the answer "
+                               f"is not limited to {sub}")
+            return out
         if verb == "repo_profile":
             return query.repo_profile(self.indexer)
         if verb == "graph_slice":

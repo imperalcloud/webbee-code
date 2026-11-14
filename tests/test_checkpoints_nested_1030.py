@@ -63,7 +63,10 @@ def test_folder_of_two_repos_rolls_back_both(tmp_path):
     (gw / "app.py").write_text("WRECKED\n", encoding="utf-8")
     (mod / "lib" / "m.py").write_text("WRECKED\n", encoding="utf-8")
     (gw / "junk.py").write_text("garbage\n", encoding="utf-8")
-    r = sg.rollback(str(cp["n"]))
+    refused = sg.rollback(str(cp["n"]))                 # 2026-11-13: never over nested repositories by default
+    assert not refused["ok"] and "nested repositories" in refused["content"]
+    assert (gw / "app.py").read_text(encoding="utf-8") == "WRECKED\n"     # nothing was changed
+    r = sg.rollback(str(cp["n"]), allow_nested=True)
     assert r["ok"], r
     assert (gw / "app.py").read_text(encoding="utf-8") == "v1\n"
     assert (mod / "lib" / "m.py").read_text(encoding="utf-8") == "v1\n"
@@ -77,7 +80,7 @@ def test_folder_of_two_repos_rolls_back_both(tmp_path):
     # the rollback is itself undoable, inside nested repos too
     pre = sg.list_checkpoints()[0]
     assert pre["label"] == "pre-rollback"
-    assert sg.rollback(str(pre["n"]))["ok"]
+    assert sg.rollback(str(pre["n"]), allow_nested=True)["ok"]
     assert (gw / "app.py").read_text(encoding="utf-8") == "WRECKED\n"
     assert (gw / "junk.py").exists()
 
@@ -99,7 +102,7 @@ def test_nested_repo_inside_a_repo_is_restored(tmp_path):
     (inner / "inner.py").write_text("X\n", encoding="utf-8")
     (deeper / "deep.py").write_text("X\n", encoding="utf-8")
     sg.checkpoint("wreck")
-    r = sg.rollback(str(cp["n"]))
+    r = sg.rollback(str(cp["n"]), allow_nested=True)
     assert r["ok"], r
     assert (ws / "top.py").read_text(encoding="utf-8") == "t0\n"
     assert (inner / "inner.py").read_text(encoding="utf-8") == "i0\n"
@@ -141,7 +144,7 @@ def test_large_file_is_named_and_never_overwritten(tmp_path, monkeypatch):
     monkeypatch.setattr(checkpoints, "_MAX_FILE_BYTES", 100)
     (ws / "big.bin").write_bytes(b"b" * 500)            # grows past the bound: the safety snapshot cannot hold it
     (ws / "small.txt").write_text("s1", encoding="utf-8")
-    r = sg.rollback(str(cp["n"]))
+    r = sg.rollback(str(cp["n"]), allow_nested=True)
     assert r["ok"], r
     assert (ws / "small.txt").read_text(encoding="utf-8") == "s0"
     assert (ws / "big.bin").read_bytes() == b"b" * 500  # NOT overwritten with the old copy
@@ -150,7 +153,7 @@ def test_large_file_is_named_and_never_overwritten(tmp_path, monkeypatch):
     pre = sg.list_checkpoints()[0]
     assert "not snapshotted: big.bin" in sg._git("log", "-1", "--format=%b", "refs/webbee/cp-%d" % pre["n"]).stdout
     # a rollback TO a checkpoint that left a file out says so
-    r2 = sg.rollback(str(pre["n"]))
+    r2 = sg.rollback(str(pre["n"]), allow_nested=True)
     assert r2["ok"] and "NOT restored" in r2["content"] and "big.bin" in r2["not_restored"]
 
 
@@ -201,3 +204,35 @@ def test_slow_snapshot_pauses_auto_at_once(tmp_path, monkeypatch):
     assert not os.path.exists(os.path.join(sg.git_dir, "index.lock"))
     monkeypatch.setattr(checkpoints, "_SNAPSHOT_BUDGET_S", 30.0)
     assert sg.checkpoint("manual")["changed"]                       # a manual checkpoint still works
+
+
+
+# ── field test 2026-11-13: a whole-folder rollback reset a gateway another agent was editing ──
+
+def test_a_rollback_over_another_sessions_work_in_a_nested_repo_is_refused_and_paths_restore_only_them(tmp_path):
+    ws = tmp_path / "workspace"
+    repo = ws / "repoA"
+    _repo(repo, {"x.py": "v1\n"})
+    (ws / "notes.txt").write_text("mine v1\n", encoding="utf-8")
+    sg = _sg(ws, tmp_path)
+    cp = sg.checkpoint("before")
+    (ws / "notes.txt").write_text("mine v2\n", encoding="utf-8")              # this agent's own change
+    (repo / "x.py").write_text("OTHER AGENT'S WORK\n", encoding="utf-8")     # another session's, uncommitted
+    r = sg.rollback(str(cp["n"]))
+    assert not r["ok"] and "repoA" in r["content"] and r["would_overwrite"] == ["repoA/x.py"]
+    assert (repo / "x.py").read_text(encoding="utf-8") == "OTHER AGENT'S WORK\n"
+    r = sg.rollback(str(cp["n"]), paths=["notes.txt"])
+    assert r["ok"] and r["restored"] == ["notes.txt"]
+    assert (ws / "notes.txt").read_text(encoding="utf-8") == "mine v1\n"
+    assert (repo / "x.py").read_text(encoding="utf-8") == "OTHER AGENT'S WORK\n"   # untouched
+
+
+def test_this_sessions_own_writes_in_a_nested_repo_roll_back_without_asking(tmp_path):
+    ws = tmp_path / "workspace"
+    repo = ws / "repoA"
+    _repo(repo, {"x.py": "v1\n"})
+    sg = _sg(ws, tmp_path)
+    cp = sg.checkpoint("before")
+    (repo / "x.py").write_text("my edit\n", encoding="utf-8")
+    r = sg.rollback(str(cp["n"]), own={"repoA/x.py"})
+    assert r["ok"] and (repo / "x.py").read_text(encoding="utf-8") == "v1\n"

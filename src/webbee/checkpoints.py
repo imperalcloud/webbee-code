@@ -451,12 +451,17 @@ class ShadowGit:
             except OSError:
                 pass
 
-    def rollback(self, to: str) -> dict:
+    def rollback(self, to: str, paths: list | None = None, allow_nested: bool = False, own: set | None = None) -> dict:
         """Restore every checkpointed file to checkpoint `to`. The current
         state is checkpointed FIRST ("pre-rollback"), so a rollback is itself
         undoable. Files never checkpointed are not removed. A file the safety
         snapshot could not hold (too large, excluded) is never overwritten, and
-        the result names every path the rollback did not restore, with why."""
+        the result names every path the rollback did not restore, with why.
+
+        ``paths``: restore only these files or folders. A rollback that would change files INSIDE nested repositories
+        that are not this session's own writes (``own``: repo-relative paths the caller wrote and nobody changed
+        since; None: unknown) is refused without ``paths`` or ``allow_nested`` -- they may be another session's
+        uncommitted work (field test 2026-11-13: a whole-folder rollback reset a gateway another agent was editing)."""
         if not self.available:
             return {"ok": False, "content": "reversibility is off (git unavailable)"}
         target = self._resolve(to)
@@ -484,6 +489,22 @@ class ShadowGit:
                     return {"ok": False, "content":
                             "rollback refused: checkpoint " + to + " holds nested repositories only as "
                             "pointers and the shadow could not build a view that keeps them; nothing was changed."}
+            want = [str(x).strip().strip("/") for x in (paths or []) if str(x).strip().strip("/")]
+            changed = [x for x in self._git("diff", "--name-only", "-z", pre, goal).stdout.split("\0") if x]
+            nested_now = sorted(set(undo.get("nested") or []) | set(self._read_body(target)[0] or []))
+            hit = sorted({n for n in nested_now if any(c.startswith(n.rstrip("/") + "/") for c in changed)})
+            inside = [c for c in changed if any(c.startswith(n.rstrip("/") + "/") for n in hit)]
+            foreign = [c for c in inside if own is None or c not in own]
+            if foreign and not want and not allow_nested:
+                inside = foreign
+                return {"ok": False, "content":
+                        f"rollback refused: it would overwrite {len(inside)} file(s) inside the nested "
+                        f"repositories {', '.join(hit)} that this session did not write -- their own uncommitted "
+                        "work or another session's. Pass paths=[...] to restore only the files you changed, or "
+                        "allow_nested=true if they are yours (nothing was changed now).",
+                        "would_overwrite": inside[:50], "nested": hit}
+            if want:
+                return self._restore_paths(to, target, goal, want, undo)
             pre_paths = {p for _m, p in self._tree(pre)}
             goal_paths = {p for _m, p in self._tree(goal)}
             unsaved = dict(undo.get("uncovered") or [])
@@ -528,6 +549,30 @@ class ShadowGit:
                      f"({undo.get('id', '?')}), so this rollback is itself undoable.")
         return {"ok": True, "content": "\n".join(lines),
                 "nested": nested, "not_restored": [p for p, _w in not_restored], "left_as_is": held}
+
+    def _restore_paths(self, to: str, target: str, goal: str, want: list, undo: dict) -> dict:
+        """Restore only ``want`` (files or folders) to the checkpoint: each held there is written back, each absent
+        there is removed; nothing else in the workspace is touched."""
+        held = {p for _m, p in self._tree(goal)}
+        restored, removed = [], []
+        for w in want:
+            inside = sorted(p for p in held if p == w or p.startswith(w + "/"))
+            if inside:
+                r = self._git("checkout", goal, "--", *inside)
+                if r.returncode != 0:
+                    return {"ok": False, "content": f"rollback of {w} failed: {r.stderr.strip()[:300]}"}
+                restored += inside
+            full = os.path.join(self.root, w)
+            if not inside and os.path.lexists(full) and not os.path.isdir(full):
+                os.remove(full)          # not in the checkpoint: it did not exist then
+                removed.append(w)
+        lines = [f"restored {len(restored)} path(s) to checkpoint {to} ({target[:9]})"
+                 + (f"; removed {len(removed)} that it did not hold" if removed else "")
+                 + "; nothing else was touched."]
+        lines += [f"  - {p}" for p in (restored + removed)[:_NAMED_CAP]]
+        lines.append(f"The previous state was saved first as checkpoint cp-{undo.get('n', '?')} "
+                     f"({undo.get('id', '?')}), so this rollback is itself undoable.")
+        return {"ok": True, "content": "\n".join(lines), "restored": restored, "removed": removed}
 
     _AUTO_FAIL_LATCH = 3   # consecutive AUTO failures before pausing auto-checkpointing
     # writes while paused before one more try: a cause that went away (a symlink fixed, a slow disk) brings the time
