@@ -148,7 +148,9 @@ def test_pipx_upgrades_its_venv_in_place():
 
 def test_a_second_start_waits_for_the_first_upgrade_and_starts_on_it(tmp_path):
     lock = tmp_path / "webbee-upgrade.lock"
-    lock.write_text("1 0")                                    # another webbee is upgrading right now
+    # another webbee is upgrading right now: a process that runs on any system (pid 1 is init on POSIX, none on
+    # Windows -- there the lock was rightly found dead and taken, os-check 2026-11-14)
+    lock.write_text(f"{os.getppid()} 0")
     run, execd, env, said = _Run(), [], {}, []
     slept = []
 
