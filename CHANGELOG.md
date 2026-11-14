@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.15
+
+* Needs imperal-sdk 6.6.1 and imperal-mcp 0.9.16 (the imperal-mcp 0.9.15 field test, report 2, fixed in every layer).
+* read_file: a window asked of a small file that is returned whole says so (`window_applied`, `asked_window`).
+* bash: a failed command's exit code is in its text (`[exit 128]`).
+* rollback: refused, with the list, when it would overwrite files in nested repositories or files this session did not
+  write; `paths=[...]` restores only those files, `allow_nested=true` the nested ones too.
+* Code tools honour `root` (search narrowed to it, other answers say what they cover) or refuse one that is not there.
+
 ## 0.7.14
 
 * Needs imperal-sdk 6.6.0 and imperal-mcp 0.9.15 (the imperal-mcp 0.9.14 field test, fixed in every layer).
