@@ -319,7 +319,8 @@ def _pid_alive(pid: int) -> bool:
         return True
     if pid == os.getpid():
         return True
-    if _WINDOWS:                            # os.kill on Windows terminates: ask the process table instead
+    if os.name == "nt":                     # os.kill on Windows terminates: ask the process table instead -- the
+        #                                     system's own API, whatever restart path a caller pins (_WINDOWS)
         try:
             import ctypes
             k32 = ctypes.windll.kernel32
