@@ -50,13 +50,16 @@ jobs:
         working-directory: webbee
         run: python -m pytest -q -p no:cacheprovider tests/test_update.py tests/test_autoupdate.py tests/test_loop_errors.py tests/test_repl.py
       - name: imperal-mcp tests that depend on the system
+        if: ${{ !cancelled() }}        # every check runs: one failure never hides the others
         shell: bash
         working-directory: mcp
         run: python -m pytest -q -p no:cacheprovider tests/test_auth.py tests/test_launch.py tests/test_mask_pii.py tests/test_live_1114.py
       - name: real-system checks
+        if: ${{ !cancelled() }}        # every check runs: one failure never hides the others
         shell: bash
         run: python webbee/ci/os_check.py
       - name: install by pipx
+        if: ${{ !cancelled() }}        # every check runs: one failure never hides the others
         shell: bash
         run: |
           python -m pip install pipx
@@ -66,6 +69,7 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "webbee $v"
       - name: install by uv
+        if: ${{ !cancelled() }}        # every check runs: one failure never hides the others
         shell: bash
         run: |
           python -m pip install uv
