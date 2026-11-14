@@ -1,0 +1,77 @@
+name: os-check
+
+# Every system webbee runs on, before a release: the tests whose behaviour depends on the system, the real-system checks
+# (ci/os_check.py: a stray older dist-info, the upgrade command, a running Windows .exe reinstalled), and an install by
+# pip, pipx and uv. Publishes nothing (publish.yml runs on v* tags only).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mcp_ref:
+        description: "imperal-mcp ref to test with"
+        default: "main"
+  push:
+    branches: ["os-check"]
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    env:
+      WEBBEE_NO_AUTOUPDATE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: webbee
+      - uses: actions/checkout@v4
+        with:
+          repository: imperalcloud/imperal-mcp
+          ref: ${{ github.event.inputs.mcp_ref || 'os-check' }}
+          path: mcp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: wheels of this webbee and imperal-mcp
+        shell: bash
+        run: |
+          python -m pip install -U pip wheel build
+          python -m pip wheel --no-deps -w wheels ./webbee ./mcp
+          ls wheels
+      - name: install (pip) with the test tools
+        shell: bash
+        run: python -m pip install --find-links wheels "webbee" "imperal-mcp[code]" pytest pytest-asyncio respx
+      - name: webbee tests that depend on the system
+        shell: bash
+        working-directory: webbee
+        run: python -m pytest -q -p no:cacheprovider tests/test_update.py tests/test_autoupdate.py tests/test_loop_errors.py tests/test_repl.py
+      - name: imperal-mcp tests that depend on the system
+        shell: bash
+        working-directory: mcp
+        run: python -m pytest -q -p no:cacheprovider tests/test_auth.py tests/test_launch.py tests/test_mask_pii.py tests/test_live_1114.py
+      - name: real-system checks
+        shell: bash
+        run: python webbee/ci/os_check.py
+      - name: install by pipx
+        shell: bash
+        run: |
+          python -m pip install pipx
+          v=$(python -c "import webbee; print(webbee.__version__)")
+          python -m pipx install --pip-args="--find-links $(pwd)/wheels" ./webbee
+          out=$(python -m pipx list --short)
+          echo "$out"
+          echo "$out" | grep -q "webbee $v"
+      - name: install by uv
+        shell: bash
+        run: |
+          python -m pip install uv
+          python -m uv tool install --find-links wheels ./webbee
+          webbee_bin=$(python -m uv tool dir --bin)
+          ls "$webbee_bin"
+          v=$(python -c "import webbee; print(webbee.__version__)")
+          "$webbee_bin/webbee" --version | tee v.txt
+          grep -q "webbee $v" v.txt
