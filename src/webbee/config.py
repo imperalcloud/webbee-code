@@ -6,7 +6,7 @@ class Config:
     api_url: str
     panel_url: str
     intel_enabled: bool = True   # off switch for the on-disk index/watcher (env IMPERAL_INTEL=false)
-    cache_dir: str = ""          # "" -> IntelService's own default (~/.cache/webbee/intel)
+    cache_dir: str = ""          # "" -> IntelService's own default (intel.store.default_dir)
     voice_dir: str = ""          # "" -> ~/.webbee/voice
     credentials_file: str = ""   # "" -> ~/.imperal/credentials.json
 

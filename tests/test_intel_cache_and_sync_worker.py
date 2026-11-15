@@ -66,9 +66,6 @@ def test_edits_made_while_closed_are_reparsed_at_the_same_head(tmp_path, monkeyp
     assert "going" not in names and "gone.py" not in second.index.files
     assert "fresh_one" in names
     assert parsed == [["a.py", "new.py"]]                 # only what the stat check found changed is re-read
-    if second.vectors is not None:                        # the embed extra: the cached vectors follow the disk too
-        files = {i.split("#", 1)[0] for i in second.vectors.ids() if "#" in i}
-        assert "gone.py" not in files and "new.py" in files
 
     # the reconciled index was saved: a third start re-reads nothing
     parsed.clear()
@@ -96,12 +93,12 @@ def test_a_cache_from_before_the_stats_reparses_once(tmp_path):
     cache = str(tmp_path / "cache")
     svc = IntelService(str(repo), "rk", cache_dir=cache)
     svc.build()
-    store.save(cache, "rk", svc.index)                    # the old shape: no stats
+    store.save(cache, svc.cache_key, svc.index)                    # the old shape: no stats
     _bump(repo / "a.py", "def beta():\n    return 2\n")
     again = IntelService(str(repo), "rk", cache_dir=cache)
     again.build()
     assert "beta" in _names(again) and "alpha" not in _names(again)
-    assert store.load_with_stats(cache, "rk", again.git_ref)[1]           # saved with stats now
+    assert store.load_with_stats(cache, again.cache_key, again.git_ref)[1]           # saved with stats now
 
 
 def test_changes_are_saved_to_the_cache_debounced(tmp_path, monkeypatch):
@@ -124,7 +121,7 @@ def test_changes_are_saved_to_the_cache_debounced(tmp_path, monkeypatch):
         time.sleep(0.05)
     time.sleep(0.4)
     assert saves == [1]
-    idx, stats = store.load_with_stats(cache, "rk", svc.git_ref)
+    idx, stats = store.load_with_stats(cache, svc.cache_key, svc.git_ref)
     assert "edit_4" in {s.name for s in idx.files["a.py"].symbols}
     assert stats["a.py"][1] == os.stat(repo / "a.py").st_size
 
@@ -147,7 +144,7 @@ def test_flush_cache_saves_a_pending_change_now(tmp_path, monkeypatch):
     svc.apply_changes(["b.py"])
     svc.flush_cache()
     assert svc._save_timer is None
-    assert "b.py" in store.load(cache, "rk", svc.git_ref).files
+    assert "b.py" in store.load(cache, svc.cache_key, svc.git_ref).files
 
 
 def test_apply_changes_follows_a_moved_head(tmp_path):
@@ -163,7 +160,7 @@ def test_apply_changes_follows_a_moved_head(tmp_path):
     svc.flush_cache()
     assert svc.git_ref != before and svc.index.git_ref == svc.git_ref
     assert svc.repo_profile()["git_ref"] == svc.git_ref[:12]
-    assert store.load(str(tmp_path / "cache"), "rk", svc.git_ref) is not None      # saved under the new HEAD
+    assert store.load(str(tmp_path / "cache"), svc.cache_key, svc.git_ref) is not None      # saved under the new HEAD
 
 
 # ── H7: fresh flips false when the watcher ends, and says why ──────────────

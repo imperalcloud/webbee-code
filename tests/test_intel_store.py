@@ -80,56 +80,34 @@ def test_schema_version_mismatch_is_a_clean_miss(tmp_path):
     assert store.load(cache, "rk6", "abc") is None
 
 
-def test_save_vectors_writes_data_before_manifest(tmp_path, monkeypatch):
-    # F3: a crash between the two atomic os.replace() calls must never leave
-    # a manifest (chunks.json) pointing at an absent/stale embeddings.npy.
-    # Writing the data FIRST and the manifest LAST makes chunks.json the
-    # commit point -- a half-write always looks like "data present, manifest
-    # absent/old", which load_vectors already treats as a clean miss.
-    calls = []
-    real_replace = os.replace
-
-    def _tracking_replace(src, dst):
-        calls.append(os.path.basename(dst))
-        return real_replace(src, dst)
-    monkeypatch.setattr(store.os, "replace", _tracking_replace)
-
-    c = str(tmp_path / "c")
-    ids = ["a.py#1-2"]; mat = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)
-    store.save_vectors(c, "rk", "gitA", "model2vec:potion", ids, mat)
-
-    assert calls == ["embeddings.npy", "chunks.json"]
 
 
-def test_load_vectors_uses_mmap_and_skips_redundant_astype(tmp_path):
-    # F-Task15: embeddings.npy is always saved as float32 (save_vectors casts
-    # on the way in), so the unconditional .astype(np.float32) on every load
-    # was a redundant full-array RAM copy on top of the mmap read -- on a
-    # large repo's vector cache that's real memory pressure for no benefit.
-    # load_vectors must mmap (mmap_mode="r") and only copy via astype when
-    # the on-disk dtype actually mismatches float32.
-    c = str(tmp_path / "c")
-    ids = ["a.py#1-2", "b.py#1-2"]
-    mat = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32)
-    store.save_vectors(c, "rk", "gitA", "model2vec:potion", ids, mat)
-
-    got = store.load_vectors(c, "rk", "gitA", "model2vec:potion")
-    assert got is not None
-    got_ids, got_mat = got
-    assert got_ids == ids
-    assert got_mat.dtype == np.float32
-    assert isinstance(got_mat, np.memmap)          # no RAM copy for the common case
-    np.testing.assert_array_equal(got_mat, mat)
+def test_one_cache_folder_per_repository(tmp_path, monkeypatch):
+    """Owner 2026-11-15 (phase 6 decision 3): a subfolder's index is a file in its repository's folder."""
+    import subprocess
+    repo = tmp_path / "repo"
+    (repo / "pkg" / "sub").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    top, sub = store.cache_key(str(repo)), store.cache_key(str(repo / "pkg" / "sub"))
+    assert "/" not in top and sub.startswith(top + "/") and sub != store.cache_key(str(repo / "pkg"))
+    (tmp_path / "a.py").write_text("def a():\n    pass\n")
+    idx = indexer.build_index(str(tmp_path), ["a.py"]); idx.git_ref = "abc"
+    cache = str(tmp_path / "cache")
+    store.save(cache, top, idx)
+    store.save(cache, sub, idx)
+    assert sorted(os.listdir(cache)) == [top]
+    assert sorted(os.listdir(os.path.join(cache, top))) == ["index.json", f"sub-{sub.split('/')[1]}.json"]
+    assert store.load(cache, sub, "abc") is not None
 
 
-def test_vectors_roundtrip_gated(tmp_path):
-    c = str(tmp_path / "c")
-    ids = ["a.py#1-2"]; mat = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)
-    store.save_vectors(c, "rk", "gitA", "model2vec:potion", ids, mat)
-    npy = tmp_path / "c" / "rk" / "embeddings.npy"
-    assert npy.exists() and not (tmp_path / "c" / "rk" / "embeddings.npy.npy").exists()
-    got = store.load_vectors(c, "rk", "gitA", "model2vec:potion")
-    assert got is not None and got[0] == ids and got[1].shape == (1, 3)
-    assert store.load_vectors(c, "rk", "gitB", "model2vec:potion") is None   # git mismatch
-    assert store.load_vectors(c, "rk", "gitA", "other-model") is None        # model mismatch
-    assert store.load_vectors(c, "rk_absent", "gitA", "model2vec:potion") is None
+def test_the_old_layout_is_removed_once_and_a_set_folder_is_never_touched(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    old = tmp_path / ".cache" / "webbee" / "intel" / "0123456789ab"
+    old.mkdir(parents=True)
+    (old / "index.json").write_text("{}")
+    monkeypatch.setattr(store, "_DROPPED", False)
+    assert store.default_dir() == str(tmp_path / "webbee-index-cache")     # a set folder: the old one stays
+    assert old.exists()
+    monkeypatch.delenv("IMPERAL_INTEL_CACHE_DIR")
+    assert store.default_dir() == str(tmp_path / ".cache" / "webbee" / "index")
+    assert not (tmp_path / ".cache" / "webbee" / "intel").exists()

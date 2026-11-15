@@ -11,7 +11,14 @@ on:
     tags: ["v*"]
 
 jobs:
+  # nothing reaches PyPI before the field gate passes on every system (ICNLI §13.5: verified, not self-declared)
+  gate:
+    uses: ./.github/workflows/os-check.yml
+    with:
+      webbee_ref: ${{ github.sha }}
+      mcp_ref: main
   publish:
+    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the GitHub Release for the tag

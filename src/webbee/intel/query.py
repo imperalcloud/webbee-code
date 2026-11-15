@@ -1,6 +1,7 @@
 from __future__ import annotations
-import fnmatch
 import re
+
+from imperal_sdk.code_index import path_matches
 
 
 def _env(items: list[dict], has_more: bool = False) -> dict:
@@ -11,13 +12,6 @@ def _sym_item(s) -> dict:
     return {"id": f"{s.path}::{s.name}", "title": s.name, "kind": s.kind,
             "subtitle": f"{s.path}:{s.start_line}", "signature": s.signature, "doc": getattr(s, "doc", "") or "",
             "path": s.path, "start_line": s.start_line, "end_line": s.end_line}
-
-
-def _latin_share(q: str) -> float:
-    """The share of the query's letters an English-only embedding reads as words (live 2026-11-13: potion-base-8M
-    splits Cyrillic into one-letter pieces, so any two Russian texts scored ~0.88 alike and unrelated code came first)."""
-    letters = [c for c in q or "" if c.isalpha()]
-    return (sum(1 for c in letters if c.isascii()) / len(letters)) if letters else 1.0
 
 
 def repo_profile(svc) -> dict:
@@ -62,7 +56,6 @@ def graph_slice(svc, symbols, depth: int = 1) -> dict:
 
 
 _RRF_K = 60
-_fnmatch = fnmatch.fnmatch
 
 
 def _fuse_rrf(arms: list[list[str]], k: int = _RRF_K) -> list[str]:
@@ -78,7 +71,7 @@ def _fuse_rrf(arms: list[list[str]], k: int = _RRF_K) -> list[str]:
 
 def _lexical_search(svc, q, kind, path_glob, items_by_id: dict) -> list[str]:
     """U1 substring-over-symbol-table match, extracted verbatim so it can
-    serve as its own RRF arm (and the whole answer when vectors are absent).
+    serve as its own RRF arm -- the whole answer of the client index (the vault answers by meaning).
     A symbol also matches when every word of the query (3+ letters, any script) is in its description -- a Russian
     docstring is found by a Russian query (2026-11-13)."""
     ql, hits = (q or "").lower(), []
@@ -90,7 +83,7 @@ def _lexical_search(svc, q, kind, path_glob, items_by_id: dict) -> list[str]:
                 continue
             if kind and s.kind != kind:
                 continue
-            if path_glob and not _fnmatch(s.path, path_glob):
+            if path_glob and not path_matches(s.path, path_glob):
                 continue
             hits.append(_sym_item(s))
     hits.sort(key=lambda i: (i["title"].lower() != ql, len(i["title"])))
@@ -101,72 +94,14 @@ def _lexical_search(svc, q, kind, path_glob, items_by_id: dict) -> list[str]:
     return ids
 
 
-def _chunk_item(svc, cid: str, score: float) -> dict | None:
-    """Map an embed-chunk id back to a search item.
-
-    Id shape is '<path>#<start>-<end>:<kind>:<symbol>' (chunker._mk). The
-    ':<kind>:<symbol>' tail was added 2026-07-25 to make ids unique -- see
-    chunker._mk -- so the line range is only the part BEFORE the first ':'.
-    Ids written by an older cache have no tail at all, hence the partition
-    (not a required split): both shapes parse, and a schema bump means the
-    old ones are normally gone anyway.
-
-    Title/kind = the enclosing symbol's when the graph has one covering the
-    chunk's line range, else the bare '<path>:<start>' / 'chunk' fallback --
-    a hardcoded kind="chunk" would make every vector hit invisible to a
-    kind= filter (F4), since none of them are ever literally "chunk"."""
-    if "#" not in cid or "-" not in cid.rpartition("#")[2]:
-        return None
-    path, _, rng = cid.rpartition("#")
-    rng = rng.partition(":")[0]          # drop the ':<kind>:<symbol>' tail
-    start_s, end_s = rng.split("-", 1)
-    try:
-        start, end = int(start_s), int(end_s)
-    except ValueError:
-        return None
-    title, kind, doc = f"{path}:{start}", "chunk", ""
-    idx = getattr(svc.graph, "index", None) if svc.graph is not None else None
-    fi = idx.files.get(path) if idx is not None else None
-    if fi is not None:
-        for s in fi.symbols:
-            if s.start_line <= start and s.end_line >= end:
-                title, kind, doc = s.name, s.kind, getattr(s, "doc", "") or ""
-                break
-    return {"id": cid, "title": title, "kind": kind, "doc": doc,
-            "subtitle": f"{path}:{start}", "signature": "",
-            "path": path, "start_line": start, "end_line": end, "score": score}
-
-
 def search_code(svc, q, k: int = 20, kind=None, path_glob=None) -> dict:
     if svc is None or svc.graph is None:
         return {"ok": False, "content": "index not ready"}
     items_by_id: dict = {}
-    # lexical arm (U1) -- also the whole answer when vectors are absent
+    # lexical arm (U1): names, and a docstring's words in any script -- meaning across languages is the vault's search
+    # (variant A, 2026-11-15: the client builds no vectors)
     lex_ids = _lexical_search(svc, q, kind, path_glob, items_by_id)
     arms = [lex_ids]
-    # vector arm (hybrid) -- skipped gracefully when unavailable
-    # (I-CPC-SEARCH-HYBRID-FALLSOFT: no vectors/backend/embed error must
-    # never turn into an error envelope -- fall through to lexical+graph).
-    try:
-        b = svc._get_backend() if getattr(svc, "vectors", None) is not None else None
-        # a query mostly in a script the embedding cannot read gets no vector arm: its "nearest" chunks are noise
-        if b is not None and svc.vectors is not None and _latin_share(q) >= 0.5:
-            qv = b.embed_query(q)
-            vec_hits = svc.vectors.search(qv, top_n=50)
-            vec_ids = []
-            for cid, sc in vec_hits:
-                it = _chunk_item(svc, cid, sc)
-                if it is None:
-                    continue
-                if kind and it["kind"] != kind:
-                    continue
-                if path_glob and not _fnmatch(it["path"], path_glob):
-                    continue
-                items_by_id[it["id"]] = it
-                vec_ids.append(it["id"])
-            arms.append(vec_ids)
-    except Exception:
-        pass    # any embed/vector error -> lexical+graph only (never break the turn)
     # graph arm: 1-hop expansion deferred to U2.6 (no-op for now, per plan)
     fused = _fuse_rrf(arms)
     hits = [items_by_id[i] for i in fused if i in items_by_id][:k]

@@ -113,3 +113,10 @@ def _never_a_real_server(monkeypatch):
     async def refuse(host, argv, timeout=0, cap=0):
         return -1, b"", f"tests never reach a server ({host})"
     monkeypatch.setattr(wt, "remote_run", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_index_cache(tmp_path, monkeypatch):
+    """2026-11-15: an IntelService built without a cache_dir wrote its index under the developer's real
+    ~/.cache/webbee -- 1692 folders there, most of them test folders. Every test's index cache is its own."""
+    monkeypatch.setenv("IMPERAL_INTEL_CACHE_DIR", str(tmp_path / "webbee-index-cache"))

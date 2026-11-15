@@ -115,10 +115,13 @@ async def start_intel(cfg, workspace: str, intel_factory):
         svc = (intel_factory or _default_intel_factory)(cfg, workspace)
         await asyncio.to_thread(svc.build)
         flush = getattr(svc, "flush_cache", None)
+        import atexit
         if flush is not None:
             # the changes of the last seconds reach the index cache when webbee quits, not only at its timer
-            import atexit
             atexit.register(lambda: _quietly(flush))
+        close = getattr(svc, "close", None)
+        if close is not None:       # the code sync ends with webbee, never after its loop (2026-11-15)
+            atexit.register(lambda: _quietly(close))
         from webbee.intel import watch
         watcher_task = asyncio.ensure_future(watch.watch_workspace(svc.root, svc.apply_changes))
         # its end is always collected: an exception is never printed when webbee quits ("Task exception was never
@@ -156,7 +159,7 @@ async def boot_workspace(cfg, workspace: str, intel_factory, shadow_factory) -> 
     independent off-loop jobs (each already its own asyncio.to_thread) but
     used to run one after another via a blocking await on each -- paying
     their full cost ADDED TOGETHER instead of the cost of the slowest one
-    alone. Indexing a real repo (model2vec embeddings, file walks) is by far
+    alone. Indexing a real repo (parsing, file walks) is by far
     the heaviest of the three, so a large repo turned "add up all three"
     into a very real, very visible wait with nothing on screen to show for
     it. asyncio.gather now runs all three AT ONCE -- same guarded, fail-soft

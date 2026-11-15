@@ -39,40 +39,6 @@ def test_a1_chunk_id_ignores_kind_so_ids_can_collide():
     )
 
 
-def test_a1_duplicate_id_in_one_batch_is_survivable():
-    """The crash that used to happen here: same id twice in ONE add() batch.
-
-    Pre-fix, `_mat` was only created at the END of add() (the `if rows:`
-    vstack) while the already-seen branch wrote `_mat[_pos[_id]]` immediately,
-    so the second occurrence indexed a still-empty matrix -> IndexError ->
-    intel silently off. Fixed by materialising appends BEFORE overwrites.
-    """
-    np = pytest.importorskip("numpy")
-    from webbee.intel.vectors import VectorStore
-
-    vs = VectorStore(dim=4)
-    vs.add(["dup", "dup"], np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype="float32"))
-    ids, mat = vs.to_arrays()
-    assert list(ids) == ["dup"]
-    assert mat.tolist() == [[0.0, 1.0, 0.0, 0.0]], "last value must win"
-
-
-def test_a1_duplicate_id_is_survivable_on_a_warm_store_too():
-    """Not just the empty-store edge: a warm store used to raise as well.
-
-    The pre-existing row must also survive the batch untouched.
-    """
-    np = pytest.importorskip("numpy")
-    from webbee.intel.vectors import VectorStore
-
-    vs = VectorStore(dim=4)
-    vs.add(["seed"], np.array([[9, 9, 9, 9]], dtype="float32"))
-    vs.add(["x", "x"], np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype="float32"))
-    ids, mat = vs.to_arrays()
-    assert list(ids) == ["seed", "x"]
-    assert mat.tolist() == [[9.0, 9.0, 9.0, 9.0], [0.0, 1.0, 0.0, 0.0]]
-
-
 def test_a6_walk_prunes_dependency_trees_but_keeps_real_source(tmp_path):
     """FIXED 2026-07-25: the index walk must not spend itself on dependencies.
 
@@ -425,49 +391,6 @@ def test_healthy_allowlisted_lookup_tables_are_never_mutated():
             f"{mod.__name__}: lookup table mutated ({hit.group(0)!r}) -- "
             "it is shared across every tab, so this is a cross-tab leak"
         )
-
-def test_a1_end_to_end_repro_one_ordinary_file_kills_intel(tmp_path):
-    """The COMPLETE A-1 chain, from source file to dead intel, no venv needed.
-
-    Trigger geometry (derived, not guessed): a class longer than
-    _CHUNK_MAX_LINES is split by _windows() into 60-line windows stepping by
-    (60 - 10) = 50, so windows start at 1, 51, 101... When the class's LAST
-    window happens to span exactly the same lines as a trailing method, both
-    chunks get the id "path#51-61" -- and VectorStore.add then writes
-    _mat[pos] while _mat is still the empty (0, dim) array.
-
-    A class spanning lines 1..61 with a method spanning 51..61 is the minimal
-    such shape.
-    """
-    import collections
-
-    from imperal_sdk import code_index as chunker, code_index as indexer
-    from webbee.intel.vectors import VectorStore
-
-    lines = ["class Big:"]                        # line 1
-    lines += [f"    x{i} = {i}" for i in range(49)]   # lines 2..50
-    lines.append("    def tail(self):")           # line 51
-    lines += [f"        y{j} = {j}" for j in range(10)]  # lines 52..61
-    assert len(lines) == 61
-    (tmp_path / "win.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    idx = indexer.build_index(str(tmp_path), ["win.py"])
-    chunks = chunker.chunk_index(str(tmp_path), idx)
-    ids = [c.id for c in chunks]
-    dupes = {k: v for k, v in collections.Counter(ids).items() if v > 1}
-
-    # FIXED 2026-07-25: this exact geometry used to yield "win.py#51-61"
-    # twice (the class's last window + the method) and kill intel.
-    assert dupes == {}, f"A-1 REGRESSED: colliding chunk ids {dupes}"
-    # the two chunks that used to collide are still both present, now distinct
-    assert "win.py#51-61:chunk:Big" in ids
-    assert "win.py#51-61:function:tail" in ids
-
-    # ...and the embed step that used to explode now completes.
-    vs = VectorStore(dim=4)
-    vs.add(ids, [[1.0, 0.0, 0.0, 0.0]] * len(ids))
-    assert vs.to_arrays()[1].shape[0] == len(ids)
-
 
 
 def test_a1_intel_failure_is_swallowed_so_the_user_is_never_told():

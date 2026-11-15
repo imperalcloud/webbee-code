@@ -176,7 +176,7 @@ def test_acceptance_wrecked_project_recovers_in_one_rollback(tmp_path):
     ex.run("multi_edit", {"edits": [
         {"path": "README.md", "old": "# bot", "new": "# WRECKED"}]})
 
-    r = ex.run("rollback", {"checkpoint": str(good["n"])})   # ONE rollback
+    r = ex.run("checkpoint_rollback", {"target": str(good["n"])})   # ONE rollback
     assert r["ok"], r
     assert (root / "bot/main.py").read_text(encoding="utf-8") == "def start():\n    return 'ok'\n"
     assert (root / "bot/config.py").read_text(encoding="utf-8") == "TOKEN = 'placeholder'\n"
@@ -346,3 +346,28 @@ def test_a_folder_replaced_by_a_symlink_does_not_break_snapshots(tmp_path):
     os.rename(ws / "data", tmp_path / "moved")
     os.symlink(tmp_path / "moved", ws / "data")
     assert sg.checkpoint("after symlink") is not None, sg.last_error
+
+
+def test_a_diff_narrows_by_paths_and_names_an_unknown_checkpoint(tmp_path):
+    """Gate 2026-11-15 (diff-missing-target): a diff against an unknown checkpoint answered "(no changes)" against HEAD;
+    paths narrow the diff by git itself (its stat too), for every shell."""
+    import pytest
+    from webbee.checkpoints import ShadowGit, UnknownCheckpoint
+    ws = tmp_path / "ws"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "a.py").write_text("x = 1\n")
+    (ws / "docs").mkdir()
+    (ws / "docs" / "b.md").write_text("p\n")
+    (ws / "latin.txt").write_bytes(b"caf\xe9\n")                  # no UTF-8: must not break the diff
+    sg = ShadowGit.at(str(ws), cache_dir=str(tmp_path / "cache"))
+    assert sg.available
+    sg.checkpoint("base", force=True)
+    (ws / "src" / "a.py").write_text("x = 2\n")
+    (ws / "docs" / "b.md").write_text("q\n")
+    (ws / "latin.txt").write_bytes(b"caf\xe8\n")
+    both = sg.diff("cp-1")
+    only = sg.diff("cp-1", paths=["src"])
+    assert "src/a.py" in both and "docs/b.md" in both
+    assert "src/a.py" in only and "docs/b.md" not in only
+    with pytest.raises(UnknownCheckpoint, match="cp-1"):
+        sg.diff("99")

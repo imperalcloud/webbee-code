@@ -2831,7 +2831,11 @@ def test_land_on_session_when_boot_replay_shows_something(monkeypatch):
                     auth=FakeAuth(), account_fetcher=_fake_account_fetcher,
                     sessions_client=FakeSessions(), intel_factory=lambda c, ws: _NoopIntel(),
                     shadow_factory=lambda c, ws: None))
-                await asyncio.sleep(0.15)
+                # the landing is asynchronous: wait for it (a fixed 0.15 s failed under a loaded full run, 2026-11-15)
+                for _ in range(100):
+                    if created_slots and created_slots[0].active_idx == 1:
+                        break
+                    await asyncio.sleep(0.05)
                 assert created_slots and created_slots[0].active_idx == 1   # landed on the session
 
                 pipe.send_text("/exit\r")
@@ -2993,3 +2997,31 @@ def test_a_failed_sign_in_is_said_never_an_unhandled_loop_exception():
     sink, agent = _run(read_line=_lines("/login", "/exit"), auth=_FailingLoginAuth(saved=False))
     assert any("Sign-in failed: ConnectionResetError" in n and "/login again" in n for n in sink.notes)
     assert not any("Signed in as" in n for n in sink.notes)
+
+
+def test_run_headless_once_is_one_bounded_turn_with_its_answer():
+    """Owner 2026-11-15 (gate R1-19): ``webbee --once "task"`` runs one coding turn without the screen -- not a
+    marathon -- and returns its answer for the exit code and stdout."""
+    from webbee.repl import run_headless
+    seen = []
+
+    class OneTurn:
+        async def run(self, task, sink, *, marathon=False, goal=""):
+            seen.append((task, marathon))
+            return "done: 3 tests pass"
+
+    class _Auth:
+        async def ensure_access_token(self, cfg, force=False):
+            return "tok"
+    from webbee.config import Config
+    sink = FakeSink()
+    text = asyncio.run(run_headless(Config(api_url="http://x", panel_url="http://p"), "default", "run the tests",
+                                    marathon=False, sink=sink, auth=_Auth(), agent_factory=lambda c, tp, ws, m: OneTurn()))
+    assert text == "done: 3 tests pass" and seen == [("run the tests", False)] and sink.turns == ["done: 3 tests pass"]
+
+
+def test_the_cli_takes_a_task_after_once():
+    from webbee.cli import build_parser
+    p = build_parser()
+    assert p.parse_args(["--once", "fix x"]).once == "fix x" and p.parse_args(["--once"]).once is True
+    assert p.parse_args([]).once is False and p.parse_args(["login"]).cmd == "login"

@@ -33,7 +33,7 @@ def test_bash_runs_in_workspace(tmp_path):
 def test_grep(tmp_path):
     ex = _ex(tmp_path)
     ex.run("write_file", {"path": "a.py", "content": "def foo():\n    pass\n"})
-    r = ex.run("grep", {"pattern": "def foo"})
+    r = ex.run("grep_code", {"pattern": "def foo"})
     assert r["ok"] and "a.py" in r["content"]
 
 
@@ -41,9 +41,9 @@ def test_grep_on_a_single_file(tmp_path):
     """live 2026-10-20: every grep whose path was one file answered "(no matches)"."""
     ex = _ex(tmp_path)
     ex.run("write_file", {"path": "app/writers.py", "content": "x = 1\n@writer\ndef save():\n    pass\n"})
-    r = ex.run("grep", {"pattern": "@writer", "path": "app/writers.py"})
-    assert r["ok"] and r["match_count"] == 1 and r["content"] == os.path.join("app", "writers.py") + ":2:@writer"
-    assert ex.run("grep", {"pattern": "nothing", "path": "app/writers.py"})["content"] == "(no matches)"
+    r = ex.run("grep_code", {"pattern": "@writer", "path_glob": "app/writers.py"})
+    assert r["ok"] and r["match_count"] == 1 and r["content"] == "app/writers.py:2:@writer"
+    assert ex.run("grep_code", {"pattern": "nothing", "path_glob": "app/writers.py"})["content"] == "(no matches)"
 
 
 def test_grep_skips_git_dir(tmp_path):
@@ -54,7 +54,7 @@ def test_grep_skips_git_dir(tmp_path):
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
     (git_dir / "blob.txt").write_text("needle\n")
-    r = ex.run("grep", {"pattern": "needle"})
+    r = ex.run("grep_code", {"pattern": "needle"})
     assert r["ok"] and "a.py" in r["content"] and ".git" not in r["content"]
 
 
@@ -68,7 +68,7 @@ def test_grep_prunes_heavy_dirs(tmp_path):
     nm = tmp_path / "node_modules" / "pkg"
     nm.mkdir(parents=True)
     (nm / "index.js").write_text("needle\n")
-    r = ex.run("grep", {"pattern": "needle"})
+    r = ex.run("grep_code", {"pattern": "needle"})
     assert r["ok"]
     assert "a.py" in r["content"]
     assert "node_modules" not in r["content"]
@@ -315,7 +315,7 @@ class _FakeShadow:
         return {"id": "abc1234", "n": len(self.labels), "label": label, "changed": True}
     def note_auto_result(self, ok):
         pass
-    def diff(self, since=""):
+    def diff(self, since="", paths=None):
         return f"DIFF since={since or 'HEAD'}"
     def rollback(self, to, paths=None, allow_nested=False, own=None):
         self.rolled.append(to)
@@ -340,7 +340,7 @@ def test_read_tools_do_not_checkpoint(tmp_path):
     ex, sh = _ex_shadow(tmp_path)
     ex.run("write_file", {"path": "a.txt", "content": "x"})
     ex.run("read_file", {"path": "a.txt"})
-    ex.run("grep", {"pattern": "x"})
+    ex.run("grep_code", {"pattern": "x"})
     assert sh.labels == ["pre:write_file"]
 
 
@@ -360,17 +360,17 @@ def test_checkpoint_diff_rollback_shims(tmp_path):
     ex, sh = _ex_shadow(tmp_path)
     r = ex.run("checkpoint", {"label": "before refactor"})
     assert r["ok"] and "cp-" in r["content"]
-    r = ex.run("diff", {"since": "cp-1"})
+    r = ex.run("checkpoint_diff", {"target": "cp-1"})
     assert r["ok"] and r["content"] == "DIFF since=cp-1"
-    r = ex.run("rollback", {"checkpoint": "cp-1"})
+    r = ex.run("checkpoint_rollback", {"target": "cp-1"})
     assert r["ok"] and sh.rolled == ["cp-1"]
-    r = ex.run("rollback", {})
+    r = ex.run("checkpoint_rollback", {})
     assert not r["ok"] and "requires" in r["content"]
 
 
 def test_reversibility_tools_honest_without_shadow(tmp_path):
     ex = _ex(tmp_path)                                      # no shadow wired
-    for tool, args in (("checkpoint", {}), ("diff", {}), ("rollback", {"checkpoint": "1"})):
+    for tool, args in (("checkpoint", {}), ("checkpoint_diff", {}), ("checkpoint_rollback", {"target": "1"})):
         r = ex.run(tool, args)
         assert not r["ok"] and "unavailable" in r["content"]
 
@@ -680,7 +680,7 @@ def test_grep_states_how_many_matches_were_hidden(tmp_path):
     for i in range(300):
         (tmp_path / f"f{i}.py").write_text("MATCHME = 1\n")
     ex = LocalToolExecutor(str(tmp_path))
-    r = ex.run("grep", {"pattern": "MATCHME"})
+    r = ex.run("grep_code", {"pattern": "MATCHME", "k": 200})
     assert "TRUNCATED" in r["content"]
     assert "300" in r["content"], "must state the true total, not just the shown count"
     assert r["shown"] == 200 and r["match_count"] == 300
@@ -690,7 +690,7 @@ def test_grep_states_how_many_matches_were_hidden(tmp_path):
 def test_grep_under_the_cap_is_not_marked(tmp_path):
     (tmp_path / "a.py").write_text("MATCHME = 1\n")
     ex = LocalToolExecutor(str(tmp_path))
-    r = ex.run("grep", {"pattern": "MATCHME"})
+    r = ex.run("grep_code", {"pattern": "MATCHME"})
     assert "TRUNCATED" not in r["content"]
     assert r["truncated"] is False
 
@@ -706,30 +706,29 @@ def test_read_file_window_returns_exactly_that_window(tmp_path):
     assert (r["shown_from"], r["shown_to"], r["total_lines"]) == (400, 404, 6000)
 
 
-def test_a_window_of_a_file_that_fits_reads_it_whole(tmp_path):
-    """2026-10-30: a 592-line file read ~40 times in 35-70 line windows -- a file up to 5000 lines is read whole."""
+def test_the_window_asked_is_the_window_read(tmp_path):
+    """Owner 2026-11-15 (supersedes 2026-10-30): offset/limit are always honoured -- a small file's window is that
+    window, its line numbers the file's own (gate read-window: the window was dropped for files up to 5000 lines)."""
     (tmp_path / "store.py").write_text("".join(f"line {i}\n" for i in range(1, 593)))
     ex = LocalToolExecutor(str(tmp_path))
     r = ex.run("read_file", {"path": "store.py", "offset": 150, "limit": 40})
     head, body = r["content"].split("\n", 1)
-    assert body == "".join(f"line {i}\n" for i in range(1, 593))           # byte-exact, whole
-    assert "NOT applied" in head and "592 lines" in head and "150-189" in head     # 2026-11-13: said plainly
-    assert (r["shown_from"], r["shown_to"], r["truncated"]) == (1, 592, False)
+    assert body.splitlines() == [f"line {i}" for i in range(150, 190)]
+    assert "NOT applied" not in head and (r["shown_from"], r["shown_to"]) == (150, 189)
 
 
 def test_a_window_of_a_file_already_read_whole_is_only_that_window(tmp_path):
     """Report 2026-11-07 4.2: 14 windows of one 1605-line file each came back whole -- 14 copies in the context."""
     (tmp_path / "screens.py").write_text("".join(f"line {i}\n" for i in range(1, 1606)))
     ex = LocalToolExecutor(str(tmp_path))
-    first = ex.run("read_file", {"path": "screens.py", "offset": 1, "limit": 90})
-    assert first["shown_to"] == 1605                                        # the first window is the file whole
+    ex.run("read_file", {"path": "screens.py"})                             # read whole once
     again = ex.run("read_file", {"path": "screens.py", "offset": 91, "limit": 90})
     head, body = again["content"].split("\n", 1)
     assert body.splitlines() == [f"line {i}" for i in range(91, 181)]
     assert "FILES YOU READ" in head and (again["shown_from"], again["shown_to"]) == (91, 180)
     (tmp_path / "screens.py").write_text("changed\n" * 10)
     after = ex.run("read_file", {"path": "screens.py", "offset": 2, "limit": 3})
-    assert after["shown_to"] == 10 and "FILES YOU READ" not in after["content"].splitlines()[0]
+    assert (after["shown_from"], after["shown_to"]) == (2, 4) and "FILES YOU READ" not in after["content"].splitlines()[0]
 
 
 def test_read_file_without_a_window_auto_caps_a_huge_file(tmp_path):
@@ -1075,3 +1074,27 @@ def test_auto_checkpoint_off_retries_and_comes_back(tmp_path):
     for i in range(sg._AUTO_RETRY_EVERY):
         ex.run("write_file", {"path": f"b{i}.txt", "content": "2"})
     assert sg.auto_ok is True
+
+
+def test_a_secret_file_is_read_by_its_form(tmp_path):
+    """Owner 2026-11-15 (phase 6 decision 1): read_file shows a settings file's keys with every value masked, key
+    material as its line count; the masked view is never the base of an edit."""
+    (tmp_path / ".env").write_text("# note pw\nDB_HOST=db.local\nX=hunter2\n")
+    (tmp_path / "id_ed25519").write_text("-----BEGIN KEY-----\nAAAAbody\n-----END KEY-----\n")
+    ex = _ex(tmp_path)
+    r = ex.run("read_file", {"path": ".env"})
+    assert r["ok"] and "hunter2" not in r["content"] and "db.local" not in r["content"]
+    assert "DB_HOST=<redacted:secret-file-value>" in r["content"] and "every value masked" in r["content"]
+    assert r["total_lines"] == 3
+    k = ex.run("read_file", {"path": "id_ed25519"})
+    assert k["ok"] and "AAAAbody" not in k["content"] and "<redacted:key-file>" in k["content"]
+    assert str(tmp_path / ".env") not in ex._read_mtimes
+
+
+def test_bash_is_bash_even_where_sh_is_dash(tmp_path):
+    """Field gate 2026-11-15 (Linux, /bin/sh -> dash): `false | true; echo ${PIPESTATUS[0]}` was "Bad substitution"."""
+    import shutil
+    if os.name == "nt" or not shutil.which("bash"):
+        return
+    r = _ex(tmp_path).run("bash", {"command": "false | true; echo ${PIPESTATUS[0]}"})
+    assert r["content"].strip().splitlines()[0] == "1"

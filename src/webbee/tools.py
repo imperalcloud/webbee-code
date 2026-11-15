@@ -4,19 +4,20 @@ import re
 import subprocess
 import threading
 import time
+
+from imperal_sdk import code_index as ci
+from imperal_sdk import tool_contract as ci_contract
 from datetime import datetime
 
 
-# Tools that MUTATE the workspace -> auto-checkpoint before each run
-# (mirrors the kernel write tier; rollback snapshots itself, so not listed).
-_WRITE_TIER = {"write_file", "append_file", "edit_file", "multi_edit", "shell", "bash"}
-# The tools plan mode runs -- the ones that only read (an allowlist: a checkpoint, a rollback, a command, an edit or
-# any tool added later is refused in plan mode until it is named here -- security review 2026-10-30)
-PLAN_SAFE_TOOLS = frozenset({
-    "read_file", "read_symbol", "outline", "list_dir", "glob", "grep", "search_code", "orient", "repo_profile",
-    "graph_slice", "impact_of_change", "contract_slice", "diff", "read_url", "web_search", "view_image",
-    "inspect_page", "intel_sync_local", "intel_sync_remote",
-})
+# Tools that MUTATE the workspace -> auto-checkpoint before each run: the contract's writes and commands (the SDK's
+# one list, ICNLI 3.5) that change files; a rollback snapshots itself, so not listed.
+_WRITE_TIER = set((ci_contract.names_by_effect("write", "webbee", "client")
+                   | ci_contract.names_by_effect("run", "webbee", "client")) - {"checkpoint_rollback"})
+# The tools plan mode runs -- the ones that only read: the contract's reads, and the few this executor answers beyond
+# the contract (an allowlist: any tool added later is refused in plan mode until it reads -- security review 2026-10-30)
+PLAN_SAFE_TOOLS = frozenset(ci_contract.names_by_effect("read", "webbee", "client") | {
+    "read_url", "web_search", "view_image", "intel_sync_local", "intel_sync_remote"})
 
 # Informational stale-view warning appended to a SUCCESSFUL edit/write when
 # the on-disk file is newer than the agent's last read (external edit under
@@ -400,6 +401,14 @@ class LocalToolExecutor:
         # into an old-string match.
         rel = self._rel(a)
         p = self.resolve_in_workspace(rel)
+        rel_ws = os.path.relpath(p, self.root).replace(os.sep, "/")
+        from imperal_sdk.universal.kinds import never_read_at
+        # owner 2026-11-15 (phase 6 decision 1): a secret file is read by its form -- a settings file's keys with every
+        # value masked, key material as its line count only (imperal_sdk.secret_mask.secret_file_view)
+        secret = bool(never_read_at(self.root, rel_ws))
+        why = refused_local(self.root, rel_ws, p, secret_view=secret)
+        if why:
+            return {"ok": False, "content": why}
 
         # native-document-read-v1: a .pdf/.docx/.xlsx/.odt or an image is NOT
         # broken input -- it is a document the platform can already read. Before
@@ -407,15 +416,18 @@ class LocalToolExecutor:
         # nothing at all. Route it to the system File Reader instead; source
         # files take the byte-exact text path below, untouched.
         from webbee.native_files import is_native
-        if is_native(rel):
+        if is_native(rel) and not secret:
             from webbee.native_read import read_native
             return read_native(self.client_factory, p, rel,
                                offset=int(a.get("offset") or 0),
                                limit=int(a.get("limit") or 0))
 
         try:
-            with open(p, "r", encoding="utf-8") as f:
+            with open(p, "r", encoding="utf-8", errors="replace" if secret else "strict") as f:
                 text = f.read()
+            if secret:
+                from imperal_sdk.secret_mask import scrub_secret_file
+                text = scrub_secret_file(text, rel_ws)
         except UnicodeDecodeError:
             # A binary whose extension did not give it away (no extension, an
             # unusual one, a mislabelled export). Same door rather than the
@@ -425,8 +437,9 @@ class LocalToolExecutor:
                                offset=int(a.get("offset") or 0),
                                limit=int(a.get("limit") or 0))
         st = os.stat(p)
-        self._read_mtimes[p] = st.st_mtime_ns
-        lines = text.splitlines()
+        if not secret:          # a masked view is never the base of an edit (its old_string would not match the disk)
+            self._read_mtimes[p] = st.st_mtime_ns
+        lines = ci.text_lines(text)          # the SDK's lines: wc -l, CRLF one break (gate 2026-11-15)
         n = len(lines)
 
         # Partial reads (I-TOOLS-PARTIAL-READ): before this, read_file was
@@ -449,19 +462,6 @@ class LocalToolExecutor:
             asked = (" [you read this file whole before and it has not changed since -- it is whole in "
                      "FILES YOU READ; here is only the window you asked: search it with grep_code or read a "
                      "part with read_symbol rather than paging]")
-        elif partial and n <= _READ_WHOLE_LINES and len(text) <= _READ_WHOLE_CHARS:
-            # a window of a file that fits is the file whole: its other lines are what the next
-            # step asks for, and a window's line numbers go stale with the first edit
-            lo = max(offset, 1)
-            hi = min(lo + limit - 1 if limit > 0 else n, n)
-            # said plainly, and in the answer's fields too (field test 2026-11-13: an agent read "the whole file" as
-            # its window applied)
-            asked = (f" [offset/limit NOT applied: the file is small ({n} lines; up to {_READ_WHOLE_LINES} are read "
-                     f"whole) -- the lines you asked, {lo}-{hi}, are in it]")
-            dropped = [lo, hi]
-            offset = limit = 0
-            partial = False
-
         start = max(offset - 1, 0) if offset > 0 else 0
         if start > n:
             start = n
@@ -471,7 +471,7 @@ class LocalToolExecutor:
             end = _READ_LINE_CAP
         end = min(end, n)
 
-        if not partial and n > _OUTLINE_FIRST_LINES:
+        if not partial and n > _OUTLINE_FIRST_LINES and not secret:
             first = self._outline_first(os.path.relpath(p, self.root), text, n, st)
             if first is not None:
                 return first
@@ -482,10 +482,13 @@ class LocalToolExecutor:
         # is re-joined; a full read hands back the original text untouched.
         if start == 0 and end == n:
             body = text
-            self._whole_seen[p] = st.st_mtime_ns
+            if not secret:
+                self._whole_seen[p] = st.st_mtime_ns
         else:
             body = "\n".join(lines[start:end])
         header = self._file_header(os.path.relpath(p, self.root), n, st.st_mtime) + asked
+        if secret:
+            header += " [a secret file: keys shown, every value masked]"
         if start or end < n:
             header += (f" [showing lines {start + 1}-{end} of {n}"
                        + ("" if partial else f"; auto-capped at {_READ_LINE_CAP} — "
@@ -517,6 +520,9 @@ class LocalToolExecutor:
     def _code_text(self, a: dict):
         rel = self._rel(a)
         p = self.resolve_in_workspace(rel)
+        why = refused_local(self.root, os.path.relpath(p, self.root).replace(os.sep, "/"), p)
+        if why:
+            raise OSError(why)
         with open(p, "r", encoding="utf-8") as f:
             return os.path.relpath(p, self.root), f.read()
 
@@ -530,7 +536,7 @@ class LocalToolExecutor:
         if nodes is None:
             return {"ok": False, "content": f"outline: {rel} is not Python/TS/JS code (or the parser is "
                                             "not installed) -- read it with read_file"}
-        return {"ok": True, "content": ol.render_outline(rel, nodes, len(text.split("\n"))),
+        return {"ok": True, "content": ol.render_outline(rel, nodes, ci.line_count(text)),
                 "nodes": nodes}
 
     def _t_read_symbol(self, a: dict) -> dict:
@@ -545,7 +551,7 @@ class LocalToolExecutor:
                                             "outline(path) lists them"}
         p = self.resolve_in_workspace(rel)
         self._read_mtimes[p] = os.stat(p).st_mtime_ns
-        total = len(text.split("\n"))
+        total = ci.line_count(text)
         return {"ok": True, "content": ol.read_card(rel, total, part["start"], part["end"], part["body"]),
                 "shown_from": part["start"], "shown_to": part["end"], "total_lines": total,
                 "symbol": part["name"], "kind": part["kind"]}
@@ -791,12 +797,28 @@ class LocalToolExecutor:
                 f"\n… (diff truncated at {_DIFF_CAP} chars)\n" if len(joined) > _DIFF_CAP else "")
         return out
 
-    def _t_checkpoint(self, a: dict) -> dict:
+    def _shadow_at(self, root) -> "tuple":
+        """``(the history of the folder root names, "")`` or ``(None, why)`` -- the workspace's own without a root
+        (gate 2026-11-15: a root was ignored and a checkpoint of one repo held another's changes)."""
         if self.shadow is None:
-            return {"ok": False, "content": "reversibility is unavailable (no shadow git)"}
-        cp = self.shadow.checkpoint(str(a.get("label", "") or "manual"))
+            return None, "reversibility is unavailable (no shadow git)"
+        rel, why = self._root_in_workspace(root)
+        if why:
+            return None, why
+        if not rel:
+            return self.shadow, ""
+        from webbee.checkpoints import ShadowGit
+        base = os.path.dirname(os.path.dirname(self.shadow.git_dir))     # the same cache as the workspace's history
+        sg = ShadowGit.at(os.path.join(self.root, rel), cache_dir=base)
+        return (sg, "") if sg.available else (None, "reversibility is unavailable for that folder (no shadow git)")
+
+    def _t_checkpoint(self, a: dict) -> dict:
+        sg, why = self._shadow_at(a.get("root"))
+        if sg is None:
+            return {"ok": False, "content": why}
+        cp = sg.checkpoint(str(a.get("label", "") or "manual"))
         if cp is None:
-            why = str(getattr(self.shadow, "last_error", "") or "") or "shadow git error"
+            why = str(getattr(sg, "last_error", "") or "") or "shadow git error"
             return {"ok": False, "content": f"checkpoint failed: {why}"}
         note = "created" if cp.get("changed") else "no changes since the last checkpoint"
         # what it holds and what it does not, said (2026-10-30: a checkpoint of a folder of repositories held none of
@@ -811,32 +833,44 @@ class LocalToolExecutor:
         return {"ok": True, "content": f"checkpoint cp-{cp.get('n')} ({cp.get('id')}): {note}{extra}",
                 **({"uncovered": [list(x) for x in uncovered]} if uncovered else {})}
 
-    def _t_diff(self, a: dict) -> dict:
-        if self.shadow is None:
-            return {"ok": False, "content": "reversibility is unavailable (no shadow git)"}
-        return {"ok": True, "content": self.shadow.diff(str(a.get("since", "") or ""))}
+    def _t_checkpoint_diff(self, a: dict) -> dict:
+        from webbee.checkpoints import UnknownCheckpoint
+        sg, why = self._shadow_at(a.get("root"))
+        if sg is None:
+            return {"ok": False, "content": why}
+        paths = a.get("paths")
+        try:
+            return {"ok": True, "content": sg.diff(str(a.get("target", "") or ""),
+                                                    [paths] if isinstance(paths, str) else paths)}
+        except UnknownCheckpoint as e:
+            return {"ok": False, "content": str(e)}
 
-    def _t_rollback(self, a: dict) -> dict:
-        if self.shadow is None:
-            return {"ok": False, "content": "reversibility is unavailable (no shadow git)"}
-        to = str(a.get("checkpoint", "") or a.get("to", "") or "")
+    def _t_checkpoint_rollback(self, a: dict) -> dict:
+        sg, why = self._shadow_at(a.get("root"))
+        if sg is None:
+            return {"ok": False, "content": why}
+        to = str(a.get("target", "") or "")
         if not to:
             return {"ok": False, "content":
-                    "rollback requires 'checkpoint' (an id, cp-N or N -- see diff/checkpoint output)"}
+                    "checkpoint_rollback requires 'target' (an id, cp-N or N -- see checkpoint_diff / checkpoint)"}
         paths = a.get("paths")
         if isinstance(paths, str):
             paths = [paths]
-        return self.shadow.rollback(to, paths=[str(x) for x in paths or []] or None,
-                                    allow_nested=bool(a.get("allow_nested")), own=self._own_paths())
+        return sg.rollback(to, paths=[str(x) for x in paths or []] or None,
+                           allow_nested=bool(a.get("allow_nested")), own=self._own_paths(getattr(sg, "root", "")))
 
-    def _own_paths(self) -> set:
-        """Workspace-relative files this session wrote with its own tools and nobody changed since (their mtime is
-        still the one our write left) -- a rollback may restore them without asking."""
+    def _own_paths(self, base: str = "") -> set:
+        """Files this session wrote with its own tools and nobody changed since (their mtime is still the one our
+        write left), relative to ``base`` (the history's folder; default the workspace) -- a rollback may restore them
+        without asking."""
+        base = base or self.root
         own = set()
         for p, mt in list(self._read_mtimes.items()):
             try:
                 if os.stat(p).st_mtime_ns == mt:
-                    own.add(os.path.relpath(p, self.root).replace(os.sep, "/"))
+                    rel = os.path.relpath(p, base).replace(os.sep, "/")
+                    if not rel.startswith("../"):
+                        own.add(rel)
             except OSError:
                 continue
         return own
@@ -887,9 +921,14 @@ class LocalToolExecutor:
         # started kept running, and the output gathered so far was dropped): on a timeout the whole group stops and
         # what it printed comes back. stderr is merged where it was printed, not appended after stdout.
         posix = os.name != "nt"
+        # the tool is named bash and the model writes bash (PIPESTATUS, [[ ]], arrays): run by bash where there is one
+        # -- shell=True alone is /bin/sh, dash on Debian/Ubuntu (field gate 2026-11-15: "Bad substitution")
+        import shutil
+        shell_bin = shutil.which("bash") if posix else None
         proc = subprocess.Popen(
             a["command"], shell=True, cwd=self.root, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+            **({"executable": shell_bin} if shell_bin else {}),
             **({"start_new_session": True} if posix else
                {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}))
         timed_out = False
@@ -923,40 +962,21 @@ class LocalToolExecutor:
                 "output_chars": full,
                 "truncated": full > _BASH_OUT_CAP}
 
-    def _t_grep(self, a: dict) -> dict:
-        from webbee.coding_context import WALK_IGNORE_DIRS
-        pat = re.compile(a["pattern"])
-        base = self.resolve_in_workspace(a.get("path", "."))
-        hits = []
-        # a single file is searched itself: os.walk() yields nothing for a file, so every grep on
-        # one file answered "(no matches)" (live 2026-10-20: 30 of 34 single-file greps were false)
-        walk = [(os.path.dirname(base), [], [os.path.basename(base)])] if os.path.isfile(base) else os.walk(base)
-        for dp, dns, fns in walk:
-            if _is_git_dir(dp):
-                dns[:] = []
-                continue
-            # Prune heavy dependency/build dirs (node_modules, vendor, dist,
-            # …) so a grep on a real repo doesn't crawl megabytes of deps.
-            dns[:] = [d for d in dns if d not in WALK_IGNORE_DIRS]
-            for fn in fns:
-                fp = os.path.join(dp, fn)
-                try:
-                    with open(fp, "r", encoding="utf-8") as f:
-                        for i, line in enumerate(f, 1):
-                            if pat.search(line):
-                                rel = os.path.relpath(fp, self.root)
-                                hits.append(f"{rel}:{i}:{line.rstrip()}")
-                except (UnicodeDecodeError, OSError):
-                    continue
-        shown = hits[:_GREP_HIT_CAP]
-        body = "\n".join(shown) or "(no matches)"
-        if len(hits) > _GREP_HIT_CAP:
-            body += (f"\n\n… ⚠ TRUNCATED: showing {_GREP_HIT_CAP} of {len(hits):,} matches "
-                     f"({len(hits) - _GREP_HIT_CAP:,} hidden). Narrow `path` or tighten the "
-                     f"pattern -- do NOT assume these are all of them.")
-        return {"ok": True, "content": body,
-                "match_count": len(hits), "shown": len(shown),
-                "truncated": len(hits) > _GREP_HIT_CAP}
+    def _t_grep_code(self, a: dict) -> dict:
+        rel, why = self._root_in_workspace(a.get("root"))
+        if why:
+            return {"ok": False, "content": why}
+        got = local_grep(os.path.join(self.root, rel) if rel else self.root, str(a.get("pattern") or ""),
+                         regex=bool(a.get("regex")), path_glob=str(a.get("path_glob") or ""), k=int(a.get("k") or 50))
+        if got.get("why"):
+            return {"ok": False, "content": got["why"]}
+        rows = [f"{(rel + '/' if rel else '')}{m['path']}:{m['line']}:{m['text']}" for m in got["matches"]]
+        body = "\n".join(rows) or "(no matches)"
+        if got["truncated"]:
+            body += (f"\n\n... TRUNCATED: showing {len(rows)} of {got['total']:,} matches -- narrow path_glob or the "
+                     "pattern; do NOT assume these are all of them.")
+        return {"ok": True, "content": body, "match_count": got["total"], "shown": len(rows),
+                "truncated": got["truncated"]}
 
     def _t_list_dir(self, a: dict) -> dict:
         """Structured directory listing -- the cheap alternative to `bash ls`.
@@ -1139,25 +1159,44 @@ class LocalToolExecutor:
                                          if not isinstance(i, dict) or not i.get("path")
                                          or str(i.get("path")).startswith(sub + "/")]
                 return out
-            out = self._cpc_local(verb, {k: v for k, v in a.items() if k != "root"})
-            if isinstance(out, dict):
-                out["note"] = (f"root={a.get('root')}: this local index covers {self.root} as a whole -- the answer "
-                               f"is not limited to {sub}")
-            return out
+            # any other answer is the folder's own: its own index (gate 2026-11-15: repo_profile of root= answered the
+            # whole workspace with a note); imperal-mcp builds the same per root
+            svc = self._indexer_at(sub)
+            if svc is None:
+                return {"ok": False, "content": f"root={a.get('root')}: its index could not be built"}
+            return self._cpc_on(svc, verb, a)
+        return self._cpc_on(self.indexer, verb, a)
+
+    def _indexer_at(self, sub: str):
+        """The code index of a folder inside the workspace (built once, kept for the session)."""
+        cache = self.__dict__.setdefault("_sub_indexers", {})
+        if sub not in cache:
+            try:
+                from webbee.intel.service import IntelService
+                from webbee.repo import compute_repo_key
+                full = os.path.join(self.root, sub)
+                svc = IntelService(full, compute_repo_key(full), cache_dir=getattr(self.indexer, "cache_dir", ""))
+                svc.load_or_build()
+                cache[sub] = svc
+            except Exception:
+                cache[sub] = None
+        return cache[sub]
+
+    def _cpc_on(self, svc, verb: str, a: dict) -> dict:
+        from webbee.intel import query
         if verb == "repo_profile":
-            return query.repo_profile(self.indexer)
+            return query.repo_profile(svc)
         if verb == "graph_slice":
-            return query.graph_slice(self.indexer, self._as_str_list(a.get("symbols")), int(a.get("depth", 1) or 1))
+            return query.graph_slice(svc, self._as_str_list(a.get("symbols")), int(a.get("depth", 1) or 1))
         if verb == "search_code":
-            return query.search_code(self.indexer, a.get("query", ""), int(a.get("k", 20) or 20),
-                                      a.get("kind"), a.get("path_glob"))
+            return query.search_code(svc, a.get("query", ""), int(a.get("k", 20) or 20), a.get("kind"),
+                                     a.get("path_glob"))
         if verb == "impact_of_change":
-            return query.impact_of_change(self.indexer, self._as_str_list(a.get("symbols")))
+            return query.impact_of_change(svc, self._as_str_list(a.get("symbols")))
         if verb == "contract_slice":
-            return query.contract_slice(self.indexer, a.get("query", ""),
-                                        a.get("kind", "all"), int(a.get("k", 50) or 50))
+            return query.contract_slice(svc, a.get("query", ""), a.get("kind", "all"), int(a.get("k", 50) or 50))
         if verb == "orient":
-            return query.orient(self.indexer, a.get("query", ""))
+            return query.orient(svc, a.get("query", ""))
         return {"ok": False, "content": f"unknown cpc verb: {verb}"}
 
     def _t_intel_sync_remote(self, a: dict) -> dict:
@@ -1603,8 +1642,130 @@ async def remote_read(host: str, root: str, rel: str, cap: int = REMOTE_READ_CAP
         return {"text": "", "why": why or f"{path}: cannot be read on {host}"}
     truncated = len(raw) > cap
     text = raw[:cap].decode("utf-8", "replace")
-    return {"text": text, "total_lines": text.count("\n") + (0 if text.endswith("\n") else 1), "path": path,
+    return {"text": text, "total_lines": ci.line_count(text), "path": path,
             "truncated": truncated, "why": ""}
+
+
+GREP_FILE_MAX = 2 * 1048576     # a text file bigger than this is data, not something to grep through
+GREP_EXTRA_MAX = 20000          # text files beyond the code index searched in one call
+LOCK_FILES = frozenset({"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "uv.lock", "cargo.lock",
+                        "composer.lock", "gemfile.lock", "go.sum", "pipfile.lock"})
+_NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*[+*{]|"
+                                r"\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*[+*{]")
+
+
+def refused_local(ws: str, rel: str, full: str, secret_view: bool = False) -> str:
+    """Why a local tool never opens this file, or "": a secret by its name, by its real path (the workspace itself a
+    secret store, a link into one), anything but a regular file, a cloud placeholder -- the one rule of read_file,
+    outline, read_symbol and grep_code in Webbee and imperal-mcp (final review 2026-11-04; webbee's read_file had none,
+    2026-11-15). ``secret_view``: the caller shows a secret file by its form (read_file, owner 2026-11-15) -- only
+    the other refusals stand."""
+    from imperal_sdk.universal.kinds import never_read_at
+    if not secret_view and never_read_at(ws, rel):
+        return f"{rel}: this file is never read (a secret by its name or where it lies)"
+    try:
+        st = os.stat(full)
+    except OSError as exc:
+        return f"{rel}: {exc}"
+    import stat as _stat
+    if not _stat.S_ISREG(st.st_mode):
+        return f"{rel}: not a regular file"
+    try:
+        from imperal_sdk.universal.index import is_placeholder
+        if is_placeholder(rel, st):
+            return f"{rel}: a cloud placeholder (reading it would download it)"
+    except ImportError:
+        pass
+    return ""
+
+
+def check_pattern(pattern: str, regex: bool) -> str:
+    """Why a search pattern cannot run, or "": a regex that does not compile (the engine's words, where, and how to
+    fix it) or one that can run without end (field test 2026-11-13; webbee raised PatternError raw, 2026-11-15)."""
+    if not regex:
+        return ""
+    if _NESTED_QUANTIFIER.search(str(pattern or "")):
+        return ("a nested quantifier (a repeated group around a repeated piece) can run without end -- use a literal "
+                "or a simpler pattern")
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        at = f" at position {exc.pos}: {pattern[:exc.pos]}<HERE>{pattern[exc.pos:]}" if exc.pos is not None else ""
+        return (f"not a valid regular expression ({exc.msg}){at} -- escape ( ) [ ] . * + ? with a backslash to match "
+                "them literally, or pass regex=false for an exact text")
+    return ""
+
+
+def grep_files(ws: str):
+    """The files grep_code reads, code first: the code index's own files, then every other text file git tracks or
+    would track (configs, docs, CI) -- never a secret (refused_local), never a dependency or build folder, a lock file,
+    a binary or a file over GREP_FILE_MAX (live 2026-11-13: a version string in server.json was "not found")."""
+    from webbee.intel.service import _local_listing
+    seen = set()
+    for item in _local_listing(ws):
+        seen.add(item["path"])
+        yield item["path"]
+    if not os.path.isdir(os.path.join(ws, ".git")):
+        return
+    try:
+        r = subprocess.run(["git", "-C", ws, "ls-files", "-co", "--exclude-standard", "-z"],
+                           capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if r.returncode != 0:
+        return
+    extra = 0
+    for rel in r.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        if not rel or rel in seen:
+            continue
+        parts = rel.split("/")
+        if any(d == ".git" or d in ci.SKIP_DIRS for d in parts[:-1]) or parts[-1].lower() in LOCK_FILES:
+            continue
+        full = os.path.join(ws, rel)
+        if refused_local(ws, rel, full):
+            continue
+        try:
+            if os.path.getsize(full) > GREP_FILE_MAX:
+                continue
+            with open(full, "rb") as f:
+                if b"\0" in f.read(4096):
+                    continue
+        except OSError:
+            continue
+        extra += 1
+        if extra > GREP_EXTRA_MAX:
+            return
+        yield rel
+
+
+def local_grep(ws: str, pattern: str, regex: bool = False, path_glob: str = "", k: int = 50) -> dict:
+    """An exact text (or a regex) in a local repository's files: ``{matches: [{path, line, text}], total, truncated,
+    why}`` -- the one local search of Webbee's grep_code and imperal-mcp's (paths relative to ``ws``)."""
+    why = check_pattern(pattern, regex)
+    if why:
+        return {"matches": [], "total": 0, "truncated": False, "why": why}
+    k = max(1, min(int(k or 50), 500))
+    rx = re.compile(pattern) if regex else None
+    real_ws = os.path.realpath(ws)
+    matches, total = [], 0
+    for rel in grep_files(ws):
+        if path_glob and not ci.path_matches(rel, path_glob):
+            continue
+        full = os.path.join(ws, rel)
+        real = os.path.realpath(full)
+        if os.path.islink(full) or not (real == real_ws or real.startswith(real_ws + os.sep)):
+            continue                       # never a link, never a path that resolves outside the repo
+        try:
+            with open(full, encoding="utf-8", errors="replace") as f:
+                for n, line in enumerate(f, start=1):
+                    part = line[:2000]
+                    if (rx.search(part) if rx else pattern in part):
+                        total += 1
+                        if len(matches) < k:
+                            matches.append({"path": rel, "line": n, "text": line.rstrip("\n")[:300]})
+        except OSError:
+            continue
+    return {"matches": matches, "total": total, "truncated": total > len(matches), "why": ""}
 
 
 async def remote_grep(host: str, root: str, pattern: str, k: int = 50, path_glob: str = "",
@@ -1612,7 +1773,9 @@ async def remote_grep(host: str, root: str, pattern: str, k: int = 50, path_glob
     """An exact text (or an extended regex) in a server repo's code files, searched ON the server (``git grep``,
     else ``grep -r``): ``{matches: [{path, line, text}], total, truncated, why}``. Only the code files the index
     reads (``code_index.indexable``), never a secret; at most ``REMOTE_GREP_LINES`` lines come back."""
-    from imperal_sdk import code_index as ci
+    why = check_pattern(pattern, regex)
+    if why:
+        return {"matches": [], "total": 0, "truncated": False, "why": why}
     flag = "-E" if regex else "-F"
     glob = ["--", path_glob] if path_glob else []
     rc, out, why = await remote_run(host, ["git", "-C", root, "grep", "-n", "-I", "--no-color", flag, "-e", pattern,
@@ -1625,7 +1788,6 @@ async def remote_grep(host: str, root: str, pattern: str, k: int = 50, path_glob
         rel_base = root.rstrip("/") + "/"
         if rc not in (0, 1) or why:
             return {"matches": [], "total": 0, "truncated": False, "why": why or f"grep failed on {host}"}
-    import fnmatch
     matches, total = [], 0
     lines = out.decode("utf-8", "replace").split("\n")
     for ln in lines[:REMOTE_GREP_LINES]:
@@ -1635,7 +1797,7 @@ async def remote_grep(host: str, root: str, pattern: str, k: int = 50, path_glob
             continue
         if rel_base and path.startswith(rel_base):
             path = path[len(rel_base):]
-        if not ci.indexable(path) or _remote_refused(path) or (path_glob and not fnmatch.fnmatch(path, path_glob)):
+        if not ci.indexable(path) or _remote_refused(path) or (path_glob and not ci.path_matches(path, path_glob)):
             continue
         total += 1
         if len(matches) < k:

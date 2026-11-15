@@ -353,7 +353,11 @@ class AgentSession:
         def _make():
             from imperal_mcp.client import ImperalClient
 
-            if main_loop is not None and main_loop.is_running():
+            if main_loop is None or main_loop.is_closed():
+                # the session's loop has ended (webbee quitting): its token cannot be asked -- no client, the caller
+                # skips this send (2026-11-15: a sync at exit failed with "Event loop is closed")
+                return None
+            if main_loop.is_running():
                 async def _bridged_token_provider() -> str:
                     try:
                         current_loop = asyncio.get_running_loop()

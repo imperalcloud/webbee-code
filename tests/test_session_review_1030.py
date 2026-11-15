@@ -441,6 +441,17 @@ def test_plan_mode_runs_only_the_tools_that_read():
     assert PLAN_SAFE_TOOLS <= executor_tools                          # every allowed name is a real tool
 
 
+def test_the_executor_answers_every_tool_the_contract_gives_it():
+    """ICNLI 3.5 (2026-11-15): the kernel shows Webbee's model the SDK contract's tools; each one the client answers has
+    its executor method under the contract's name (checkpoint_diff / checkpoint_rollback / grep_code were diff /
+    rollback / grep here, so the model's calls by the contract's names would have found no tool)."""
+    from imperal_sdk import tool_contract as tc
+    from webbee.tools import LocalToolExecutor
+    client = {t.name for t in tc.shell_tools("webbee") if t.executed_by == "client"}
+    executor_tools = {n[3:] for n in dir(LocalToolExecutor) if n.startswith("_t_")}
+    assert client <= executor_tools, sorted(client - executor_tools)
+
+
 def test_the_result_store_is_the_users_own(tmp_path, monkeypatch):
     import os
     import stat

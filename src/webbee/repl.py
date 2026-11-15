@@ -17,7 +17,14 @@ from webbee.tui import _MODES, _TIER_DISPLAY, next_mode, next_tier, previous_mod
 
 async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
                        agent_factory=None) -> str:
-    """Launch ONE autonomous marathon toward `goal` and stream it to stdout.
+    """ONE autonomous marathon toward `goal`, streamed to stdout (run_headless with marathon=True)."""
+    return await run_headless(cfg, mode, goal, marathon=True, sink=sink, auth=auth, agent_factory=agent_factory)
+
+
+async def run_headless(cfg, mode: str, goal: str, *, marathon: bool, sink=None, auth=None,
+                       agent_factory=None) -> str:
+    """ONE run toward `goal` without the dock -- a marathon, or one bounded coding turn (``webbee --once "task"``,
+    owner 2026-11-15: the field gate drives Webbee end to end through the kernel this way) -- streamed to stdout.
 
     A marathon reuses the whole coding path — same AgentSession, same reconnecting
     stream reader — it just flags the request `marathon=True` (routing it to the
@@ -42,10 +49,10 @@ async def run_marathon(cfg, mode: str, goal: str, *, sink=None, auth=None,
         agent_factory = lambda c, tp, ws, m: AgentSession(c, tp, ws, m)  # noqa: E731
     agent = agent_factory(cfg, token_provider, workspace, mode)
 
-    sink.note(f"🏁 Marathon launched: {goal}")
+    sink.note(f"🏁 Marathon launched: {goal}" if marathon else f"▶ {goal}")
     sink.begin_turn()
     try:
-        text = await agent.run(goal, sink, marathon=True, goal=goal)
+        text = await (agent.run(goal, sink, marathon=True, goal=goal) if marathon else agent.run(goal, sink))
     except (KeyboardInterrupt, asyncio.CancelledError):
         await agent.stop()
         sink.note("Interrupted.")

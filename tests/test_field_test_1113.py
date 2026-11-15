@@ -29,35 +29,16 @@ def test_a_russian_query_finds_the_function_its_doc_describes():
     assert [i["title"] for i in out["data"]["items"]] == ["complete_sign_in"]
 
 
-def test_a_query_the_embedding_cannot_read_gets_no_vector_arm():
-    asked = []
-
-    class _Backend:
-        def embed_query(self, q):
-            asked.append(q)
-            return [0.0]
-
-    class _Vectors:
-        def search(self, qv, top_n=50):
-            return [("bill.py#1-3:function:charge", 0.88)]
-    svc = _svc([LOGIN, BILL], vectors=_Vectors(), backend=_Backend())
-    out = Q.search_code(svc, "завершить вход")
-    assert asked == [] and [i["title"] for i in out["data"]["items"]] == ["complete_sign_in"]
-    Q.search_code(svc, "finish sign in")
-    assert asked == ["finish sign in"]
-
-
-
 # ── field test report 2 ──
 
-def test_a_small_files_window_not_applied_is_said_plainly(tmp_path):
+def test_a_small_files_window_is_the_window_asked(tmp_path):
+    """Owner 2026-11-15 supersedes the 2026-11-13 note: the window asked is always the window read."""
     from webbee.tools import LocalToolExecutor
     f = tmp_path / "config.py"
     f.write_text("".join(f"x{i} = {i}\n" for i in range(128)))
     ex = LocalToolExecutor(str(tmp_path))
     r = ex.run("read_file", {"path": "config.py", "offset": 65, "limit": 25})
-    assert "NOT applied" in r["content"].splitlines()[0]
-    assert r["window_applied"] is False and r["asked_window"] == [65, 89]
+    assert "NOT applied" not in r["content"].splitlines()[0] and (r["shown_from"], r["shown_to"]) == (65, 89)
 
 
 def test_a_failed_commands_exit_code_is_in_its_text(tmp_path):

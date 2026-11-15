@@ -268,15 +268,12 @@ class IntelService:
         self._progress = {"indexed": 0, "total": 0, "skipped": {"placeholder": 0, "over_cap": 0, "unread": 0},
                           "focus_done": False}
         self.repo_key = repo_key
-        self.cache_dir = cache_dir or os.path.expanduser("~/.cache/webbee/intel")
+        self.cache_dir = cache_dir or store.default_dir()
+        self.cache_key = store.cache_key(self.root)      # one cache folder per repository (owner 2026-11-15)
         self.index: ProjectIndex | None = None
         self.graph: CodeGraph | None = None
         self.git_ref = ""
         self.fresh = False
-        self.vectors: VectorStore | None = None
-        self.vectors_ready = False
-        self._backend = "__unset__"          # sentinel -- distinct from a real None result
-        self._chunk_hashes: dict[str, str] = {}  # chunk id -> content_hash, for incremental skip
         # Guards the index/graph mutation (apply_changes, driven by the
         # watcher off-loop via asyncio.to_thread) against a concurrent
         # repo_profile() read -- without it, a worker thread can resize
@@ -295,7 +292,6 @@ class IntelService:
         self._tree: dict = {}              # dir -> hash over self._stats (tree.dir_hashes); {} -- compute it again
         self._checksum = ""                # tree.repo_checksum at the last check ("" -- no git: walk)
         self._pool_job = None              # the pool job (None: _build_chunk); a test puts a stuck one here
-        self._vectors_dirty = False
         self._save_guard = threading.Lock()
         self._save_timer = None
         # ONE sync worker: requests merge while it runs (a full listing supersedes changed paths); before, every
@@ -310,22 +306,6 @@ class IntelService:
         self._sync_done = 0                # the last one it finished
         self._sync_out: dict = {}          # what that one returned
 
-    def _get_backend(self):
-        # Lazy + cached: the model load is expensive (and may be unavailable
-        # entirely), so it happens at most once per service instance. A
-        # None result is cached too -- unavailable stays unavailable rather
-        # than retrying the load on every call. The load is guarded too: an
-        # install without numpy/model2vec (the sdk's embedder,
-        # ``imperal_sdk.code_index.load_backend``) must degrade to "no
-        # backend", not crash build() and disable intel entirely.
-        if self._backend != "__unset__":
-            return self._backend
-        try:
-            self._backend = indexer.load_backend()
-        except Exception:
-            self._backend = None
-        return self._backend
-
     @property
     def ready(self) -> bool:
         return self.graph is not None
@@ -339,7 +319,6 @@ class IntelService:
         only the files whose mtime or size differ are re-parsed, files gone
         are dropped, new ones added."""
         touched, rebuilt = self.load_or_build()
-        self._embed_build(self.index, touched)
         if rebuilt:
             self._save_cache()             # this index for the next start (a reconciled one too)
         self.sync_vault()                 # code graph everywhere: the whole repo into the vault
@@ -355,7 +334,7 @@ class IntelService:
         walked, stats, skipped = _index_listing(self.root, self.focus, exclude=self.exclude)
         self._progress = {"indexed": 0, "total": len(walked), "focus_done": False,
                           "skipped": {**skipped, "unread": 0, "timeout": 0}}
-        cached = store.load_with_stats(self.cache_dir, self.repo_key, self.git_ref)
+        cached = store.load_with_stats(self.cache_dir, self.cache_key, self.git_ref)
         new_tree = tree.dir_hashes(stats)
         touched = None                      # None: a full index (no cache); else the files the disk changed
         if cached is None:
@@ -363,7 +342,7 @@ class IntelService:
         else:
             idx, old_stats = cached
             changed, gone, _compared = tree.changed_files(old_stats, stats,
-                                                          store.load_tree(self.cache_dir, self.repo_key), new_tree)
+                                                          store.load_tree(self.cache_dir, self.cache_key), new_tree)
             gone = sorted(set(gone) | (set(idx.files) - set(stats)))    # a cached file no longer listed
             reparsed = self._build_files(changed) if changed else {}
             for rel in changed:             # undecodable now: out of the index, as a full build leaves it
@@ -525,95 +504,6 @@ class IntelService:
         their cap); ``indexed == total`` means the build is done."""
         return {**self._progress, "skipped": dict(self._progress["skipped"])}
 
-    def _embed_build(self, idx: ProjectIndex, touched: dict | None = None) -> None:
-        # Off-loop already (build() is called via asyncio.to_thread from the
-        # repl boot): cache-load skips re-embedding entirely when the
-        # git_ref+model_id match; a miss chunks+embeds+saves. Fail-soft --
-        # no backend means self.vectors stays None and search_code (F5)
-        # falls back to lexical+graph instead of raising. ``touched`` -- the
-        # files the stat check re-parsed: their cached vectors are re-embedded.
-        from webbee.intel import store as _store
-        b = self._get_backend()
-        if b is None:
-            self.vectors = None
-            self.vectors_ready = False
-            return
-        # vectors.py has its own module-level numpy -- import it only now
-        # that a backend is confirmed present, not unconditionally at the
-        # top of this function (an intel-only install with no backend must
-        # never need numpy at all).
-        from webbee.intel.vectors import VectorStore
-        cached = _store.load_vectors(self.cache_dir, self.repo_key, self.git_ref, b.model_id)
-        if cached is not None:
-            ids, mat = cached
-            vs = VectorStore.from_arrays(b.dim, ids, mat)
-        else:
-            touched = None                  # embedded from the current index: nothing left to re-embed
-            chunks = indexer.chunk_index(self.root, idx)
-            vs = VectorStore(b.dim)
-            if chunks:
-                vecs = b.embed([c.text for c in chunks])
-                vs.add([c.id for c in chunks], vecs)
-                self._chunk_hashes = {c.id: c.content_hash for c in chunks}
-                ids, mat = vs.to_arrays()
-                try:
-                    _store.save_vectors(self.cache_dir, self.repo_key, self.git_ref, b.model_id, ids, mat)
-                except OSError:
-                    pass
-        with self._lock:
-            self.vectors = vs
-            self.vectors_ready = True
-        if touched:
-            embedded = self._embed_updates(touched)
-            with self._lock:
-                self._swap_vectors(touched, *embedded)
-
-    def _embed_updates(self, updates: dict):
-        """``(fresh_ids, fresh_vecs, current_ids)`` for the touched files -- compute only, off the lock."""
-        fresh_ids: list = []
-        fresh_vecs = None
-        current_ids: dict[str, set] = {}   # edited rel -> its FULL current chunk-id set
-        b = self._get_backend()
-        fresh_chunks = []
-        for rel, fi in updates.items():
-            if fi is None:
-                continue  # deleted -- current_ids[rel] stays absent, so ALL its
-                          # ids are caught as stale below
-            chunks = indexer.chunk_file(self.root, fi)
-            current_ids[rel] = {c.id for c in chunks}
-            for c in chunks:
-                if self._chunk_hashes.get(c.id) != c.content_hash:
-                    fresh_chunks.append(c)
-        if fresh_chunks:
-            fresh_vecs = b.embed([c.text for c in fresh_chunks])
-            fresh_ids = [c.id for c in fresh_chunks]
-            for c in fresh_chunks:
-                self._chunk_hashes[c.id] = c.content_hash
-        return fresh_ids, fresh_vecs, current_ids
-
-    def _swap_vectors(self, updates: dict, fresh_ids, fresh_vecs, current_ids) -> None:
-        """The touched files' vectors swapped in -- the caller holds ``_lock``."""
-        # F1: a touched file's vanished chunk ids -- span-shifted by
-        # the edit, or all of them when the file was deleted -- are
-        # orphans and must be dropped before the fresh ones go in.
-        # Guarding on `not in current_ids` (never a naive "remove
-        # all `{rel}#` then add fresh") keeps the hash-skip
-        # optimization correct: an edit to a LATE symbol must not
-        # drop an EARLIER unchanged (and therefore skipped) chunk
-        # that's still current.
-        stale = [i for i in self.vectors.ids()
-                 if "#" in i
-                 and i.split("#", 1)[0] in updates                          # a touched file
-                 and i not in current_ids.get(i.split("#", 1)[0], set())]   # no longer a current chunk
-        if stale:
-            self.vectors.remove(stale)
-            for i in stale:
-                self._chunk_hashes.pop(i, None)
-        if fresh_ids:
-            self.vectors.add(fresh_ids, fresh_vecs)
-        if stale or fresh_ids:
-            self._vectors_dirty = True
-
     def apply_changes(self, rel_paths) -> None:
         # Parse off-lock (file I/O + tree-sitter parse don't touch shared
         # state), then apply the mutation + graph rebuild atomically under
@@ -647,13 +537,6 @@ class IntelService:
         for rel in to_read:
             updates[rel] = read.get(rel)
 
-        # Embed compute (chunk + backend inference) stays off-lock, mirroring
-        # the parse-then-swap pattern above -- only the vector-store mutation
-        # happens under `_lock`. Skipped entirely when there's no live vector
-        # store or the backend is unavailable (fail-soft, F5's fallback).
-        embed_ready = self.vectors is not None and self._get_backend() is not None
-        embedded = self._embed_updates(updates) if embed_ready else None
-
         # HEAD moved (a pull, a checkout, a commit): the cache goes under the new one (cheap: one rev-parse)
         ref = _git_ref(self.root)
         self.sync_vault(list(updates))    # only the changed files go to the vault
@@ -671,10 +554,7 @@ class IntelService:
             if ref and ref != self.git_ref:
                 self.git_ref = ref
                 self.index.git_ref = ref
-                self._vectors_dirty = True     # the vector cache is keyed by HEAD too
             self.graph = CodeGraph(self.index)
-            if embedded is not None:
-                self._swap_vectors(updates, *embedded)
             self._tree = {}                    # the stats moved: the tree is computed again at the next check
         if updates:
             self._save_soon()
@@ -707,7 +587,7 @@ class IntelService:
             self._save_cache()
 
     def _save_cache(self) -> None:
-        """The index, the stats of its files and (when they changed) the vectors, into the cache. Fail-soft."""
+        """The index and the stats of its files into the cache. Fail-soft."""
         if self.index is None:
             return
         from webbee.intel import tree
@@ -718,15 +598,8 @@ class IntelService:
             if not self._tree:
                 self._tree = tree.dir_hashes(stats)
             dirs = dict(self._tree)
-            vecs = None
-            if self._vectors_dirty and self.vectors is not None:
-                vecs = self.vectors.to_arrays()
-                self._vectors_dirty = False
         try:
-            store.save(self.cache_dir, self.repo_key, snap, stats, dirs)
-            b = self._get_backend() if vecs is not None else None
-            if b is not None:
-                store.save_vectors(self.cache_dir, self.repo_key, snap.git_ref, b.model_id, *vecs)
+            store.save(self.cache_dir, self.cache_key, snap, stats, dirs)
         except Exception as exc:        # a full disk or a gone cache dir never touches the live index
             log.warning("index cache save failed: %s", exc)
 
@@ -818,13 +691,18 @@ class IntelService:
                     self.last_sync = out
                     return out
                 measured = co_change_pairs(root) if rels is None and history else None
-                out = asyncio.run(vault_sync(factory(), meta, listing, read, measured))
+                client = factory()
+                if client is None:          # the session has ended: nothing to send it with, nothing failed
+                    return {}
+                out = asyncio.run(vault_sync(client, meta, listing, read, measured))
                 if out.get("repo_key") and rels is None and os.path.realpath(root) == os.path.realpath(self.root):
                     remember_keys(root, out)
                 if sig and out.get("repo_key"):
                     self._synced_sigs[root] = (sig, str(out["repo_key"]), time.time())
                 elif rels is not None:
                     self._synced_sigs.pop(root, None)       # changed files went: the next full sync asks the cloud
+            except asyncio.CancelledError:      # the session's loop ended under the send: not a failure (2026-11-15)
+                return {}
             except Exception as exc:
                 log.warning("code sync to the vault failed: %s", exc)
                 self.last_sync_error = f"{type(exc).__name__}: {exc}"[:300]
@@ -929,6 +807,15 @@ class IntelService:
                 self._sync_out = out or {}
                 self._sync_cv.notify_all()
 
+    def close(self, wait_s: float = 5.0) -> None:
+        """Webbee quits: nothing new is queued and the running sync is waited for, bounded (it ran on after the event
+        loop closed and failed at exit, 2026-11-15)."""
+        with self._sync_cv:
+            self._sync_full, self._sync_rels = False, {}
+            worker = self._sync_worker
+        if worker is not None and worker.is_alive():
+            worker.join(wait_s)
+
     def sync_if_due(self) -> bool:
         """Called on every tool call: off the caller's thread, the workspace is compared with what the vault last
         confirmed and only a repository whose files changed is sent (an unchanged one costs a local listing, no
@@ -960,11 +847,9 @@ class IntelService:
         # off-loop by the watcher, F3) may be resizing concurrently.
         with self._lock:
             every = list((self.index or ProjectIndex()).files.values())
-            embedded_chunks = len(self.vectors.ids()) if self.vectors else 0
             # the profile is the map of the CODE: a summary that leaves this process never names a document's
             # sections (security review 2026-11-04); other kinds are only counted
             files = [fi for fi in every if getattr(fi, "kind", "code") in ("code", "config")]
-            vectors_ready = self.vectors_ready
             content_hashes = sorted(fi.content_hash for fi in files if fi.content_hash)
             endpoints = [e for fi in files for e in fi.endpoints]
             schemas = [x for fi in files for x in fi.schemas]
@@ -996,8 +881,6 @@ class IntelService:
             # the cloud code map: when this session last synced it, and why the last sync failed if it did
             "code_map": self.sync_state(),
             "git_ref": self.git_ref[:12],
-            "embedded_chunks": embedded_chunks,
-            "vectors_ready": vectors_ready,
             "endpoint_count": len(endpoints),
             "schema_count": len(schemas),
             # Account transport stays bounded; totals + cap metadata make a

@@ -11,18 +11,10 @@ from dataclasses import asdict
 
 from imperal_sdk.code_index import ProjectIndex, FileIndex, Symbol
 
-# numpy is NOT imported at module scope: this module is imported eagerly by
-# service.py, but numpy is declared only in the intel-embed* extras, not the
-# base `intel` extra. save_vectors/load_vectors are the only functions that
-# touch it -- import it locally there so an intel-only install (no embed
-# extra) can still import this whole module (index.json save/load, the
-# graph plane) with no numpy on the system at all.
-
 # 3 (2026-07-25): chunk ids gained a ":{kind}" suffix (chunker._mk) to fix a
 # collision that silently disabled code intel. Every cached `ids` list from
-# schema 2 holds the OLD id format, so both the index and the vector cache
-# must be treated as a clean miss and rebuilt -- bumping the version is what
-# makes load()/load_vectors() do exactly that.
+# schema 2 holds the OLD id format, so the index cache must be treated as a
+# clean miss and rebuilt -- bumping the version is what makes load() do that.
 # 5 (2026-11-04): a file's ``kind`` (code | config | document | data | mail | image) is kept -- a schema-4 cache
 # read every document back as code after a restart; a folder without git is cached too (``NO_GIT``) and the
 # checksum tree of the folder (``tree``) is saved with the stats.
@@ -31,8 +23,53 @@ SCHEMA_VERSION = 6
 NO_GIT = "-"           # the cache key of a folder that is no git repository (its stats keep it honest)
 
 
-def _path(cache_dir: str, repo_key: str) -> str:
-    return os.path.join(cache_dir, repo_key, "index.json")
+# owner 2026-11-15 (phase 6 decision 3): ONE folder per repository. Before, every folder an index was asked for (a
+# subfolder ``root=``, a unit of a folder of repositories) got its own folder keyed by its own path: 1692 folders in
+# one user's cache. Now a repository's folder holds its index and the index of each of its subfolders as a file; the
+# old layout (``intel/``) is removed once and each repository is indexed again once.
+DEFAULT_DIR = os.path.join("~", ".cache", "webbee", "index")
+OLD_DIRS = (os.path.join("~", ".cache", "webbee", "intel"),)
+_DROPPED = False
+
+
+def default_dir() -> str:
+    """Where the index cache lives: ``IMPERAL_INTEL_CACHE_DIR`` (tests, a user's own choice), else ``DEFAULT_DIR`` --
+    whose first use in a process removes the old layout."""
+    own = os.environ.get("IMPERAL_INTEL_CACHE_DIR", "")
+    if own:
+        return own
+    drop_old_layout()
+    return os.path.expanduser(DEFAULT_DIR)
+
+
+def drop_old_layout() -> None:
+    """The cache folders of the layout before one-folder-per-repository, removed once a process (a cache: rebuilt)."""
+    global _DROPPED
+    if _DROPPED:
+        return
+    _DROPPED = True
+    import shutil
+    for d in OLD_DIRS:
+        shutil.rmtree(os.path.expanduser(d), ignore_errors=True)
+
+
+def cache_key(root: str) -> str:
+    """The cache key of a folder: its repository's key; a folder inside a repository adds a hash of its path there
+    (``<repo key>/<12 hex>``) -- a file in the repository's folder, never a folder of its own."""
+    import hashlib
+    from webbee.repo import compute_repo_key, find_repo_root
+    real = os.path.realpath(root)
+    top = find_repo_root(real)
+    key = compute_repo_key(top)
+    if top == real:
+        return key
+    rel = os.path.relpath(real, top).replace(os.sep, "/")
+    return key + "/" + hashlib.sha256(rel.encode("utf-8")).hexdigest()[:12]
+
+
+def _path(cache_dir: str, key: str) -> str:
+    repo, _, sub = str(key).partition("/")
+    return os.path.join(cache_dir, repo, f"sub-{sub}.json" if sub else "index.json")
 
 
 def save(cache_dir: str, repo_key: str, index: ProjectIndex, stats: dict | None = None,
@@ -95,58 +132,3 @@ def load_with_stats(cache_dir: str, repo_key: str, git_ref: str) -> tuple[Projec
         return idx, stats
     except Exception:
         return None  # miss, corrupt, or wrong-shape -- never raise into the caller
-
-
-def _vec_dir(cache_dir: str, repo_key: str) -> str:
-    return os.path.join(cache_dir, repo_key)
-
-
-def save_vectors(cache_dir, repo_key, git_ref, model_id, ids, matrix) -> None:
-    # Data FIRST, manifest LAST: chunks.json is the commit point. A crash
-    # between the two atomic os.replace() calls then always leaves the data
-    # present but the manifest absent/stale -- load_vectors's
-    # len(ids) != mat.shape[0] / schema check already treats that as a clean
-    # miss (re-embed), never a manifest pointing at a missing/corrupt .npy.
-    import numpy as np
-    d = _vec_dir(cache_dir, repo_key)
-    os.makedirs(d, exist_ok=True)
-    tmp_n = os.path.join(d, "embeddings.npy.tmp")
-    np.save(tmp_n, np.asarray(matrix, dtype=np.float32))
-    # np.save appends ".npy" to a filename that doesn't already end with it --
-    # tmp_n ends in ".tmp" so the file actually written is tmp_n + ".npy".
-    # Replace from that real path so the final file lands as exactly
-    # "embeddings.npy" with no "embeddings.npy.npy" artifact left behind.
-    written = tmp_n if tmp_n.endswith(".npy") else tmp_n + ".npy"
-    os.replace(written, os.path.join(d, "embeddings.npy"))
-    meta = {"schema_version": SCHEMA_VERSION, "git_ref": git_ref, "model_id": model_id, "ids": list(ids)}
-    tmp_j = os.path.join(d, "chunks.json.tmp")
-    with open(tmp_j, "w", encoding="utf-8") as f:
-        json.dump(meta, f)
-    os.replace(tmp_j, os.path.join(d, "chunks.json"))
-
-
-def load_vectors(cache_dir, repo_key, git_ref, model_id):
-    # Same never-raise contract as load(): any mismatch/corruption/missing
-    # file degrades to a cache miss so callers fall back to a fresh embed.
-    import numpy as np
-    try:
-        d = _vec_dir(cache_dir, repo_key)
-        with open(os.path.join(d, "chunks.json"), "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        if (meta.get("schema_version") != SCHEMA_VERSION or meta.get("git_ref") != git_ref
-                or meta.get("model_id") != model_id):
-            return None
-        # mmap_mode="r": the on-disk cache can be large across a big repo's
-        # chunk set -- read it lazily off disk instead of paging the whole
-        # matrix into RAM up front. save_vectors always writes float32, so
-        # the astype copy below only fires on an actual dtype mismatch
-        # (e.g. an older/foreign cache file), not on every load.
-        mat = np.load(os.path.join(d, "embeddings.npy"), mmap_mode="r")
-        ids = meta.get("ids") or []
-        if len(ids) != mat.shape[0]:
-            return None
-        if mat.dtype != np.float32:
-            mat = mat.astype(np.float32)
-        return ids, mat
-    except Exception:
-        return None

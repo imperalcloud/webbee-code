@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -e
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+export PYTHONPATH="$DIR/src:$DIR/../imperal-sdk/src:$DIR/../imperal-mcp/src:$PYTHONPATH"
+if [ -f "$DIR/venv/bin/python" ]; then
+    exec "$DIR/venv/bin/python" -m webbee.cli "$@"
+elif command -v python3.11 >/dev/null 2>&1; then
+    exec python3.11 -m webbee.cli "$@"
+else
+    exec python3 -m webbee.cli "$@"
+fi

@@ -81,8 +81,29 @@ def _why(r) -> str:
     return (text[:240] or f"git exited {getattr(r, 'returncode', '?')}")
 
 
+class UnknownCheckpoint(ValueError):
+    """A diff or rollback named a checkpoint the history does not hold -- said with the ones it does, never answered
+    from another one (gate 2026-11-15: a diff against an unknown target answered "(no changes)" against HEAD)."""
+
+
+_AT: dict = {}
+
+
 class ShadowGit:
     _DIFF_CAP = 20000
+
+    @classmethod
+    def at(cls, folder: str, cache_dir: str = "") -> "ShadowGit":
+        """The one history of a folder (a repository or a folder inside the workspace), made ready -- every shell asks
+        for it here, so a checkpoint and its diff and rollback name the same history (gate: webbee kept one per
+        workspace and ignored ``root``; imperal-mcp kept its own per root)."""
+        real = os.path.realpath(folder)
+        sg = _AT.get((real, cache_dir))
+        if sg is None:
+            sg = _AT[(real, cache_dir)] = cls(real, shadow_key(real), cache_dir)
+        if not sg.available:
+            sg.ensure()
+        return sg
 
     def __init__(self, workspace_root: str, repo_key: str, cache_dir: str = "") -> None:
         self.root = os.path.realpath(workspace_root)
@@ -107,8 +128,10 @@ class ShadowGit:
         env = _scrubbed_env()
         if index_file:
             env["GIT_INDEX_FILE"] = index_file
-        return subprocess.run(cmd, input=stdin if stdin else None, capture_output=True, text=True,
-                              timeout=self._left(deadline), env=env)
+        # a byte that is no UTF-8 (a Latin-1 file, a path) keeps its value (surrogateescape): a path still round-trips
+        # to the disk; strict decoding failed the whole call (2026-11-15: one such file broke every diff)
+        return subprocess.run(cmd, input=stdin if stdin else None, capture_output=True, text=True, encoding="utf-8",
+                              errors="surrogateescape", timeout=self._left(deadline), env=env)
 
     @staticmethod
     def _left(deadline: float) -> float:
@@ -388,11 +411,17 @@ class ShadowGit:
         except Exception:
             return []
 
-    def diff(self, since: str = "") -> str:
-        """Workspace changes since a checkpoint (default: the last one).
+    def diff(self, since: str = "", paths: "list | None" = None) -> str:
+        """Workspace changes since a checkpoint (default: the last one), only under ``paths`` when given (relative to
+        this history's folder). An unknown checkpoint raises UnknownCheckpoint with the ones that exist.
         Bounded with an HONEST truncation note -- never a silent cut."""
         if not self.available:
             return "reversibility is off (git unavailable)"
+        if str(since or "").strip() and not self._resolve(str(since)):
+            have = ", ".join(f"cp-{r['n']} ({r['id']} {r['label']})" for r in self.list_checkpoints(limit=8)) or "none"
+            raise UnknownCheckpoint(f"unknown checkpoint '{since}' -- use an id, cp-N or N; the checkpoints: {have}")
+        spec = [str(x).strip().strip("/") for x in paths or [] if str(x).strip().strip("/")]
+        spec = ["--", *spec] if spec else []
         try:
             note = ""
             try:                     # stage into the SHADOW index so new files show
@@ -404,9 +433,10 @@ class ShadowGit:
                 note = (f"\n(note: staging the workspace took longer than {int(_SNAPSHOT_BUDGET_S)}s "
                         f"-- this diff may be incomplete)")
             target = self._resolve(since) or "HEAD"
-            stat = self._git("diff", "--cached", "--stat", target).stdout
-            body = self._git("diff", "--cached", target).stdout
+            stat = self._git("diff", "--cached", "--stat", target, *spec).stdout
+            body = self._git("diff", "--cached", target, *spec).stdout
             out = (stat + "\n" + body).strip() or "(no changes)"
+            out = out.encode("utf-8", "surrogateescape").decode("utf-8", "replace")     # text for the model
             if len(out) > self._DIFF_CAP:
                 out = (out[:self._DIFF_CAP]
                        + f"\n… (diff truncated at {self._DIFF_CAP} chars -- pass a "

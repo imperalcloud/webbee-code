@@ -19,7 +19,7 @@ from datetime import datetime
 # must NEVER descend: they blow up walk time on real repos and (with the tree's
 # 200-file cap) would otherwise fill the snapshot with dependency junk instead
 # of the user's own code. `.git` + all dotdirs are pruned separately by the
-# callers; these are the non-dot offenders. Shared with tools._t_grep.
+# callers; these are the non-dot offenders. Shared with tools.grep_files.
 WALK_IGNORE_DIRS = frozenset({
     "node_modules", "vendor", "dist", "build", "target", "__pycache__",
     ".git", ".venv", "venv", ".next", ".cache", ".tox", ".mypy_cache",

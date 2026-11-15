@@ -16,9 +16,10 @@ def build_parser() -> argparse.ArgumentParser:
              "until the goal is met, verified by the project's own test command).",
     )
     p.add_argument(
-        "--once", "--no-marathon", dest="once", action="store_true",
-        help="Run a single bounded coding turn (stops at the step limit) instead "
-             "of the default self-driving marathon.",
+        "--once", "--no-marathon", dest="once", nargs="?", const=True, default=False, metavar="TASK",
+        help="Run a single bounded coding turn (stops at the step limit) instead of the default self-driving "
+             "marathon. With TASK: run that one turn without the screen, print what it did and its answer, and exit "
+             "(0: it answered, 1: it did not).",
     )
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("login", help="Log in to your Imperal account in the browser")
@@ -28,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _quiet_downloads() -> None:
     """Silence dependency download-progress bars + telemetry BEFORE anything
-    imports them (model2vec / huggingface_hub / tokenizers). A stray tqdm or HF
+    imports them (huggingface_hub / tokenizers, when a dependency brings them). A stray tqdm or HF
     progress bar written to stderr corrupts the full-screen prompt_toolkit dock
     — it shows up as overlapping/duplicated text (the dock owns the terminal and
     diffs the screen; any external write desyncs the diff). `setdefault` so an
@@ -84,6 +85,17 @@ def main(argv=None) -> None:
         print("Logged out.")
         return
 
+    if isinstance(args.once, str) and args.once.strip():
+        # webbee --once "task": one bounded turn, headless, through the same session and kernel as the REPL
+        from webbee.repl import run_headless
+        try:
+            _upgrade_before_start(argv)
+            answer = asyncio.run(run_headless(cfg, args.mode, args.once.strip(), marathon=False))
+        except KeyboardInterrupt:
+            print("\nBye 🐝")
+            raise SystemExit(130)
+        raise SystemExit(0 if str(answer or "").strip() else 1)
+
     if args.marathon:
         # --marathon GOAL launches a single autonomous marathon and streams it,
         # then exits. Reuses the same AgentSession + stream reader as coding.
@@ -113,7 +125,7 @@ def main(argv=None) -> None:
         _print_boot_progress("checking for updates")
         _upgrade_before_start(argv)
         _print_boot_progress("booting workspace (indexing, git, session)")
-        asyncio.run(run_repl(cfg, args.mode, once=args.once))
+        asyncio.run(run_repl(cfg, args.mode, once=bool(args.once)))
     except KeyboardInterrupt:
         # Ctrl-C during the update-check fetch, or at the read_line() prompt,
         # unwinds here — exit clean, no traceback. (repl.py itself now cancels

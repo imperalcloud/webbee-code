@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.17
+
+* Needs imperal-mcp 0.9.20 and imperal-sdk 6.7.1 (the truth architecture, spec 2026-11-14).
+* `webbee --once "task"`: one headless turn -- the result and its events on stdout, an exit code.
+* Tools under the one contract's names (`checkpoint_diff`, `checkpoint_rollback`, `grep_code`, `check_syntax`); `root`
+  works for every code tool (a subfolder's own index); a checkpoint belongs to its folder.
+* read_file honours offset/limit on any file; a secret file is shown by its form -- keys with every value masked, key
+  material as its line count.
+* grep_code: a bad pattern is a clear error; one local search with imperal-mcp.
+* bash runs in bash where there is one (on Debian/Ubuntu /bin/sh is dash: `${PIPESTATUS[0]}` failed).
+* Lines counted by the SDK (`wc -l`).
+* No embedder on the client (model2vec and numpy left): the vault embeds with one multilingual model.
+* The index cache: one folder per repository (`~/.cache/webbee/index`); the old `~/.cache/webbee/intel` is removed
+  once and each repository indexed again once.
+* On exit the code-sync thread stops.
+
 ## 0.7.16
 
 * Needs imperal-mcp 0.9.19 (Windows sign-in fixes).

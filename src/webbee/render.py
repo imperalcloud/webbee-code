@@ -73,7 +73,7 @@ def _clean(s) -> str:
     """Strip escape sequences + control bytes from untrusted display text."""
     return _CTRL.sub("", str(s or ""))
 
-_ICON = {"read_file": "📖", "grep": "🔎", "glob": "🗂️ ", "write_file": "✏️",
+_ICON = {"read_file": "📖", "grep_code": "🔎", "glob": "🗂️ ", "write_file": "✏️",
          "edit_file": "🔧", "shell": "⚡", "bash": "⚡", "web_search": "🌐 ", "read_url": "📄",
          "view_image": "🖼️"}
 def _tool_meta(tool: str) -> tuple[str, str]:
@@ -86,7 +86,7 @@ def _tool_meta(tool: str) -> tuple[str, str]:
         return "🔧", "Edit File"
     if t == "write_file":
         return "✏️", "Write File"
-    if t in ("grep", "search_code"):
+    if t in ("grep_code", "search_code"):
         return "🔎", "Search Code"
     if t in ("glob", "list_dir"):
         return "🗂️", "List Files"
