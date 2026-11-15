@@ -188,13 +188,18 @@ class ShadowGit:
         if not ref:
             return None
         if ref.isdigit():
-            cand = f"refs/webbee/cp-{ref}"
+            # a number is a checkpoint's N -- or a short commit id that happens to hold no letter (field gate
+            # 2026-11-15, Windows: the id "8636988" a checkpoint gave was "unknown"; ~4% of 7-hex ids are all digits)
+            cands = [f"refs/webbee/cp-{ref}"] + ([ref] if len(ref) >= 7 else [])
         elif ref.startswith("cp-"):
-            cand = f"refs/webbee/{ref}"
+            cands = [f"refs/webbee/{ref}"]
         else:
-            cand = ref
-        r = self._git("rev-parse", "--verify", "--quiet", cand + "^{commit}")
-        return r.stdout.strip() if r.returncode == 0 else None
+            cands = [ref]
+        for cand in cands:
+            r = self._git("rev-parse", "--verify", "--quiet", cand + "^{commit}")
+            if r.returncode == 0:
+                return r.stdout.strip()
+        return None
 
     def _nested_ls(self, rel: str, deadline: float) -> "tuple[list, str]":
         """The files a nested repository's own git would show (tracked + untracked, its ignores honored),

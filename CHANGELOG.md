@@ -13,6 +13,7 @@
   in Git for Windows' bash when it is installed (never WSL's), else cmd.exe as before.
 * Checkpoints are the files' bytes: no line-ending conversion whatever `core.autocrlf` says (a rolled-back file
   came back with CRLF on Windows).
+* A checkpoint id of digits only (a short commit id with no letter, ~4% of them) is found, never read as cp-N.
 * Lines counted by the SDK (`wc -l`).
 * No embedder on the client (model2vec and numpy left): the vault embeds with one multilingual model.
 * The index cache: one folder per repository (`~/.cache/webbee/index`); the old `~/.cache/webbee/intel` is removed

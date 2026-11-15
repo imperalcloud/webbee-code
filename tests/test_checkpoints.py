@@ -387,3 +387,16 @@ def test_a_rollback_gives_back_the_bytes_whatever_the_user_s_autocrlf(tmp_path, 
     assert sg.rollback(str(cp["n"]))["ok"]
     assert (root / "no_nl.py").read_bytes() == b"a = 1\nb = 2"
     assert (root / "crlf.py").read_bytes() == b"x = 1\r\ny = 2\r\n"
+
+
+def test_a_checkpoint_id_of_digits_only_is_found(tmp_path, monkeypatch):
+    """Field gate 2026-11-15 (Windows): the id "8636988" a checkpoint gave was read as checkpoint N -- "unknown"."""
+    sg, root = _sg(tmp_path)
+    _write(root, "a.txt", "v1")
+    cp = sg.checkpoint("one")
+    full = sg._resolve(str(cp["n"]))
+    real = sg._git
+    monkeypatch.setattr(sg, "_git", lambda *a, **k: real(*a, **k) if "8636988^{commit}" not in a else
+                        real("rev-parse", "--verify", "--quiet", full + "^{commit}"))
+    assert sg._resolve("8636988") == full                   # not a cp-N: the commit id it is
+    assert sg._resolve(str(cp["n"])) == full                 # a small N stays a checkpoint number
