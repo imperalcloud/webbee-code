@@ -371,3 +371,19 @@ def test_a_diff_narrows_by_paths_and_names_an_unknown_checkpoint(tmp_path):
     assert "src/a.py" in only and "docs/b.md" not in only
     with pytest.raises(UnknownCheckpoint, match="cp-1"):
         sg.diff("99")
+
+
+def test_a_rollback_gives_back_the_bytes_whatever_the_user_s_autocrlf(tmp_path, monkeypatch):
+    """Field gate 2026-11-15 (Windows runners: core.autocrlf=true): a rolled-back file came back with CRLF."""
+    cfg = tmp_path / "gitconfig"
+    cfg.write_text("[core]\n\tautocrlf = true\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
+    sg, root = _sg(tmp_path)
+    (root / "no_nl.py").write_bytes(b"a = 1\nb = 2")
+    (root / "crlf.py").write_bytes(b"x = 1\r\ny = 2\r\n")
+    cp = sg.checkpoint("bytes")
+    (root / "no_nl.py").write_bytes(b"a = 1\nb = 2\ngate = 1\n")
+    (root / "crlf.py").write_bytes(b"changed\n")
+    assert sg.rollback(str(cp["n"]))["ok"]
+    assert (root / "no_nl.py").read_bytes() == b"a = 1\nb = 2"
+    assert (root / "crlf.py").read_bytes() == b"x = 1\r\ny = 2\r\n"

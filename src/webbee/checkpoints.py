@@ -24,8 +24,11 @@ import subprocess
 import time
 
 # Identity + safety for shadow commits only (never the user's config/hooks).
+# a snapshot is the files' bytes: no line-ending conversion whatever the user's git says (field gate 2026-11-15:
+# Windows runners have core.autocrlf=true -- a rolled-back file came back with CRLF)
 _GIT_CFG = ["-c", "user.name=webbee", "-c", "user.email=webbee@imperal.io",
-            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
+            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+            "-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "core.safecrlf=false"]
 
 # Folders never snapshotted: dependencies, virtualenvs, caches and any .git.
 # Copying node_modules / a venv before every write made each bash call block

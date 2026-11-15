@@ -1098,3 +1098,17 @@ def test_bash_is_bash_even_where_sh_is_dash(tmp_path):
         return
     r = _ex(tmp_path).run("bash", {"command": "false | true; echo ${PIPESTATUS[0]}"})
     assert r["content"].strip().splitlines()[0] == "1"
+
+
+def test_windows_git_bash_is_git_s_own_never_wsl(tmp_path, monkeypatch):
+    import shutil
+    from webbee import tools as T
+    git_root = tmp_path / "Git"
+    (git_root / "cmd").mkdir(parents=True)
+    (git_root / "bin").mkdir()
+    (git_root / "cmd" / "git.exe").write_text("")
+    (git_root / "bin" / "bash.exe").write_text("")
+    monkeypatch.setattr(shutil, "which", lambda name: str(git_root / "cmd" / "git.exe") if name == "git" else None)
+    assert T.windows_git_bash() == str(git_root / "bin" / "bash.exe")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert T.windows_git_bash() is None

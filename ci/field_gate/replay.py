@@ -60,7 +60,7 @@ def transcript_events(path: Path) -> list[dict]:
 
 def scrub(events: list[dict], secrets: list[str]) -> list[dict]:
     """Every string through the product's own scrubber, then the named fakes/secrets out -- the rest unchanged."""
-    from imperal_mcp.secrets_scrub import scrub_secrets
+    from imperal_sdk.secret_mask import scrub_secrets      # the one owner of secrets (sdk 6.7.0)
 
     def clean(v):
         if isinstance(v, str):

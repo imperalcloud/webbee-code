@@ -925,9 +925,10 @@ class LocalToolExecutor:
         # -- shell=True alone is /bin/sh, dash on Debian/Ubuntu (field gate 2026-11-15: "Bad substitution")
         import shutil
         shell_bin = shutil.which("bash") if posix else None
+        git_bash = None if posix else windows_git_bash()
         proc = subprocess.Popen(
-            a["command"], shell=True, cwd=self.root, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+            [git_bash, "-c", a["command"]] if git_bash else a["command"], shell=not git_bash, cwd=self.root,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
             **({"executable": shell_bin} if shell_bin else {}),
             **({"start_new_session": True} if posix else
                {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}))
@@ -1652,6 +1653,21 @@ LOCK_FILES = frozenset({"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poe
                         "composer.lock", "gemfile.lock", "go.sum", "pipfile.lock"})
 _NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*[+*{]|"
                                 r"\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*[+*{]")
+
+
+def windows_git_bash() -> str | None:
+    """Git for Windows' bash (``<git>/bin/bash.exe``) -- the bash the tool's name promises on Windows; never
+    System32's bash.exe (WSL: another system's files and paths). None: no Git Bash, the command runs in cmd.exe."""
+    import shutil
+    git = shutil.which("git")
+    if not git:
+        return None
+    here = os.path.dirname(os.path.realpath(git))
+    for up in (os.path.dirname(here), os.path.dirname(os.path.dirname(here))):      # <git>/cmd, <git>/mingw64/bin
+        cand = os.path.join(up, "bin", "bash.exe")
+        if os.path.isfile(cand) and "system32" not in cand.lower():
+            return cand
+    return None
 
 
 def refused_local(ws: str, rel: str, full: str, secret_view: bool = False) -> str:

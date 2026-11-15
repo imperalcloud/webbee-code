@@ -9,7 +9,10 @@
 * read_file honours offset/limit on any file; a secret file is shown by its form -- keys with every value masked, key
   material as its line count.
 * grep_code: a bad pattern is a clear error; one local search with imperal-mcp.
-* bash runs in bash where there is one (on Debian/Ubuntu /bin/sh is dash: `${PIPESTATUS[0]}` failed).
+* bash runs in bash where there is one (on Debian/Ubuntu /bin/sh is dash: `${PIPESTATUS[0]}` failed); on Windows
+  in Git for Windows' bash when it is installed (never WSL's), else cmd.exe as before.
+* Checkpoints are the files' bytes: no line-ending conversion whatever `core.autocrlf` says (a rolled-back file
+  came back with CRLF on Windows).
 * Lines counted by the SDK (`wc -l`).
 * No embedder on the client (model2vec and numpy left): the vault embeds with one multilingual model.
 * The index cache: one folder per repository (`~/.cache/webbee/index`); the old `~/.cache/webbee/intel` is removed
