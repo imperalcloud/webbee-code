@@ -336,6 +336,36 @@ def test_write_tools_auto_checkpoint_first(tmp_path):
     assert sh.labels == ["pre:write_file", "pre:edit_file", "pre:bash"]
 
 
+def test_a_write_or_a_command_says_what_snapshot_stands_behind_it(tmp_path):
+    # spec 2026-11-19: undo is a fact the result carries -- the id to go back to and what the snapshot does not hold
+    from webbee.tools import SNAPSHOT_UNCOVERED_NAMED, snapshot_fact
+    ex, sh = _ex_shadow(tmp_path)
+    wrote = ex.run("write_file", {"path": "a.txt", "content": "x"})
+    ran = ex.run("bash", {"command": "true"})
+    read = ex.run("read_file", {"path": "a.txt"})
+    assert wrote["snapshot"]["id"] and wrote["snapshot"]["uncovered"] == [] and ran["snapshot"]["id"]
+    assert "snapshot" not in read                                   # a read changes nothing: nothing to go back to
+    big = {"id": "c1", "uncovered": [(f"data/f{i}.bin", "larger than 20 MB") for i in range(SNAPSHOT_UNCOVERED_NAMED + 3)]}
+    fact = snapshot_fact(big)
+    assert len(fact["uncovered"]) == SNAPSHOT_UNCOVERED_NAMED and fact["more"] == 3
+    assert fact["uncovered"][0] == ["data/f0.bin", "larger than 20 MB"]
+    assert snapshot_fact(None) == {"none": "the snapshot failed"}
+
+
+def test_no_time_machine_and_a_failed_snapshot_are_said_as_no_snapshot(tmp_path):
+    from webbee.tools import LocalToolExecutor
+
+    class _Boom:
+        last_error = "disk full"
+
+        def checkpoint(self, label=""):
+            raise RuntimeError("shadow down")
+    bare = LocalToolExecutor(str(tmp_path)).run("write_file", {"path": "a.txt", "content": "x"})
+    assert bare["snapshot"] == {"none": "no time machine for this workspace"}
+    failed = LocalToolExecutor(str(tmp_path), shadow=_Boom()).run("write_file", {"path": "b.txt", "content": "x"})
+    assert failed["ok"] is not False and failed["snapshot"] == {"none": "disk full"}
+
+
 def test_read_tools_do_not_checkpoint(tmp_path):
     ex, sh = _ex_shadow(tmp_path)
     ex.run("write_file", {"path": "a.txt", "content": "x"})

@@ -19,6 +19,23 @@ _WRITE_TIER = set((ci_contract.names_by_effect("write", "webbee", "client")
 PLAN_SAFE_TOOLS = frozenset(ci_contract.names_by_effect("read", "webbee", "client") | {
     "read_url", "web_search", "view_image", "intel_sync_local", "intel_sync_remote"})
 
+SNAPSHOT_UNCOVERED_NAMED = 20        # the paths a snapshot left out that one result names (the rest is a count)
+
+
+def snapshot_fact(cp, shadow=None) -> dict:
+    """What a tool result says of the snapshot taken before it: ``{"id", "uncovered": [[path, why]...], "more"}`` --
+    the id to roll back to and what the snapshot does NOT hold (a file too large, a virtualenv, a repository it
+    could not list), ``more`` being how many beyond the named; or ``{"none": why}`` when no snapshot was taken."""
+    if not isinstance(cp, dict) or not cp.get("id"):
+        why = str(getattr(shadow, "last_error", "") or getattr(shadow, "pause_reason", "") or "the snapshot failed")
+        return {"none": why}
+    left = [[str(p), str(w)] for p, w in (cp.get("uncovered") or []) if p]
+    out = {"id": str(cp["id"]), "uncovered": left[:SNAPSHOT_UNCOVERED_NAMED]}
+    if len(left) > SNAPSHOT_UNCOVERED_NAMED:
+        out["more"] = len(left) - SNAPSHOT_UNCOVERED_NAMED
+    return out
+
+
 # Informational stale-view warning appended to a SUCCESSFUL edit/write when
 # the on-disk file is newer than the agent's last read (external edit under
 # the agent). Never blocks the work -- the brain just learns to re-read.
@@ -335,6 +352,10 @@ class LocalToolExecutor:
             except Exception:
                 pass
         _auto_off = ""
+        # What stands behind this change (spec 2026-11-19: undo is a fact, not an assumption). The snapshot taken
+        # before a write or a command, with what it could not hold -- or that there is none, and why. It rode
+        # nowhere: the kernel could not tell a step that can be taken back from one that cannot.
+        _snapshot = None if tool not in _WRITE_TIER else {"none": "no time machine for this workspace"}
         _due = getattr(self.shadow, "auto_due", None) if self.shadow is not None else None
         if (tool in _WRITE_TIER and self.shadow is not None
                 and (_due() if _due is not None else getattr(self.shadow, "auto_ok", True))):
@@ -347,6 +368,7 @@ class LocalToolExecutor:
                 _cp = self.shadow.checkpoint(f"pre:{tool}")
             except Exception:
                 _cp = None
+            _snapshot = snapshot_fact(_cp, self.shadow)
             _note = getattr(self.shadow, "note_auto_result", None)
             if _note is not None and _note(_cp is not None) is True:
                 # said once, when it stops (Ignat 06.11 §5: the time machine stopped with no word anywhere)
@@ -363,6 +385,11 @@ class LocalToolExecutor:
             res = fn(args)
             if _auto_off and isinstance(res, dict):
                 res["auto_checkpoint"] = _auto_off
+            if _snapshot is not None and isinstance(res, dict):
+                if "none" in _snapshot and self.shadow is not None:      # the time machine exists but is paused
+                    _snapshot = {"none": str(getattr(self.shadow, "pause_reason", "") or getattr(
+                        self.shadow, "last_error", "") or "the automatic snapshot is paused")}
+                res["snapshot"] = _snapshot
             return res
         except OutsideWorkspaceError as e:
             # Return it as a normal tool result (NEVER re-raise): a re-raise
