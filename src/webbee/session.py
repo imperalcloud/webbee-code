@@ -548,6 +548,7 @@ class AgentSession:
         loop = asyncio.get_running_loop()
         _last_own = loop.time()             # M7: the turn's own last activity
         _quiet_noted = False
+        _held_final = ""                    # the newest answer of a marathon turn, shown if a stop follows it
         try:
             while True:
                 if carry_frame is not None:
@@ -822,7 +823,9 @@ class AgentSession:
                                 _parked(str(frame.get("reason", "") or ""))
                             except Exception:
                                 pass
-                        return ""
+                        # the answer delivered before the stop is the turn's text: the person reads it under the
+                        # stop line ("" only when the kernel sent none)
+                        return _held_final
 
                 elif ftype == "final":
                     # In a MARATHON a `final` is a PER-MILESTONE result, NOT the end
@@ -830,6 +833,10 @@ class AgentSession:
                     # / marathon_paused, or a user-stop `final` with stopped=true). A
                     # non-marathon coding turn's `final` is terminal (unchanged).
                     if marathon and not frame.get("stopped"):
+                        # kept: when a stop follows it (marathon_paused), this text is all the person gets to
+                        # read of why the work stopped -- it was dropped, and the stop showed as one line with
+                        # nothing under it (live 2026-11-19: nine stops, each answered by a bare "continue")
+                        _held_final = (_tag + str(frame.get("text") or "")) if frame.get("text") else _held_final
                         continue
                     # I-VISIBLE-ASSISTANT-QUESTION: stash the kernel's own
                     # awaits_reply fact on the sink itself (run()'s return

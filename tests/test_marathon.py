@@ -225,6 +225,26 @@ def test_marathon_paused_is_terminal_and_noted(monkeypatch, tmp_path):
     assert any("paused" in n.lower() for n in sink.notes)
 
 
+def test_the_answer_before_a_stop_is_what_the_person_reads(monkeypatch, tmp_path):
+    # live 2026-11-19: the kernel's stop report rides a `final`, the stop itself a `marathon_paused`; the client
+    # dropped the first and printed one line for the second -- nine stops, each answered by a bare "continue"
+    _, result, sink = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "final", "task_id": "OURS", "text": "an earlier milestone"},
+        {"type": "final", "task_id": "OURS", "text": "I cannot reach the billing host. Which server holds it?"},
+        {"type": "marathon_paused", "task_id": "OURS", "reason": "no_progress"},
+    ])
+    assert result == "I cannot reach the billing host. Which server holds it?"
+    assert any("paused" in n.lower() for n in sink.notes)
+
+
+def test_a_finished_goal_is_shown_once_by_its_completion_not_by_its_milestone(monkeypatch, tmp_path):
+    _, result, _ = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "final", "task_id": "OURS", "text": "the answer"},
+        {"type": "marathon_complete", "task_id": "OURS", "text": "the answer"},
+    ])
+    assert result == "the answer"
+
+
 def test_marathon_user_stop_final_is_terminal(monkeypatch, tmp_path):
     # A user-stop (stopped=true) `final` ends the marathon immediately.
     _, result, _ = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
