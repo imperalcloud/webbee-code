@@ -66,6 +66,11 @@ async def run_headless(cfg, mode: str, goal: str, *, marathon: bool, sink=None, 
         sink.end_turn("")   # clear busy: a stuck 'working' also starves the idle-steer poller
         return ""
     sink.end_turn(text)
+    # one plain last line for whoever drives a headless run (the field gate reads only this and the files): how the
+    # turn ended as the kernel said it -- nothing when the kernel did not say
+    kind = str(getattr(agent, "last_end", "") or "")
+    if kind:
+        print(f"end: {kind}", flush=True)
     return text
 
 

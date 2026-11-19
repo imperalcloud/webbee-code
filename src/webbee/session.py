@@ -549,6 +549,7 @@ class AgentSession:
         _last_own = loop.time()             # M7: the turn's own last activity
         _quiet_noted = False
         _held_final = ""                    # the newest answer of a marathon turn, shown if a stop follows it
+        self.last_end = ""                  # how this turn ended, once the kernel says it
         try:
             while True:
                 if carry_frame is not None:
@@ -791,6 +792,10 @@ class AgentSession:
                             pass
 
                 elif ftype == "marathon_complete":  # U4 — the whole GOAL is done: terminal
+                    # how the run ended, as the kernel says it (answer | question | brake; "" from a kernel that
+                    # does not say): a question waits for the person's reply -- the dock shows it as such
+                    self.last_end = str(frame.get("end") or "")
+                    setattr(sink, "_awaits_reply", bool(frame.get("awaits_reply")) or self.last_end == "question")
                     return frame.get("text", "")
 
                 elif ftype in _MARATHON_FACT_TYPES:  # U4 — marathon plan/milestone/pause/todo
@@ -823,6 +828,7 @@ class AgentSession:
                                 _parked(str(frame.get("reason", "") or ""))
                             except Exception:
                                 pass
+                        self.last_end = str(frame.get("end") or "brake")       # a pause is the kernel's stop
                         # the answer delivered before the stop is the turn's text: the person reads it under the
                         # stop line ("" only when the kernel sent none)
                         return _held_final

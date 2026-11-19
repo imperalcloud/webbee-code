@@ -245,6 +245,32 @@ def test_a_finished_goal_is_shown_once_by_its_completion_not_by_its_milestone(mo
     assert result == "the answer"
 
 
+def test_the_client_keeps_how_the_run_ended_and_a_question_waits_for_a_reply(monkeypatch, tmp_path):
+    import webbee.session as S
+    kept = {}
+    real = S.AgentSession.run
+
+    async def run(self, *a, **k):
+        out = await real(self, *a, **k)
+        kept["end"] = self.last_end
+        return out
+    monkeypatch.setattr(S.AgentSession, "run", run)
+    _, result, sink = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "marathon_complete", "task_id": "OURS", "text": "Which profile is yours?", "end": "question",
+         "awaits_reply": True}])
+    assert result == "Which profile is yours?" and kept["end"] == "question" and sink._awaits_reply is True
+    _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "marathon_complete", "task_id": "OURS", "text": "done", "end": "answer"}])
+    assert kept["end"] == "answer"
+    _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "marathon_complete", "task_id": "OURS", "text": "done"}])          # an older kernel says nothing
+    assert kept["end"] == ""
+    _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "final", "task_id": "OURS", "text": "why it stopped"},
+        {"type": "marathon_paused", "task_id": "OURS", "reason": "no_progress", "end": "brake"}])
+    assert kept["end"] == "brake"
+
+
 def test_marathon_user_stop_final_is_terminal(monkeypatch, tmp_path):
     # A user-stop (stopped=true) `final` ends the marathon immediately.
     _, result, _ = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
