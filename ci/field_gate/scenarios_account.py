@@ -12,7 +12,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from ci.field_gate.drivers import console, hook
+from ci.field_gate.drivers import hook, webbee_argv
 from ci.field_gate.registry import Ctx, Outcome, data_of, failed, scenario, text_of
 from ci.field_gate.replay import scrub, transcript_events
 
@@ -150,7 +150,7 @@ def _webbee_once(ctx: Ctx, task: str) -> str:
     """One real Webbee turn (``webbee --once``): its code tools answer through the kernel from the vault -- what a
     Webbee user gets (variant A, 2026-11-15: the client's own index is a coarse fallback and builds no vectors)."""
     env = {**os.environ, "HOME": str(ctx.home), "USERPROFILE": str(ctx.home), "WEBBEE_NO_AUTOUPDATE": "1"}
-    proc = subprocess.run([console("webbee"), "--once", task], capture_output=True, text=True,
+    proc = subprocess.run([*webbee_argv(), "--once", task], capture_output=True, text=True,
                           cwd=str(ctx.fixture.root), env=env, timeout=600)
     return proc.stdout + proc.stderr
 

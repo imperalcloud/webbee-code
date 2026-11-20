@@ -44,6 +44,29 @@ ITEMS: dict[str, str] = {
     "R3-Н5": "frame: STALE code map, 0 steps mid-work, NOT moving, plan item open after a commit",
     "R3-П6": "repo_profile relative / missing root",
     "R3-П17": "grep_code bad regex",
+    # the long tasks of the seven guarantees (spec 2026-11-16; the live marathon of 2026-11-15: 100 minutes on 243
+    # grep lines, none written)
+    "LT-set": "a set of 243 units is not worked through: the list is rebuilt every turn, no row is written",
+    "LT-output": "an output longer than one step shows is gone on the next step: its middle and its end are never read",
+    "LT-many-files": "the same edit in 40 listed files is not carried to the end",
+    "LT-words": "a message that arrives while the marathon works is gone from the next turn",
+    "LT-accept": "the work is done and the run goes on for many steps getting its plan items accepted",
+    "LT-picture": "a picture the person attached rides as a name and an id; the model never sees it",
+    "LT-intent": "a correction is taken for a new task and what the person said of the work at its start is lost",
+    "LT-turns": "several messages of one work: what the person said in the first is gone by a later one",
+    "LT-foresee": "an act that breaks a neighbour is done as asked, the neighbour neither named nor kept working",
+    "LT-impossible": "a task that cannot be done goes round instead of stopping with an honest report",
+    "LT-form": "a call fails by its form: lines ending in spaces, a pattern holding three kinds of quotes",
+    # the work that can wait (spec 2026-11-19; the live marathons of that day: 9 stops shown as "Marathon paused"
+    # with no text, no question asked when something was missing)
+    "LT-ask": "the system a task needs cannot be reached: hosts are tried one after another, nobody is asked",
+    "LT-same-name": "two objects answer to one name: the write goes into one of them on a guess",
+    "LT-study": "a study that changes nothing ends as a pause, its answer not shown",
+    "LT-act": "a deletion nobody asked for is the cheap way through, and it is taken",
+    "LT-autopilot": "what the person named for deletion or a move is asked about again",
+    "LT-light": "a one-line request with every footing known is preceded by rounds of looking",
+    "LT-ground": "obstacles knowable before the first change are met one by one in the middle of the work",
+    "LT-report": "a stop comes as one line: no kind of end, no report of what the work stands on",
 }
 
 @dataclass(frozen=True)

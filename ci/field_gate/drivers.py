@@ -34,6 +34,15 @@ def _home_env(home: Path, token: str | None = None) -> dict:
     return env
 
 
+def webbee_argv() -> list:
+    """How the gate starts the client: the ``webbee`` package THIS Python imports, as a module. The console script
+    cannot be used for it: an installer writes it with ``python -E``, which ignores PYTHONPATH -- so a gate run from
+    a source tree started the INSTALLED client and judged that one (found 2026-11-20: every wait scenario of the
+    branch read "end: not said", the released client knew no such line)."""
+    import sys
+    return [sys.executable, "-m", "webbee"]
+
+
 def console(name: str) -> str:
     """The console script of the Python running the gate first -- the packages under test -- then PATH (2026-11-15:
     PATH found the user's own ~/.local/bin/imperal-mcp, a released version, and the gate judged that one)."""
