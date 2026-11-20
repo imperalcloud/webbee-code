@@ -28,7 +28,9 @@ _SESSION = re.compile(r"marathon-imp_u_[A-Za-z0-9_-]{10}-r[0-9a-f]+(?:-s[0-9a-f]
 
 
 def _workspace(ctx: Ctx, name: str) -> Path:
-    return Path(ctx.fixture.root).parent / f"long-{name}-{uuid.uuid4().hex[:6]}"
+    # the folder does not say which scenario it is (see run.py: the agent must not be able to tell it is examined);
+    # ``name`` stays for the caller's reading
+    return Path(ctx.fixture.root).parent / f"p{uuid.uuid4().hex[:8]}"
 
 
 def _start(ctx: Ctx, root: Path, goal: str) -> subprocess.Popen:

@@ -95,7 +95,9 @@ def _gate_credentials() -> Path | None:
 
 async def main_async(args) -> int:
     shells = ["mcp", "webbee"] if args.shell == "both" else [args.shell]
-    work = Path(tempfile.mkdtemp(prefix="field-gate-"))
+    # a name that says nothing: an agent that meets a dilemma may look for its examiner (live 2026-11-20, wait-act:
+    # `find ~ -name "*field_gate*"` from a folder named field-gate-*, then it read the scenario for the expected end)
+    work = Path(tempfile.mkdtemp(prefix="w-"))
     rows = []
     for shell in shells:
         rows += await _run_shell(shell, args.account, args.only or [], work)
