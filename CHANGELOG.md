@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.18
+
+* Needs the kernel of 2026-11-20 (the work that can wait); imperal-mcp 0.9.20 and imperal-sdk 6.7.1 as before.
+* A run says how it ended - an answer, a question to you, or a stop by the kernel - and shows each its own way; a
+  headless run prints `end: answer | question | brake` as its last line.
+* A stop is never one line: it shows why in plain words, what is proven, the item the work stands on with what was
+  tried there, and what waits on you. A question shows the same facts under its text.
+* The answer that precedes a stop is shown (the interactive terminal skipped it).
+* The result of a write or a command says what snapshot stands behind it: its number and what it does not cover, or
+  that there is none and why.
+* A stopped run holds nothing: your next message in the same folder continues the same task.
+
 ## 0.7.17
 
 * Needs imperal-mcp 0.9.20 and imperal-sdk 6.7.1 (the truth architecture, spec 2026-11-14).
