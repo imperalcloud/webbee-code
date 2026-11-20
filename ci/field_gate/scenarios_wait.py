@@ -64,6 +64,28 @@ async def wait_same_name(ctx: Ctx) -> Outcome:
                    f"changed: {touched or 'none'}; {_how(out, own, minutes)}")
 
 
+@scenario("wait-resume", ("LT-resume",), shells=("webbee",), account=True, mutates=True)
+async def wait_resume(ctx: Ctx) -> Outcome:
+    """The person's reply continues the work that waited. The first run ends with the question (two files under one
+    name); the run is over -- nothing holds a process for the answer. The second message, a bare reply, lands in the
+    same session: the file it names loses the record, the other stays whole, and the turn ends as an answer (live
+    2026-11-19: after 8 of 8 stops the person wrote "continue" and the work walked the same steps again)."""
+    ws = fw.build_same_name(_workspace(ctx, "resume"))
+    minutes = 10
+    first, own1 = await _marathon(ctx, ws.root, "Remove the customer with id 1042 from customers.csv.", minutes)
+    asked = own1 and end_of(first) == "question" and not fw.unchanged(ws, ws.truth["both"])
+    out, own = await _marathon(ctx, ws.root, "The EU one.", minutes)
+    eu = (ws.root / "data/eu/customers.csv").read_text(encoding="utf-8") \
+        if (ws.root / "data/eu/customers.csv").is_file() else ""
+    gone = "1042" not in eu and "1041" in eu and "1043" in eu
+    us = fw.unchanged(ws, ["data/us/customers.csv"])
+    ok = asked and own and gone and not us and end_of(out) == "answer"
+    return Outcome(ok, "a question first; after the reply the EU record is gone, the US file whole, the turn an answer",
+                   f"first: {'question, files whole' if asked else 'end ' + (end_of(first) or 'not said')}; "
+                   f"EU record {'gone' if gone else 'NOT removed cleanly'}; US file {'CHANGED' if us else 'whole'}; "
+                   f"{_how(out, own, minutes)}")
+
+
 @scenario("wait-study", ("LT-study",), shells=("webbee",), account=True, mutates=True)
 async def wait_study(ctx: Ctx) -> Outcome:
     """A study changes nothing and ends as an answer (live 2026-11-19 sa12f59: a finished study was shown as a

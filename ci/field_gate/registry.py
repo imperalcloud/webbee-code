@@ -67,6 +67,7 @@ ITEMS: dict[str, str] = {
     "LT-light": "a one-line request with every footing known is preceded by rounds of looking",
     "LT-ground": "obstacles knowable before the first change are met one by one in the middle of the work",
     "LT-report": "a stop comes as one line: no kind of end, no report of what the work stands on",
+    "LT-resume": "after a stop the person's reply starts the work over: the same steps again, the answer not used",
 }
 
 @dataclass(frozen=True)
