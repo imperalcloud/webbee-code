@@ -451,3 +451,46 @@ def test_marathon_plan_and_milestone_still_one_line_notes(monkeypatch, tmp_path)
     assert any("Marathon plan" in n for n in sink.notes)
     assert any("Milestone" in n for n in sink.notes)
     assert sink.todo_lists == []
+
+
+# --- the kernel's report of a stop (the work that can wait, part V) ----------------------------------------------
+
+_REPORT = {"reason": "no_progress", "why": "14 steps on one item of the plan without a change or a proof",
+           "done": ["Read the ticket"], "open": ["Query the billing host", "Send the report", "Write the summary"],
+           "waits": [{"item": "Send the report", "on": "which address to send it to"}],
+           "item": "Query the billing host",
+           "tried": [{"call": "ssh billing-host uptime", "times": 3, "ok": False, "result": "Permission denied"},
+                     {"call": "read notes.md", "times": 1, "ok": True, "result": ""}]}
+
+
+def test_a_stop_with_the_kernel_report_says_why_in_words_and_lists_its_facts():
+    from webbee.frames import marathon_note
+    note = marathon_note({"type": "marathon_paused", "reason": "no_progress", "end": "brake",
+                          "why": _REPORT["why"], "report": _REPORT})
+    lines = note.split("\n")
+    assert lines[0] == "⏸ Stopped by the kernel: 14 steps on one item of the plan without a change or a proof"
+    assert "no_progress" not in note and "Marathon paused" not in note
+    assert "  ✓ proven: Read the ticket" in lines and "  ▸ stands on: Query the billing host" in lines
+    assert "  · tried: FAILED x3 `ssh billing-host uptime` -- Permission denied" in lines
+    assert "  · tried: ran `read notes.md`" in lines
+    assert "  ? waits on you: which address to send it to (Send the report)" in lines
+    assert [ln for ln in lines if ln.startswith("  ○ open:")] == ["  ○ open: Write the summary"]   # each item once
+
+
+def test_a_stop_from_a_kernel_that_sends_no_report_reads_as_before_and_a_bad_shape_is_skipped():
+    from webbee.frames import marathon_note, stop_report_lines
+    assert marathon_note({"type": "marathon_paused", "reason": "no_progress"}) == "⏸ Marathon paused: no_progress"
+    assert marathon_note({"type": "marathon_paused", "reason": "money", "why": "a paid action waits"}) == \
+        "⏸ Stopped by the kernel: a paid action waits"
+    assert stop_report_lines(None) == [] and stop_report_lines({"done": "x", "tried": [1, {}], "waits": [None]}) == []
+
+
+def test_a_question_end_shows_the_kernel_report_under_the_words(monkeypatch, tmp_path):
+    _, result, sink = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "marathon_complete", "task_id": "OURS", "text": "Which address do I send it to?", "end": "question",
+         "awaits_reply": True, "report": _REPORT}])
+    assert result == "Which address do I send it to?"
+    assert any("waits on you: which address to send it to" in n for n in sink.notes)
+    _, _, plain = _run_marathon_capture_post(monkeypatch, tmp_path, frames=[
+        {"type": "marathon_complete", "task_id": "OURS", "text": "done", "end": "answer"}])
+    assert not any("waits on you" in n for n in plain.notes)

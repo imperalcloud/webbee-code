@@ -22,6 +22,7 @@ from webbee.frames import (
     marathon_note,
     render_foreign_frame,
     render_todo_frame,
+    stop_report_lines,
 )
 
 
@@ -796,6 +797,11 @@ class AgentSession:
                     # does not say): a question waits for the person's reply -- the dock shows it as such
                     self.last_end = str(frame.get("end") or "")
                     setattr(sink, "_awaits_reply", bool(frame.get("awaits_reply")) or self.last_end == "question")
+                    # a stop that ends as a question carries the kernel's report of it: the facts under the words
+                    _facts = stop_report_lines(frame.get("report"))
+                    _note = getattr(sink, "note", None)
+                    if _facts and _note is not None:
+                        _note("\n".join(["⏸ The work waits on you. What the kernel holds:", *_facts]))
                     return frame.get("text", "")
 
                 elif ftype in _MARATHON_FACT_TYPES:  # U4 — marathon plan/milestone/pause/todo

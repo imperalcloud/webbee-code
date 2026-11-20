@@ -219,6 +219,34 @@ def render_foreign_frame(frame: dict, sink) -> None:
 _MARATHON_FACT_TYPES = ("marathon_plan", "milestone", "marathon_paused", "todo")
 
 
+def stop_report_lines(report) -> list[str]:
+    """The kernel's report of a stop, one line per fact, as the kernel sent it (nothing is judged or reworded
+    here): what it saw proven, the item the work stands on, each call tried there with how it ended, what waits
+    on the person, what is still open. A field that is missing or of another shape is skipped, never an error."""
+    r = report if isinstance(report, dict) else {}
+
+    def texts(key):
+        return [str(x).strip() for x in (r.get(key) if isinstance(r.get(key), list) else []) if str(x).strip()]
+    out = [f"  ✓ proven: {t}" for t in texts("done")]
+    item = str(r.get("item") or "").strip()
+    if item:
+        out.append(f"  ▸ stands on: {item}")
+    for t in r.get("tried") if isinstance(r.get("tried"), list) else []:
+        if isinstance(t, dict) and str(t.get("call") or "").strip():
+            times = f" x{t['times']}" if isinstance(t.get("times"), int) and t["times"] > 1 else ""
+            mark = "" if "ok" not in t else ("ran" if t.get("ok") else "FAILED")
+            result = str(t.get("result") or "").strip()
+            out.append("  · tried: " + " ".join(x for x in (mark + times, f"`{t['call']}`") if x.strip())
+                       + (f" -- {result}" if result else ""))
+    for w in r.get("waits") if isinstance(r.get("waits"), list) else []:
+        if isinstance(w, dict) and str(w.get("on") or "").strip():
+            out.append(f"  ? waits on you: {w['on']}" + (f" ({w['item']})" if str(w.get("item") or "").strip() else ""))
+    waiting = {str(w.get("item")) for w in (r.get("waits") if isinstance(r.get("waits"), list) else [])
+               if isinstance(w, dict)}
+    out += [f"  ○ open: {t}" for t in texts("open") if t != item and t not in waiting]
+    return out
+
+
 def marathon_note(frame: dict) -> str:
     """One-line note for a marathon FACT frame (marathon_plan / milestone /
     marathon_paused). Reads common fields with fallbacks so a shape change on
@@ -239,6 +267,9 @@ def marathon_note(frame: dict) -> str:
         tail = f" [{status}]" if status else ""
         return f"• {head}: {label}{tail}".rstrip() if label else f"• {head}{tail}"
     if ftype == "marathon_paused":
+        why = str(frame.get("why") or "").strip()
+        if why:      # the kernel says why in plain words and reports the stop from its own records
+            return "\n".join([f"⏸ Stopped by the kernel: {why}", *stop_report_lines(frame.get("report"))])
         reason = str(frame.get("reason") or frame.get("summary") or "").strip()
         return f"⏸ Marathon paused: {reason}" if reason else "⏸ Marathon paused"
     if ftype == "todo":
