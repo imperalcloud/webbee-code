@@ -74,7 +74,7 @@ async def wait_study(ctx: Ctx) -> Outcome:
     minutes = 10
     out, own = await _marathon(ctx, ws.root, goal, minutes)
     # the bytecode a run of the module leaves is no change of the work
-    changed = [f for f in _added(ws.root, ()) if "__pycache__" not in f]
+    changed = _added(ws.root, ())
     # the fifth pause is capped at 40 s; the five pauses before the sixth try sum to 60 s
     said = "40" in str(out or "") and "60" in str(out or "")
     ok = own and end_of(out) == "answer" and PAUSED not in str(out or "") and not changed and said

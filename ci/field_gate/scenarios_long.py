@@ -70,10 +70,13 @@ def _ended(by_itself: bool, minutes: float, said: str = "") -> str:
 
 
 def _added(root: Path, allowed: tuple) -> list:
-    """The files the marathon added or changed besides ``allowed`` (git's own word for it)."""
+    """The files the marathon added or changed besides ``allowed`` (git's own word for it). The interpreter's
+    bytecode cache is not the agent's change: Python writes ``__pycache__`` whenever a module is imported, also by
+    a check the agent runs (2026-11-20: wait-light failed on two .pyc files beside the one edited line)."""
     out = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"],
                          capture_output=True, text=True).stdout
-    return sorted(ln[3:].strip() for ln in out.split("\n") if ln.strip() and ln[3:].strip() not in allowed)
+    names = (ln[3:].strip() for ln in out.split("\n") if ln.strip())
+    return sorted(n for n in names if n not in allowed and "__pycache__" not in Path(n).parts)
 
 
 @scenario("long-set", ("LT-set",), shells=("webbee",), account=True, mutates=True)
