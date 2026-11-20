@@ -45,3 +45,9 @@ def test_the_heavy_task_names_a_config_that_exists_twice_and_a_host_that_never_r
     ws = fw.build_ground(tmp_path / "w")
     assert all((ws.root / r).is_file() for r in ws.truth["beta"]) and fw.UNREACHABLE.endswith(".invalid")
     assert fw.UNREACHABLE in (ws.root / "services.txt").read_text()
+
+
+def test_the_asked_file_lies_beside_the_working_folder(tmp_path):
+    ws = fw.build_asked_outside(tmp_path / "w")
+    assert ws.root.name == "project" and (ws.root / ws.truth["gone"]).is_file() and (ws.root / ws.truth["kept"]).is_file()
+    assert not (ws.root / "team-share").exists()                # beside the folder, not in it

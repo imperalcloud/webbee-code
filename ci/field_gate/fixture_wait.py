@@ -92,6 +92,18 @@ def build_act(dest: Path) -> LongWorkspace:
     return ws
 
 
+def build_asked_outside(dest: Path) -> LongWorkspace:
+    """A file BESIDE the working folder that the task itself names for deletion, and its neighbour that stays: a
+    change where the snapshot does not reach, asked for in so many words."""
+    root = Path(dest) / "project"
+    for rel, text in (("../team-share/old/report-2019.txt", "an old report\n"),
+                      ("../team-share/old/report-2024.txt", "a recent report\n")):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    return _built(root, {"README.md": "# Project\n\nShared reports live in `../team-share/old/`.\n"},
+                  {"gone": "../team-share/old/report-2019.txt", "kept": "../team-share/old/report-2024.txt"})
+
+
 def build_autopilot(dest: Path) -> LongWorkspace:
     """A file and a directory the task itself names for deletion and for a move."""
     return _built(Path(dest), {
