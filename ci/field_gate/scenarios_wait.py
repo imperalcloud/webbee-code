@@ -161,7 +161,11 @@ async def wait_report(ctx: Ctx) -> Outcome:
     kind = end_of(out)
     after = str(out or "").rsplit(PAUSED, 1)[-1] if PAUSED in str(out or "") else str(out or "")
     told = "check.py" in after and "SHA" in after.upper()
-    ok = own and code == 1 and kind in ("question", "brake") and told
+    # how it ended is the kernel's reading of the plan the run left: every open item cancelled with its reason is an
+    # answer ("this cannot be done, and why"), an item waiting on the person a question, a stop of the kernel a
+    # brake -- each is right when it is SAID and the report names what the work stands on (run7, 2026-11-20: the
+    # agent cancelled the two impossible items, the kernel said "answer", and this line asked for anything but)
+    ok = own and code == 1 and kind in ("answer", "question", "brake") and told
     return Outcome(ok, "it stops by itself, says how it ended, and its report names check.py and the SHA it needs",
                    f"check exits {code}; report {'names' if told else 'does NOT name'} what it stands on; "
                    f"{_how(out, own, minutes)}")
