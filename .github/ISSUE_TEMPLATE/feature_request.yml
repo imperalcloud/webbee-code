@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest a new capability, slash command, TUI improvement, or workflow for Webbee
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What are you trying to accomplish, and where does Webbee get in your way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe how you'd like this to work (CLI flag, slash command, keybinding, or tool behavior).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds or alternative designs you've thought about.

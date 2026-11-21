@@ -39,7 +39,20 @@ dependencies = [
     # No embedder here (variant A, 2026-11-15): the vault embeds every chunk and query with one multilingual model,
     # so model2vec / numpy left the client.
 ]
-keywords = ["webbee", "imperal", "icnli", "coding-agent", "ai-agent", "cli", "terminal", "llm"]
+keywords = [
+    "webbee",
+    "imperal",
+    "icnli",
+    "coding-agent",
+    "ai-agent",
+    "cli",
+    "tui",
+    "terminal",
+    "llm",
+    "tree-sitter",
+    "code-intelligence",
+    "developer-tools",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",

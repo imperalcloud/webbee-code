@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a crash, incorrect tool behavior, TUI glitch, or install issue in Webbee
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug in **Webbee**! Please fill in the details below so we can reproduce it quickly.
+        For security vulnerabilities, see `SECURITY.md` instead of opening a public issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected to happen instead.
+      placeholder: Tell us what went wrong...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal command or steps to trigger the issue.
+      value: |
+        1. Run `webbee ...`
+        2. ...
+        3. See error
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Webbee version
+      description: Output of `webbee --version`
+      placeholder: "webbee 0.7.18"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS, terminal & Python version
+      description: e.g. macOS 15 (Terminal.app / Ghostty), Ubuntu 24.04 (tmux), Windows 11 (Windows Terminal) + `python3 --version`
+      placeholder: "macOS 15.x, Terminal.app, Python 3.12.7"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or logs
+      description: Paste any terminal output or relevant lines from `~/.cache/webbee/webbee.log` (scrub secrets/tokens first).
+      render: shell
