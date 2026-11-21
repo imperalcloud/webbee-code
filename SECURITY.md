@@ -15,7 +15,7 @@ Only the latest release of `webbee` is actively supported with security fixes. W
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, email us privately at **[security@imperal.io](mailto:security@imperal.io)** (or [support@imperal.io](mailto:support@imperal.io)) with:
+Instead, email us privately at **[support@imperal.io](mailto:support@imperal.io)** with:
 
 - A clear description of the vulnerability and its potential impact.
 - Step-by-step reproduction instructions or a minimal proof of concept.

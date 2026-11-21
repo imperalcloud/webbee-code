@@ -60,4 +60,4 @@ Security architecture and audit documentation: [docs.imperal.io/en/guides/audit-
 ## Contact
 
 Privacy questions or data requests: [support@imperal.io](mailto:support@imperal.io)
-Security reports: [security@imperal.io](mailto:security@imperal.io) (see [SECURITY.md](SECURITY.md))
+Security reports: [support@imperal.io](mailto:support@imperal.io) (see [SECURITY.md](SECURITY.md))
