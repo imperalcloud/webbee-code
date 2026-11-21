@@ -138,3 +138,30 @@ def build_ground(dest: Path) -> LongWorkspace:
         "beta/README.md": "beta, the service in production since 2025.\n",
         "beta-legacy/README.md": "beta, kept running for two customers that did not migrate.\n",
     }, {"beta": ["beta/config.ini", "beta-legacy/config.ini"]})
+
+
+REACH_PID = "var/run/notes.pid"
+REACH_BEAT = "var/run/notes.beat"
+
+
+def build_reach(dest: Path) -> LongWorkspace:
+    """A service that runs, and a note that names a place where its pid file no longer is (live 2026-11-20: two
+    ports of a machine refused a connection and the report said "the vault is fully unavailable" -- it answered on
+    its own port). The service is a process of this machine: no network stands between the task and the truth."""
+    serve = ('"""The notes service: writes its pid to NOTES_PIDFILE of deploy/notes.env and a heartbeat beside it."""\n'
+             "import os\nimport pathlib\nimport time\n\n"
+             "HERE = pathlib.Path(__file__).parent\n"
+             "PIDFILE = HERE / next(ln.split('=', 1)[1] for ln in (HERE / 'deploy' / 'notes.env').read_text()"
+             ".split('\\n') if ln.startswith('NOTES_PIDFILE='))\n"
+             "PIDFILE.parent.mkdir(parents=True, exist_ok=True)\n"
+             "PIDFILE.write_text(str(os.getpid()) + '\\n')\n"
+             "while True:\n"
+             "    PIDFILE.with_suffix('.beat').write_text(str(int(time.time())) + '\\n')\n"
+             "    time.sleep(1)\n")
+    return _built(Path(dest), {
+        "serve.py": serve,
+        "deploy/notes.env": f"NOTES_PIDFILE={REACH_PID}\nNOTES_DIR=/var/lib/notes\n",
+        "README.md": ("# Notes service\n\nStarted by the host's supervisor (`python3 serve.py`).\n\n"
+                      "Status: `cat run/notes.pid` prints the pid of the running service.\n"),
+        ".gitignore": "var/\n",
+    }, {})
