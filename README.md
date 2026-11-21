@@ -4,26 +4,13 @@
 [![Python](https://img.shields.io/badge/python-3.7%20%7C%203.8%20%7C%203.9%20%7C%203.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776ab?logo=python&logoColor=white)](https://pypi.org/project/webbee/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-imperal.io-00afd7)](https://docs.imperal.io)
+[![Protocol: ICNLI](https://img.shields.io/badge/ICNLI-CC%20BY--SA%204.0-ff6b00)](https://icnli.org)
 
-**Python 3.7 – 3.14** · `pip install webbee` works on every one of them.
+**Python 3.7 – 3.14** · `pipx install webbee` works on every one of them.
 
-**Webbee** is the free, open-source terminal coding agent of [Imperal Cloud](https://imperal.io) (the ICNLI AI Cloud OS). It acts directly in your local terminal and workspace: reading, writing, editing, refactoring, and verifying code with deep code intelligence, native multimodal vision, and live cross-platform system capabilities.
+**Webbee** is the open-source terminal coding agent of [Imperal Cloud](https://imperal.io), powered by **[ICNLI](https://icnli.org)** (*Infrastructure Contextual Natural Language Interface*). It works directly in your local workspace (and over SSH): mapping your codebase with tree-sitter, checking blast radius before edits, taking invisible Shadow Git checkpoints before every write, and sharing one live memory across your terminal, IDE, web panel and Telegram.
 
-Webbee is powered by **ICNLI** (*Infrastructure Contextual Natural Language Interface* — [icnli.org](https://icnli.org)), the open protocol that maps natural-language intent to context-aware infrastructure actions.
-
-> **Open-Source Guarantee (GPLv3)**: Webbee belongs to the community. No locked silos, no hidden telemetry, no arbitrary execution barriers. The model proposes; the kernel evaluates; **you hold the key**.
-
----
-
-## 🚀 Key Features
-
-* 🧠 **Real Agentic AI Brain, Not a Chatbot**: Reasons across your entire workspace, plans multi-step tasks, reads project architecture, executes terminal commands, and edits code safely.
-* 👁️ **Native Multimodal Vision (`view_image`)**: Direct image inspection (UI mocks, diagrams, screenshots, graphs) for vision-capable models, with automatic graceful fallback to OCR and document extraction via File Reader.
-* 🌐 **Integrated Web Search (`web_search` & `read_url`)**: Perform live web research and retrieve documentation directly in your terminal sessions via Imperal's system web-search extension — zero local API keys required.
-* 🛡️ **Ironclad Safety & Reversibility**: Built-in Shadow Git time-machine snapshots every workspace modification (`checkpoint`, `diff`, `rollback`). Revert any step instantly.
-* 🔌 **Platform & Extension Arsenal**: Seamless access to connected cloud extensions (Mail, Vikunja Tasks, Notes, Google Analytics, GitHub, Proxmox, Stripe, SSH Connections, and more).
-* ⚡ **Lightning Fast & Memory-Efficient**: Instant startup with granular lazy imports, configurable RAM limits (256MB to 8GB) with LRU eviction, and fail-soft permission handling.
-* 🖥️ **First-Class Cross-Platform TUI**: Beautiful, responsive terminal interface compatible with macOS (Terminal.app, iTerm2), Linux (Alacritty, Kitty, WezTerm), and Windows Terminal. Normalized 2-cell icon widths for pixel-perfect alignment.
+> **Open-Source Guarantee (GPLv3):** No locked silos, no hidden telemetry, no arbitrary execution barriers. The model proposes; the kernel verifies against real facts; **you hold the key**.
 
 ---
 
@@ -52,8 +39,7 @@ Works with **any Python from 3.7**:
 - **Python 3.7 – 3.9** (macOS ships 3.9, Ubuntu 20.04 has 3.8) — the install is light, and the first
   `webbee` command sets up the same release on its own Python 3.12, once (about 30–45 s, needs internet;
   it fetches uv to do it). Every start after that is immediate, and it is the full webbee — code index
-  and search by meaning included. It lives in `~/.local/share/webbee/runtime` and changes nothing else on
-  your system.
+  included. It lives in `~/.local/share/webbee/runtime` and changes nothing else on your system.
 
 <details>
 <summary>Install problems</summary>
@@ -70,43 +56,75 @@ Works with **any Python from 3.7**:
 
 ---
 
-## 💡 Quick Start
+## 🚀 Why Webbee
+
+- **Live Code Map (Tree-sitter + Call Graph):** Ships with code intelligence by default (`orient`, `outline`, `read_symbol`, `graph_slice`, `contract_slice`, `impact_of_change`, `search_code`, `grep_code`). Reads the exact symbol instead of dumping whole files, and checks callers before editing shared code — locally or over SSH.
+- **Shadow Git Time Machine:** Snapshots your workspace automatically before writes without touching your `.git` history. Inspect diffs or roll back any step via `/checkpoints`, `/rollback <ref>`, or the built-in checkpoint tools.
+- **Marathon & Headless Runs:** Run long-horizon autonomous tasks (`webbee --marathon "GOAL"`), single non-interactive turns for scripts/CI (`webbee --once "TASK"`), or interactive multi-tab coding sessions.
+- **Multi-Tab Terminal Workspace & Queueing:** Open parallel workspace tabs (`/new`, `/tab`, `/tabs`, `/close`, `/rename`), queue follow-up messages while Webbee works (`/queue`), attach local files (`/attach`), inspect step details (`/steps`), and switch model tiers (`/model` or `Ctrl+B`).
+- **One Brain Across Every Surface:** Shares your Imperal Cloud account, memory vault, and live sessions with **[imperal-mcp](https://github.com/imperalcloud/imperal-mcp)**, the [Imperal web panel](https://panel.imperal.io), and Telegram (`/notify [tg|panel|both|off]` mirrors a terminal session and lets you steer it remotely).
+- **Native Vision, Web Research & Extensions:** Inspect screenshots and diagrams (`view_image`), search the web and read docs (`web_search`, `read_url`), and use connected Imperal Cloud extensions directly from the terminal.
+
+---
+
+## 💡 Quick Start & CLI
 
 ```sh
-# Start Webbee in your project workspace
+# Sign in to your Imperal Cloud account (RFC 8628 device flow)
+webbee login
+
+# Start the interactive terminal agent in your project workspace
 webbee
 
-# Sign in to link your Imperal Cloud account (RFC 8628 device flow)
-webbee login
+# Start in a specific mode (default | plan | autopilot)
+webbee --mode autopilot
+
+# Launch an autonomous marathon toward a goal
+webbee --marathon "Add pagination tests and fix failing assertions"
+
+# Run a single headless turn and exit (0 if answered, 1 otherwise)
+webbee --once "Summarize the authentication flow in src/"
 ```
 
-Inside the interactive terminal:
-* Speak naturally in English, Ukrainian, or any language you prefer.
-* Type `/help` to see all available slash-commands (`/login`, `/mode`, `/status`, `/cost`, `/clear`, `/exit`).
-* Use **Shift + TAB** to cycle execution modes:
-  - **default**: Asks confirmation for major changes or destructive operations.
-  - **plan**: Formulates an exhaustive execution strategy before touching any code.
-  - **autopilot**: Autonomous mode for rapid prototyping and uninterrupted development runs.
+### Interactive Slash Commands & Shortcuts
+
+Type `/help` inside Webbee for the full list:
+
+- **Session & Auth:** `/login`, `/logout`, `/status`, `/cost` (`/usage`), `/sessions`, `/logout-others`, `/clear`, `/exit`
+- **Modes & Model Tiers:** `/mode [default|plan|autopilot]` (`Shift+TAB` cycles modes), `/model [webbeesmart|supersmart|ultrasmart]` (`Ctrl+B` cycles tiers)
+- **Tabs & Queue:** `/new [path]` (`Ctrl+T`), `/tab N` (`Alt+N`), `/tabs`, `/close` (`Ctrl+W`), `/rename <name>`, `/queue [clear]`, `/attach <path>`, `/steps [N]`
+- **Reversibility & Steering:** `/checkpoints`, `/rollback <ref>`, `/notify [tg|panel|both|off]`
 
 ---
 
 ## 🛠️ Built-in Terminal Toolset
 
-| Icon | Tool | Description |
-|:---:|:---|:---|
-| 📖 | `read_file` | Read text and source files byte-exact, with offset/limit paging |
-| ✏️ | `write_file` | Create or overwrite files atomically with snapshot tracking |
-| 🔧 | `edit_file` / `multi_edit` | Precise find-and-replace edits across one or multiple files |
-| ⚡ | `shell` | Execute shell/terminal commands across Windows, macOS and Linux with streaming |
-| 🔎 | `grep` / `glob` | Fast regex code search and workspace file pattern matching |
-| 🌐 | `web_search` / `read_url` | Search the web and read web documentation in clean Markdown |
-| 🖼️ | `view_image` | Inspect images with native multimodal vision + OCR fallback |
-| 🗂️ | `diff` / `rollback` | Inspect recent changes and roll back to previous checkpoints |
+| Category | Tools | What they do |
+|:---|:---|:---|
+| **Code Intelligence** | `orient`, `repo_profile`, `outline`, `read_symbol`, `search_code`, `grep_code`, `graph_slice`, `contract_slice`, `impact_of_change` | Navigate repos by symbol graph, locate exact definitions, trace API contracts and blast radius before editing |
+| **Files & Edits** | `read_file`, `write_file`, `append_file`, `edit_file`, `multi_edit`, `list_dir`, `glob` | Byte-exact file reading with paging, atomic edits, and workspace-confined directory listing |
+| **Execution** | `shell` / `bash` | Run builds, tests, and terminal commands across macOS, Linux, and Windows |
+| **Time Machine** | `checkpoint`, `checkpoint_diff`, `checkpoint_rollback` | Invisible Shadow Git snapshots, diffs, and instant rollbacks without touching `.git` |
+| **Web & Vision** | `web_search`, `read_url`, `view_image` | Live web research, clean Markdown page reading, and native multimodal image inspection |
+
+---
+
+## 🦾 Using Claude Code, Cursor, Codex, or Gemini CLI?
+
+If you already love your existing coding shell and want to add the same live code map, Shadow Git checkpoints, cross-surface memory, and fact-checked execution to it, install **[imperal-mcp](https://github.com/imperalcloud/imperal-mcp)** ([PyPI](https://pypi.org/project/imperal-mcp/)):
+
+```sh
+pipx install "imperal-mcp[code]" && imperal-mcp login && imperal-mcp setup
+```
+
+`webbee` and `imperal-mcp` share one Imperal Cloud account, memory vault, and live session state — start work in Claude Code or Cursor, and pick it up in Webbee, the web panel, or Telegram.
 
 ---
 
 ## 📜 License
 
-Webbee is free and open-source software licensed under the **GNU General Public License v3.0** (`GPL-3.0-or-later`). See the [LICENSE](LICENSE) file for details.
+Webbee is free and open-source software licensed under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for details.
+
+- **Homepage:** [imperal.io](https://imperal.io) · **Docs:** [docs.imperal.io](https://docs.imperal.io) · **Protocol:** [icnli.org](https://icnli.org)
 
 Developed with 🐝 by the [Imperal Cloud](https://imperal.io) team.
