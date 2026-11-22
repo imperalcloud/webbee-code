@@ -159,6 +159,6 @@ Contributions, bug reports, and feature requests are welcome — use the [issue 
 
 Webbee is free and open-source software licensed under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for details.
 
-- **Homepage:** [imperal.io](https://imperal.io) · **Docs:** [docs.imperal.io](https://docs.imperal.io) · **Protocol:** [icnli.org](https://icnli.org) · **Privacy:** [PRIVACY.md](PRIVACY.md) · **Security:** [SECURITY.md](SECURITY.md)
+- **Homepage:** [imperal.io/webbee-code](https://imperal.io/webbee-code) · **Docs:** [docs.imperal.io](https://docs.imperal.io) · **Protocol:** [icnli.org](https://icnli.org) · **Privacy:** [PRIVACY.md](PRIVACY.md) · **Security:** [SECURITY.md](SECURITY.md)
 
 Developed with 🐝 by the [Imperal Cloud](https://imperal.io) team.

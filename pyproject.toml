@@ -84,7 +84,7 @@ intel-embed-onnx = []
 intel-embed-faiss = []
 
 [project.urls]
-Homepage = "https://imperal.io"
+Homepage = "https://imperal.io/webbee-code"
 Documentation = "https://docs.imperal.io"
 Repository = "https://github.com/imperalcloud/webbee-code"
 Issues = "https://github.com/imperalcloud/webbee-code/issues"
