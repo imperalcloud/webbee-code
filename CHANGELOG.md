@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.20
+
+* A click on an action's line opens the whole of it in place - the full command or arguments and all of the result,
+  on one grid between a head line and a closing rule; a second click closes it, line for line as it was. A long
+  diff shows its head and opens the rest the same way.
+* An action the server ran (an app's tool, a connection's command) opens with the kernel's record of it, asked for
+  at the first open. It needs the kernel of 2026-11-26 or later; the kernel keeps a record for 24 hours, bounded.
+* Copying gives the text, not the layout: a drag copies the selected piece without the gutter, the padding to the
+  right and empty lines at either end, and keeps the indent that belongs to the text; a click on the head line of
+  an opened block copies the whole action as plain text; a click on an answer's `Webbee` head copies the answer as
+  it was written.
+
 ## 0.7.19
 
 * Needs the kernel of 2026-11-26; imperal-mcp 0.9.21.
