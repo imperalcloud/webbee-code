@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.21
+
+* The row under the input keeps one order whether a turn runs or not: who works (mode and model, both clickable),
+  what happens now, what it cost, one hint. A count has its unit (`5 actions`), a long turn shows minutes, the spend
+  is seen while she works. A narrow terminal drops whole parts in order and the row never runs past its width.
+* One hint at a time, a new one every few seconds - never a list of them.
+* The version badge is built from facts, not from a sentence (it said `v0.7.18 → 0.7.18 available`), and plays
+  short phrases in turn: `v0.7.21` / `up to date`, `0.7.22 is out` / `click to upgrade`, `0.7.22 installed` /
+  `restart to use it`. A new release is noticed within the hour, not the next day.
+* Opening or closing an action never moves the page: the clicked line stays on its screen row.
+* The notes line of a step (`learned` / `expect` / `need`) is cut to the width and opens whole on a click.
+* Steps stand one empty line apart.
+
 ## 0.7.20
 
 * A click on an action's line opens the whole of it in place - the full command or arguments and all of the result,
