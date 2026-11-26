@@ -541,6 +541,12 @@ class AgentSession:
         finished: set = set()
         step_labels: dict = {}
         local_ids: set = set()
+        step_args: dict = {}       # step_id -> what a server-run step's start frame said was asked
+
+        def _step_record(step_id: str):
+            # the kernel's record of a step the SERVER ran, asked for when its line is first opened
+            from webbee.details import build_step_ref, fetch_step_detail
+            return fetch_step_detail(self.cfg, self.token_provider, build_step_ref(session_id, step_id))
         from webbee.stream import stream_frames
         _fr = getattr(self.token_provider, "force_refresh", None)
         _rc = getattr(sink, "reconnecting", None)
@@ -748,13 +754,14 @@ class AgentSession:
                     sink.panel_release(frame.get("panel_url", ""), frame.get("summary", ""))
 
                 elif ftype == "action":  # R2 — ext-tool call (server-side) surfaced in the feed
-                    handle_action_frame(frame, sink, started, finished, self.steps)
+                    handle_action_frame(frame, sink, started, finished, self.steps, fetch=_step_record)
 
                 elif ftype == "step_started":  # v2 (Slice-5 T8 dual-emit)
-                    handle_step_started(frame, sink, started, step_labels, local_ids)
+                    handle_step_started(frame, sink, started, step_labels, local_ids, step_args)
 
                 elif ftype == "step_finished":  # v2 (Slice-5 T8 dual-emit)
-                    handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
+                    handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids,
+                                         step_args, _step_record)
 
                 elif ftype == "thinking":  # system-driven reasoning -> the 💭 block
                     # The selected tier belongs to THIS running AgentSession: passing it keeps the visible

@@ -122,7 +122,20 @@ def _first_time(step_id: str, seen_ids: set) -> bool:
     return True
 
 
-def handle_step_started(frame: dict, sink, started: set, step_labels: dict, local_ids: set) -> None:
+def _server_step_result(sink, label: str, ok: bool, summary: str, sid: str, args, fetch) -> None:
+    """The result line of an action the SERVER ran. With a way to ask for its record (``fetch(step_id)``) the line
+    opens on a click (webbee.expand.RemoteStep); without one, or for a sink that takes no detail, as before."""
+    if fetch is not None and sid:
+        try:
+            sink.tool_result(label, ok, summary, detail={"args": args or {}, "remote": lambda: fetch(sid)})
+            return
+        except TypeError:
+            pass
+    sink.tool_result(label, ok, summary)
+
+
+def handle_step_started(frame: dict, sink, started: set, step_labels: dict, local_ids: set,
+                        step_args=None) -> None:
     """v2 step_started -> sink.tool_start, deduped by step_id against the
     OLD vocabulary's start (action-start).
 
@@ -142,12 +155,14 @@ def handle_step_started(frame: dict, sink, started: set, step_labels: dict, loca
     label = _v2_step_label(frame)
     if sid:
         step_labels[sid] = label
+        if step_args is not None and isinstance(frame.get("args"), dict):
+            step_args[sid] = frame["args"]        # what was asked, kept for the opened line
     if _first_time(sid, started):
         sink.tool_start(label, frame.get("args") or {})
 
 
 def handle_step_finished(frame: dict, sink, finished: set, step_labels: dict, steps: list,
-                         local_ids: set) -> None:
+                         local_ids: set, step_args=None, fetch=None) -> None:
     """v2 step_finished -> sink.tool_result + steps append, deduped by
     step_id against the OLD vocabulary's finish (action-done). Renders the
     summary from structured summary_facts -- never prose from the kernel.
@@ -162,7 +177,7 @@ def handle_step_finished(frame: dict, sink, finished: set, step_labels: dict, st
     label = step_labels.pop(sid, sid)
     ok = bool(frame.get("ok"))
     summary = _summary_from_facts(frame.get("summary_facts") or {})
-    sink.tool_result(label, ok, summary)
+    _server_step_result(sink, label, ok, summary, sid, (step_args or {}).pop(sid, None), fetch)
     steps.append({"step_id": sid, "label": label, "ok": ok})
 
 
@@ -181,7 +196,7 @@ def handle_tool_request(frame: dict, executor) -> dict:
     return {"req_id": rid, "result": result}
 
 
-def handle_action_frame(frame: dict, sink, started: set, finished: set, steps: list) -> None:
+def handle_action_frame(frame: dict, sink, started: set, finished: set, steps: list, fetch=None) -> None:
     """OLD R2 ext-tool 'action' start/done frame -> sink.tool_start/
     tool_result, deduped by step_id against the v2 twin (dual-emit compat
     window, Slice-5 T9)."""
@@ -197,7 +212,7 @@ def handle_action_frame(frame: dict, sink, started: set, finished: set, steps: l
     if summ in ("None", "none"):  # tool result had no content — clean ✓
         summ = ""
     ok = bool(frame.get("ok"))
-    sink.tool_result(lbl, ok, summ)
+    _server_step_result(sink, lbl, ok, summ, sid, None, fetch)
     steps.append({"step_id": sid, "label": lbl, "ok": ok})
 
 

@@ -1430,8 +1430,17 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         # the record carries its own detail (webbee.expand), so there is nothing to look up or keep in step
         p = _pane()
         toggle = getattr(p, "toggle_at", None)
-        if toggle is not None and toggle(abs_line):
-            get_app().invalidate()
+        record = toggle(abs_line) if toggle is not None else None
+        if not record:
+            return
+        get_app().invalidate()
+        remote = getattr(record, "remote", None)
+        if remote is not None and getattr(record, "open", False) and remote.state == "new":
+            async def _bring() -> None:        # the server's record of the step, then the block drawn with it
+                if await remote.load():
+                    p.rerender()
+                    get_app().invalidate()
+            get_app().create_background_task(_bring())
 
     @kb.add("c-v")
     def _paste_key(event):

@@ -217,9 +217,17 @@ class OutputPane:
             return
         self._replay(new_width)
 
-    def toggle_at(self, line: int) -> bool:
+    def rerender(self) -> None:
+        """Draw the retained records again at the same width, the view kept where it is: a record changed what it
+        shows (it opened, closed, or the detail it asked for arrived)."""
+        follow, self._follow = self._follow, False          # anchor on the top record, not the tail
+        self._replay(self.console.width)
+        at_tail = self._offset >= max(0, len(self._all_lines()) - max(1, self._view_h))
+        self._follow = follow and at_tail
+
+    def toggle_at(self, line: int):
         """A click on absolute content line `line`: the record under it opens or closes in place when it is one
-        that can (webbee.expand.Expandable -- an action's line, a long diff). False: nothing there opens. The
+        that can (webbee.expand.Expandable -- an action's line, a long diff) and is returned. False: nothing there opens. The
         view stays on the clicked record: the ring is replayed at the same width, anchored by record as a reflow
         is; lines before the ring are no records any more and open nothing."""
         if line < self._ring_base_lines or not self._records:
@@ -227,15 +235,23 @@ class OutputPane:
         idx = self._record_at_line(line)
         if not 0 <= idx < len(self._records):
             return False
+        row = max(0, line - self._ring_base_lines) - sum(self._record_lines[:idx])     # the line inside the record
         for obj in self._records[idx][0]:
+            whole = getattr(obj, "copy_text", None)
+            if callable(whole):
+                whole = whole(row)                          # an opened block: only its head line copies it all
+            if isinstance(whole, str) and whole:            # an answer's head, a block's head: the text itself
+                import time as _t
+                from webbee.clipboard import copy_to_clipboard
+                self.copy_flash = copy_to_clipboard(whole)
+                self._flash_until = _t.monotonic() + 1.8
+                self.notify()
+                return obj
             toggle = getattr(obj, "toggle", None)
             if callable(toggle):
                 toggle()
-                follow, self._follow = self._follow, False      # keep the clicked record in view, not the tail
-                self._replay(self.console.width)
-                at_tail = self._offset >= max(0, len(self._all_lines()) - max(1, self._view_h))
-                self._follow = follow and at_tail
-                return True
+                self.rerender()
+                return obj
         return False
 
     def _replay(self, new_width: int) -> None:
@@ -360,6 +376,24 @@ class OutputPane:
         out.append(lines[y2][:min(len(lines[y2]), x2 + 1)])
         return "\n".join(out)
 
+    @staticmethod
+    def _tidy(text: str, first_col: int = 0) -> str:
+        """What is copied is the text, not the transcript's layout: the padding drawn to the right of every line,
+        the indent ALL the lines share (the gutter, an opened block's grid), and empty lines at either end are
+        dropped -- an answer or an action's output pastes at column 0 with no trailing spaces. The indent that
+        belongs to the text stays: ``first_col`` is the column the drag began at, so the first line is measured
+        from the same edge as the others (code keeps its shape wherever in the line the drag started)."""
+        rows = [ln.rstrip() for ln in text.split("\n")]
+        if len(rows) == 1:
+            return rows[0].strip()
+        first_col = max(0, first_col)
+        # each line's distance from the transcript's left edge; the first line began `first_col` columns in
+        edges = [first_col + len(rows[0]) - len(rows[0].lstrip())] if rows[0].strip() else []
+        edges += [len(r) - len(r.lstrip()) for r in rows[1:] if r.strip()]
+        shared = min(edges) if edges else 0
+        out = [rows[0][max(0, shared - first_col):]] + [r[shared:] for r in rows[1:]]
+        return "\n".join(out).strip("\n")
+
     def _copy_selection(self, start_abs, end_abs) -> None:
         # start_abs/end_abs: ABSOLUTE (line, col) pairs — see _selected_text.
         import time as _t
@@ -367,15 +401,7 @@ class OutputPane:
         text = self._selected_text(start_abs, end_abs)
         if not text.strip():
             return
-        if "\n" in text:
-            # several lines: what is copied is the text, not the transcript's layout -- the padding Rich adds to
-            # the right of every line and the indent the lines share are dropped (an opened action's output
-            # pastes at column 0, as the command printed it)
-            import textwrap
-            rows = [ln.rstrip() for ln in text.split("\n")]
-            first = rows[0]
-            rest = textwrap.dedent("\n".join(rows[1:]))
-            text = (first.strip() + "\n" + rest) if first.strip() else rest
+        text = self._tidy(text, min(start_abs, end_abs)[1])
         self.copy_flash = copy_to_clipboard(text)  # local clipboard first, OSC 52 fallback
         self._flash_until = _t.monotonic() + 1.8
         self.notify()

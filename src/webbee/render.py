@@ -370,7 +370,10 @@ class RichSink:
         final_text = _clean(final_text)
         if final_text:
             self.console.print()   # separation before the focus block
-            self.console.print(Text("  🐝 Webbee", style=f"bold {_BEE}"))
+            from webbee.expand import Copyable
+            _head = Text("  🐝 Webbee", style=f"bold {_BEE}")
+            _head.append("   ⧉ click to copy the whole answer", style="dim grey50")
+            self.console.print(Copyable(_head, final_text.strip()))
             self.console.print(_pad(Markdown(final_text)))   # body aligns to the same 2-col gutter as the header
             if _awaits_reply:
                 # Reuses ask_yes_no's own visual weight (⚠ + bold accent) so
@@ -705,7 +708,16 @@ class RichSink:
             line.append("  ▸ click for all" if clean_summary else chr(10) + "   └─ ▸ click for all",
                         style="dim grey50")
             _args, _res = detail.get("args"), detail.get("result")
-            self.console.print(Expandable(_pad(line), lambda: _pad(step_body(_tool, _args, _res, _clean))))
+            if callable(detail.get("remote")):      # the server ran it: its record is asked for at the first open
+                from webbee.expand import RemoteStep
+                _remote = RemoteStep(_tool, _args, detail["remote"], _clean)
+                _line = Expandable(_pad(line), lambda: _pad(_remote.body()), _remote.text)
+                _line.remote = _remote
+                self.console.print(_line)
+            else:
+                from webbee.expand import step_text
+                self.console.print(Expandable(_pad(line), lambda: _pad(step_body(_tool, _args, _res, _clean)),
+                                              lambda: step_text(_args, _res, _clean)))
         else:
             self.console.print(_pad(line))
         rc = getattr(self.console, "record_count", None)
@@ -926,7 +938,8 @@ class RichSink:
         if len(lines) > cap:
             from webbee.expand import Expandable, diff_rest
             _rest = lines[cap:]
-            self.console.print(Expandable(panel, lambda: _pad(diff_rest(_rest, _clean))))
+            _all = "\n".join(_clean(ln) for ln in lines)
+            self.console.print(Expandable(panel, lambda: _pad(diff_rest(_rest, _clean)), lambda: _all))
         else:
             self.console.print(panel)
         self._nudge()
