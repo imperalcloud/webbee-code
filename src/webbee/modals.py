@@ -411,6 +411,23 @@ def create_file_picker_dialog(
     )
 
 
+# what a recogniser returns for a recording with no speech in it (its own filler, not the person's words)
+_NO_SPEECH = ("you", "thank you", "silence", ".")
+
+
+def voice_outcome(text, seconds: int) -> tuple:
+    """``(words to send, note for the person)``: the recognised words go to the agent; a recording nothing was
+    recognised in is never sent -- the agent would get a message without the person's words (live 2026-11-17
+    se268e3: "[Voice note: 7s audio -- audio recorded]" became the task's message). ``text`` None: recognition
+    failed."""
+    words = str(text or "").strip()
+    if words and words.lower() not in _NO_SPEECH:
+        return words, ""
+    if text is None:
+        return "", f"🎙️ the {seconds}s recording could not be recognised -- nothing was sent. Say it again or type it."
+    return "", f"🎙️ no words were heard in the {seconds}s recording -- nothing was sent. Say it again or type it."
+
+
 def create_mic_dialog(
     on_transcribe: Callable[[str], None],
     on_send_direct: Callable[[str], None],
@@ -484,11 +501,14 @@ def create_mic_dialog(
                             on_status("")
                         except Exception:
                             pass
-                    if text and text.strip() and text.strip().lower() not in ("you", "thank you", "silence", "."):
-                        on_send_direct(text.strip())
-                    else:
-                        desc = text.strip() if text else "audio recorded"
-                        on_send_direct(f"🎙️ [Voice note: {rec_seconds}s audio — {desc}]")
+                    words, note = voice_outcome(text, rec_seconds)
+                    if words:
+                        on_send_direct(words)
+                    elif on_status is not None:
+                        try:
+                            on_status(note)
+                        except Exception:
+                            pass
 
                 app = get_app_or_none()
                 if app is not None and hasattr(app, "loop") and app.loop is not None and app.loop.is_running():
@@ -500,10 +520,9 @@ def create_mic_dialog(
                 def _fail():
                     if on_status is not None:
                         try:
-                            on_status("")
+                            on_status(voice_outcome(None, rec_seconds)[1])
                         except Exception:
                             pass
-                    on_send_direct(f"🎙️ [Voice note: {rec_seconds}s audio — transcription unavailable]")
                 if app is not None and hasattr(app, "loop") and app.loop is not None and app.loop.is_running():
                     app.loop.call_soon_threadsafe(_fail)
                 else:
