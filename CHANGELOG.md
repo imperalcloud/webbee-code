@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.19
+
+* Needs the kernel of 2026-11-26; imperal-mcp 0.9.21.
+* She comments her actions: of each step you read the words written for you; the step's protocol lines
+  (`learned` / `expect` / `need`) are one small line under them, a provider's own reasoning is not shown.
+* A thought is shown on the live line while it is being written, once the kernel sends it so.
+* A running local command is seen live: the newest line of its output is on the live line until it ends.
+* The model tier has one path: `/model` and Ctrl+B both reach the session that is already running, as a mode
+  switch does (the next step runs on the new model). Before, a switch made mid-run changed only the label.
+* Voice: the request carries your live login (an expired token was sent and its refusal hidden); a recording that
+  gave no words is not sent as a message, and you are told why - no microphone access, no credits, voice not
+  enabled, the service could not recognise it.
+* The field gate: a statement holds as far as its observation reaches.
+
 ## 0.7.18
 
 * Needs the kernel of 2026-11-20 (the work that can wait); imperal-mcp 0.9.20 and imperal-sdk 6.7.1 as before.
