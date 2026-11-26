@@ -1123,3 +1123,11 @@ def test_thinking_without_parts_is_drawn_as_before():
     s = _sink()
     s.thinking("an old frame's whole text", tier="webbeesmart")
     assert "an old frame's whole text" in s.console.export_text()
+
+
+def test_thinking_by_parts_strips_escapes_from_the_words_the_labels_and_the_values():
+    s = _sink()
+    s.thinking("raw", kind="step", say="plain " + _INJ, lines={"learned" + _INJ: "value " + _INJ})
+    out = s.console.export_text()
+    assert "\x1b" not in out and "\x07" not in out and "\x9b" not in out
+    assert "plain" in out and "learned" in out and "value" in out

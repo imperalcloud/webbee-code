@@ -913,7 +913,9 @@ class RichSink:
         if kind:
             if kind == "native":
                 return
-            proto = " · ".join(f"{k}: {_clean(str(v))}" for k, v in (lines or {}).items() if str(v or "").strip())
+            # the label comes off the wire as the value does: both are cleaned of terminal escapes
+            proto = " · ".join(f"{_clean(str(k))}: {_clean(str(v))}" for k, v in (lines or {}).items()
+                               if str(v or "").strip())
             if not (say or proto):
                 return
             if not tier:
