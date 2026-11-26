@@ -213,10 +213,34 @@ class OutputPane:
         they're carried over VERBATIM at their OLD (already-baked) width —
         the one concession this makes — while the ring itself genuinely
         re-wraps at `new_width`."""
-        from rich.console import Console
-        from webbee.reflow import anchor_offset
         if new_width == self.console.width or new_width < 10:
             return
+        self._replay(new_width)
+
+    def toggle_at(self, line: int) -> bool:
+        """A click on absolute content line `line`: the record under it opens or closes in place when it is one
+        that can (webbee.expand.Expandable -- an action's line, a long diff). False: nothing there opens. The
+        view stays on the clicked record: the ring is replayed at the same width, anchored by record as a reflow
+        is; lines before the ring are no records any more and open nothing."""
+        if line < self._ring_base_lines or not self._records:
+            return False
+        idx = self._record_at_line(line)
+        if not 0 <= idx < len(self._records):
+            return False
+        for obj in self._records[idx][0]:
+            toggle = getattr(obj, "toggle", None)
+            if callable(toggle):
+                toggle()
+                follow, self._follow = self._follow, False      # keep the clicked record in view, not the tail
+                self._replay(self.console.width)
+                at_tail = self._offset >= max(0, len(self._all_lines()) - max(1, self._view_h))
+                self._follow = follow and at_tail
+                return True
+        return False
+
+    def _replay(self, new_width: int) -> None:
+        from rich.console import Console
+        from webbee.reflow import anchor_offset
         follow = self._follow
         base = self._ring_base_lines
         old_offset = self._offset
@@ -343,6 +367,15 @@ class OutputPane:
         text = self._selected_text(start_abs, end_abs)
         if not text.strip():
             return
+        if "\n" in text:
+            # several lines: what is copied is the text, not the transcript's layout -- the padding Rich adds to
+            # the right of every line and the indent the lines share are dropped (an opened action's output
+            # pastes at column 0, as the command printed it)
+            import textwrap
+            rows = [ln.rstrip() for ln in text.split("\n")]
+            first = rows[0]
+            rest = textwrap.dedent("\n".join(rows[1:]))
+            text = (first.strip() + "\n" + rest) if first.strip() else rest
         self.copy_flash = copy_to_clipboard(text)  # local clipboard first, OSC 52 fallback
         self._flash_until = _t.monotonic() + 1.8
         self.notify()

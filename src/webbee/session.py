@@ -23,6 +23,7 @@ from webbee.frames import (
     render_foreign_frame,
     render_todo_frame,
     show_thinking,
+    show_tool_result,
     show_thinking_live,
     stop_report_lines,
 )
@@ -697,7 +698,8 @@ class AgentSession:
                         res = out["result"]
                         if _first_time(sid, finished):
                             try:
-                                sink.tool_result(_tag + frame.get("tool", ""), bool(res.get("ok")), _summary(res))
+                                show_tool_result(sink, _tag + frame.get("tool", ""), bool(res.get("ok")),
+                                                 _summary(res), frame.get("args", {}), res)
                                 # 0.3.40 (I-STREAM-STEP-DIFF): local write_file/
                                 # edit_file/multi_edit hand back a unified diff
                                 # of what actually changed on disk -- shown

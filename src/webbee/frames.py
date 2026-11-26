@@ -65,6 +65,15 @@ def thinking_parts(frame: dict, tag: str = "") -> dict:
     return {"kind": kind, "say": tag + say if say else "", "lines": lines if isinstance(lines, dict) else {}}
 
 
+def show_tool_result(sink, tool: str, ok: bool, summary: str, args, result) -> None:
+    """The result line of an action the client ran itself, with what a click on it opens: the whole arguments and
+    the whole result. A sink that takes no detail (a plain one, an older one) gets the line as before."""
+    try:
+        sink.tool_result(tool, ok, summary, detail={"args": args, "result": result})
+    except TypeError:
+        sink.tool_result(tool, ok, summary)
+
+
 def show_thinking_live(sink, tag: str, frame: dict) -> None:
     """A thought while it is still being written (frame ``thinking_delta``): ``say`` holds the words for the person
     written SO FAR, whole each time -- a frame lost or repeated on a reconnect changes nothing. It is shown on the

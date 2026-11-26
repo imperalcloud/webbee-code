@@ -1426,9 +1426,12 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         get_app().create_background_task(_do_right_paste())
 
     def _line_click(abs_line: int) -> None:
-        # Clicking lines is a no-op: legacy step expansion removed.
-        # Kept as a stub because _pane() still wires pane.on_line_click.
-        pass
+        # a plain click on an action's line (or a long diff) opens it whole in place, a second click closes it:
+        # the record carries its own detail (webbee.expand), so there is nothing to look up or keep in step
+        p = _pane()
+        toggle = getattr(p, "toggle_at", None)
+        if toggle is not None and toggle(abs_line):
+            get_app().invalidate()
 
     @kb.add("c-v")
     def _paste_key(event):

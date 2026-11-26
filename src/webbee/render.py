@@ -661,7 +661,8 @@ class RichSink:
         self._current = f"{tool} › {_clean(line).strip()[:trunc(w, 0.6, 60)]}"
         self._nudge()
 
-    def tool_result(self, tool: str, ok: bool, summary: str) -> None:
+    def tool_result(self, tool: str, ok: bool, summary: str, detail=None) -> None:
+        # detail: {"args", "result"} of an action the client ran itself -- a click on the line opens it whole
         _tool, arg = self._pending if self._pending[0] else (tool, "")
         icon, category = _tool_meta(_tool)
         mark = "✓" if ok else "✗"
@@ -699,7 +700,14 @@ class RichSink:
             line.append(chr(10))
             line.append("   └─ ", style="dim grey50")
             line.append(clean_summary, style="dim")
-        self.console.print(_pad(line))
+        if isinstance(detail, dict):
+            from webbee.expand import Expandable, step_body
+            line.append("  ▸ click for all" if clean_summary else chr(10) + "   └─ ▸ click for all",
+                        style="dim grey50")
+            _args, _res = detail.get("args"), detail.get("result")
+            self.console.print(Expandable(_pad(line), lambda: _pad(step_body(_tool, _args, _res, _clean))))
+        else:
+            self.console.print(_pad(line))
         rc = getattr(self.console, "record_count", None)
         if callable(rc):
             self._step_records[rc() - 1] = self._step_index
@@ -901,11 +909,26 @@ class RichSink:
                 body.append(_clean(line), style="red")
             else:
                 body.append(_clean(line), style="dim")
+        cap = 40 if len(lines) > 60 else cap      # a long diff shows its head; a click opens the rest in place
+        panel_lines = lines[:cap]
         if len(lines) > cap:
-            body.append(f"\n… ({len(lines) - cap} more lines, truncated)", style="dim italic")
-        self.console.print(_pad(Panel(body, border_style="dim",
-                                      title=f"diff · {tool}" if tool else "diff",
-                                      title_align="left")))
+            body = Text()
+            for i, line in enumerate(panel_lines):
+                if i:
+                    body.append("\n")
+                body.append(_clean(line), style=("dim bold" if line.startswith(("+++", "---")) else
+                                                 "cyan dim" if line.startswith("@@") else
+                                                 "green" if line.startswith("+") else
+                                                 "red" if line.startswith("-") else "dim"))
+            body.append(f"\n… {len(lines) - cap} more lines (truncated here) -- ▸ click for all", style="dim italic")
+        panel = _pad(Panel(body, border_style="dim", title=f"diff · {tool}" if tool else "diff",
+                           title_align="left"))
+        if len(lines) > cap:
+            from webbee.expand import Expandable, diff_rest
+            _rest = lines[cap:]
+            self.console.print(Expandable(panel, lambda: _pad(diff_rest(_rest, _clean))))
+        else:
+            self.console.print(panel)
         self._nudge()
 
     def step_detail(self, detail: dict) -> None:
