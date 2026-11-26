@@ -276,28 +276,55 @@ def stop_all_recorders() -> None:
 atexit.register(stop_all_recorders)
 
 
+# why the last recording gave no words, in plain words ("" -- it gave them, or nothing went wrong on the way)
+LAST_VOICE_WHY = ""
+_VOICE_STATUS_WHY = {
+    401: "you are not signed in (run `webbee login`)",
+    402: "there are not enough credits for voice",
+    403: "voice is not enabled for your account",
+    413: "the recording is too long for the voice service",
+    415: "the voice service does not take this audio format",
+    502: "the voice service could not recognise the recording",
+}
+
+
+def _voice_token(force: bool = False) -> str:
+    """The access token for a voice request, taken the way every other request of the client takes it
+    (``imperal_mcp.auth.ensure_access_token``: refreshed when it has expired). Before, the voice path read the token
+    out of the credentials file as it lay there -- an expired one was sent, refused, and the refusal swallowed.
+    Called from the recorder's worker thread (no event loop runs there). "" when there is no login."""
+    try:
+        import asyncio
+        import inspect
+        from imperal_mcp import auth
+        from webbee.config import Config
+        cfg = Config.from_env()
+        if force and "force" in inspect.signature(auth.ensure_access_token).parameters:
+            return str(asyncio.run(auth.ensure_access_token(cfg, force=True)) or "")
+        return str(asyncio.run(auth.ensure_access_token(cfg)) or "")
+    except Exception:
+        return ""
+
+
 def transcribe_audio_file(audio_path: str, api_url: str = "", token: str = "") -> str:
     """Transcribe audio file via Imperal Cloud System Voice STT endpoint (/v1/voice/stt).
 
     Works on ANY OS (macOS, Linux, Windows) seamlessly without local dependencies.
     """
+    global LAST_VOICE_WHY
+    LAST_VOICE_WHY = ""
     if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
+        LAST_VOICE_WHY = ("nothing was recorded -- is ffmpeg installed, and may this terminal use the microphone "
+                          "(macOS: System Settings > Privacy & Security > Microphone)?")
         return ""
 
     # 1. Primary: Official Imperal Cloud System STT (/v1/voice/stt)
     try:
         import json, urllib.request, urllib.error, uuid
 
-        if not token:
-            try:
-                from webbee.config import Config
-                cfg = Config.from_env()
-                cred_path = getattr(cfg, "credentials_file", "") or os.path.expanduser("~/.imperal/credentials.json")
-                if os.path.exists(cred_path):
-                    data = json.load(open(cred_path))
-                    token = data.get("access_token", "")
-            except Exception:
-                pass
+        own_token = not token
+        if own_token:
+            token = _voice_token()
 
         if not api_url:
             try:
@@ -322,18 +349,28 @@ def transcribe_audio_file(audio_path: str, api_url: str = "", token: str = "") -
         headers = {
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
 
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status == 200:
-                res_data = json.loads(resp.read().decode("utf-8"))
-                text = res_data.get("text", "")
-                if text and text.strip():
-                    return text.strip()
-    except Exception:
-        pass
+        def _ask(tok: str):
+            hdrs = dict(headers)
+            if tok:
+                hdrs["Authorization"] = f"Bearer {tok}"
+            req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        try:
+            try:
+                res_data = _ask(token)
+            except urllib.error.HTTPError as e:
+                if e.code != 401 or not own_token:
+                    raise
+                res_data = _ask(_voice_token(force=True))     # the token was rotated meanwhile: one fresh one
+            text = res_data.get("text", "")
+            if text and text.strip():
+                return text.strip()
+        except urllib.error.HTTPError as e:
+            LAST_VOICE_WHY = _VOICE_STATUS_WHY.get(e.code, f"the voice service answered {e.code}")
+    except Exception as e:
+        LAST_VOICE_WHY = f"the voice service could not be reached ({type(e).__name__})"
 
     # 2. Local Whisper CLI fallback (if available)
     if shutil.which("whisper"):
@@ -415,7 +452,7 @@ def create_file_picker_dialog(
 _NO_SPEECH = ("you", "thank you", "silence", ".")
 
 
-def voice_outcome(text, seconds: int) -> tuple:
+def voice_outcome(text, seconds: int, why: str = "") -> tuple:
     """``(words to send, note for the person)``: the recognised words go to the agent; a recording nothing was
     recognised in is never sent -- the agent would get a message without the person's words (live 2026-11-17
     se268e3: "[Voice note: 7s audio -- audio recorded]" became the task's message). ``text`` None: recognition
@@ -423,6 +460,8 @@ def voice_outcome(text, seconds: int) -> tuple:
     words = str(text or "").strip()
     if words and words.lower() not in _NO_SPEECH:
         return words, ""
+    if why:
+        return "", f"🎙️ nothing was sent: {why}."
     if text is None:
         return "", f"🎙️ the {seconds}s recording could not be recognised -- nothing was sent. Say it again or type it."
     return "", f"🎙️ no words were heard in the {seconds}s recording -- nothing was sent. Say it again or type it."
@@ -501,7 +540,7 @@ def create_mic_dialog(
                             on_status("")
                         except Exception:
                             pass
-                    words, note = voice_outcome(text, rec_seconds)
+                    words, note = voice_outcome(text, rec_seconds, LAST_VOICE_WHY)
                     if words:
                         on_send_direct(words)
                     elif on_status is not None:
