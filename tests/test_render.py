@@ -1131,3 +1131,23 @@ def test_thinking_by_parts_strips_escapes_from_the_words_the_labels_and_the_valu
     out = s.console.export_text()
     assert "\x1b" not in out and "\x07" not in out and "\x9b" not in out
     assert "plain" in out and "learned" in out and "value" in out
+
+
+def test_a_running_commands_newest_line_is_on_the_live_line_and_not_in_the_transcript():
+    import io
+    from rich.console import Console
+    from webbee.render import RichSink
+    buf = io.StringIO()
+    now = [100.0]
+    sink = RichSink(Console(file=buf, width=100, force_terminal=False), live_enabled=False, clock=lambda: now[0])
+    sink.tool_output("late line of nothing")           # no command runs: nothing changes
+    assert "late line" not in sink.status()["current"]
+    sink.tool_start("bash", {"command": "pytest -q"})
+    printed = buf.getvalue()
+    sink.tool_output("tests/test_a.py ....\x1b[31m")
+    assert sink.status()["current"].startswith("bash › tests/test_a.py ....") and "\x1b" not in sink.status()["current"]
+    sink.tool_output("tests/test_b.py ..")              # within a tenth of a second: not redrawn
+    assert "test_a.py" in sink.status()["current"]
+    now[0] += 0.2
+    sink.tool_output("tests/test_b.py ..")
+    assert "test_b.py" in sink.status()["current"] and buf.getvalue() == printed

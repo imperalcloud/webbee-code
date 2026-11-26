@@ -146,6 +146,57 @@ def _stop_group(proc, posix: bool) -> None:
         pass
 
 
+def _last_line(chunk: bytes) -> str:
+    """PURE. The newest non-empty line of a piece of a command's output (a progress bar redraws with a carriage
+    return: its newest state is the line)."""
+    for line in reversed(re.split(r"[\r\n]+", chunk.decode("utf-8", "replace"))):
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _gather(proc, timeout: float, on_output, stop) -> tuple:
+    """A running command's output, gathered AS IT IS PRINTED: ``(all of it, timed out?)``. What the agent gets is
+    what ``communicate`` gave -- every byte until the output closes, within ``timeout``; on a timeout ``stop`` ends
+    the command and what it printed until then is kept. The difference is that each piece is also named to
+    ``on_output`` (its newest line) the moment it arrives, so the person sees a long command live and not only its
+    end (the owner, 2026-11-26). ``on_output`` is the surface's; it never breaks the command."""
+    chunks: list = []
+
+    def pump() -> None:
+        try:
+            while True:
+                piece = proc.stdout.read1(8192)
+                if not piece:
+                    return
+                chunks.append(piece)
+                if on_output is not None:
+                    try:
+                        on_output(_last_line(piece))
+                    except Exception:
+                        pass
+        except Exception:
+            return
+    reader = threading.Thread(target=pump, name="webbee-command-output", daemon=True)
+    started = time.monotonic()
+    reader.start()
+    reader.join(timeout)
+    timed_out = reader.is_alive()
+    if not timed_out:
+        try:
+            proc.wait(timeout=max(0.1, timeout - (time.monotonic() - started)))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+    if timed_out:
+        stop()
+        reader.join(10)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    return b"".join(chunks), timed_out
+
+
 def _decoded(raw: bytes) -> str:
     """A command's output as text: UTF-8 -- with a stray invalid byte replaced, never the whole output read in a legacy
     code page (2026-10-30 review: one bad byte turned Cyrillic UTF-8 into cp1251 mojibake); a legacy code page only
@@ -319,6 +370,8 @@ class LocalToolExecutor:
         # the commands running now (bash): a stop (Esc) ends them and every process they started (cancel_running)
         self._running: set = set()
         self._running_lock = threading.Lock()
+        # the surface's ear for a running command's output (the newest line, as it is printed); None: no one listens
+        self.on_output = None
 
     def cancel_running(self) -> int:
         """Stop every command this executor is running now and every process it started (2026-10-30 review: Esc
@@ -959,18 +1012,10 @@ class LocalToolExecutor:
             **({"executable": shell_bin} if shell_bin else {}),
             **({"start_new_session": True} if posix else
                {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}))
-        timed_out = False
         with self._running_lock:
             self._running.add(proc)
         try:
-            raw, _ = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _stop_group(proc, posix)
-            try:
-                raw, _ = proc.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                raw = b""
+            raw, timed_out = _gather(proc, timeout, self.on_output, lambda: _stop_group(proc, posix))
         finally:
             with self._running_lock:
                 self._running.discard(proc)

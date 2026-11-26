@@ -558,6 +558,14 @@ class AgentSession:
         self._executor = executor           # stop() kills what it still runs
         store = _ResultStore(session_id, task_id)
         loop = asyncio.get_running_loop()
+        # a running local command is seen live: the executor names each newest line of its output from its worker
+        # thread, the sink shows it on the loop (an optional hook, as tool_diff is -- a plain sink has none)
+        _live = getattr(sink, "tool_output", None)
+        if _live is not None and hasattr(executor, "on_output"):
+            def _heard(line: str, _live=_live, _loop=loop) -> None:
+                if line:
+                    _loop.call_soon_threadsafe(_live, line)
+            executor.on_output = _heard
         _last_own = loop.time()             # M7: the turn's own last activity
         _quiet_noted = False
         _held_final = ""                    # the newest answer of a marathon turn, shown if a stop follows it

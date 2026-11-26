@@ -132,11 +132,12 @@ def test_bash_timeout_capped_at_3600(tmp_path, monkeypatch):
         def __init__(self, cmd, **kw):
             pass
 
-        def communicate(self, timeout=None):
-            captured["timeout"] = timeout
-            return b"ok", None
+    def _gather(proc, timeout, on_output, stop):
+        captured["timeout"] = timeout
+        return b"ok", False
 
     monkeypatch.setattr(T.subprocess, "Popen", _P)
+    monkeypatch.setattr(T, "_gather", _gather)
     ex = T.LocalToolExecutor(str(tmp_path))
     ex.run("bash", {"command": "true", "timeout": 99999})
     assert captured["timeout"] == 3600
@@ -1142,3 +1143,34 @@ def test_windows_git_bash_is_git_s_own_never_wsl(tmp_path, monkeypatch):
     assert T.windows_git_bash() == str(git_root / "bin" / "bash.exe")
     monkeypatch.setattr(shutil, "which", lambda name: None)
     assert T.windows_git_bash() is None
+
+
+# ── a running command is seen live (the owner, 2026-11-26) ──
+def test_a_running_command_names_its_output_as_it_is_printed_and_returns_all_of_it(tmp_path):
+    import time
+    import webbee.tools as T
+    ex = T.LocalToolExecutor(str(tmp_path))
+    heard = []
+    ex.on_output = lambda line: heard.append((time.monotonic(), line))
+    t0 = time.monotonic()
+    r = ex.run("bash", {"command": "echo one; sleep 1; echo two; printf 'p 10%%\\rp 90%%\\n'"})
+    assert r["ok"] and r["content"].startswith("one\ntwo\n") and "p 90%" in r["content"]
+    lines = [x for _, x in heard]
+    assert lines[0] == "one" and "two" in lines and lines[-1] == "p 90%"
+    assert heard[0][0] - t0 < 0.9                     # "one" was heard while the command still ran
+
+
+def test_a_listener_that_fails_never_breaks_the_command(tmp_path):
+    import webbee.tools as T
+    ex = T.LocalToolExecutor(str(tmp_path))
+
+    def boom(line):
+        raise RuntimeError("the surface broke")
+    ex.on_output = boom
+    r = ex.run("bash", {"command": "echo fine; exit 3"})
+    assert not r["ok"] and r["exit_code"] == 3 and "fine" in r["content"] and "[exit 3]" in r["content"]
+
+
+def test_the_newest_line_of_a_piece_of_output():
+    import webbee.tools as T
+    assert T._last_line(b"a\nb\n\n") == "b" and T._last_line(b"10%\r20%\r") == "20%" and T._last_line(b"\n") == ""

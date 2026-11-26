@@ -635,6 +635,20 @@ class RichSink:
         self._current = f"{tool} {str(arg)[:trunc(w, 0.3, 40)]}".strip()
         self._nudge()  # the completed line is printed in tool_result
 
+    def tool_output(self, line: str) -> None:
+        """The newest line a running local command printed: shown on the live line beside the command, so a long
+        run is seen moving. Nothing is printed into the transcript -- the result line still says how it ended."""
+        tool = self._pending[0]
+        if not tool:
+            return                                   # no command is running: a late line of one that ended
+        now = self._clock()
+        if now - getattr(self, "_live_at", 0.0) < 0.1:
+            return                                   # at most ten redraws a second, whatever the command prints
+        self._live_at = now
+        w = self.console.width
+        self._current = f"{tool} › {_clean(line).strip()[:trunc(w, 0.6, 60)]}"
+        self._nudge()
+
     def tool_result(self, tool: str, ok: bool, summary: str) -> None:
         _tool, arg = self._pending if self._pending[0] else (tool, "")
         icon, category = _tool_meta(_tool)
