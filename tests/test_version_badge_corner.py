@@ -95,7 +95,7 @@ def test_checked_up_to_date_uses_the_fresh_style():
 def test_checked_update_available_uses_the_update_style():
     out = pin_version_right([("class:tb.dim", "x")], "0.3.39", 60,
                             notice="🐝 webbee v0.3.40 available — upgrade: pipx upgrade webbee",
-                            checked=True)
+                            checked=True, latest="0.3.40")
     assert out[-1][0] == "class:tb.update"
     assert out[-1][1] == " v0.3.39 → 0.3.40 available "
 

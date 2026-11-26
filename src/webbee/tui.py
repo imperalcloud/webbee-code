@@ -328,6 +328,25 @@ def previous_tier(tier: str) -> str:
         return _TIERS[-1]
 
 
+# What a person can do here, one line each: shown one at a time under the input, in turn.
+TOOLBAR_TIPS = (
+    "Alt+↵ starts a new line",
+    "Shift+Tab switches the mode",
+    "Ctrl+B switches the model",
+    "Ctrl+T opens a new tab",
+    "click an action to open it whole",
+    "click 🐝 Webbee to copy the whole answer",
+    "drag over text to copy it",
+    "Esc stops a running turn",
+)
+
+
+def toolbar_tip(now: "float | None" = None, every: float = 8.0) -> str:
+    """PURE (given ``now``). The one hint the toolbar shows at this moment."""
+    import time as _t
+    return TOOLBAR_TIPS[int((_t.monotonic() if now is None else now) // every) % len(TOOLBAR_TIPS)]
+
+
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False, queued: int = 0,
@@ -353,91 +372,55 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         frags += q
         frags.append(("class:tb.dim", "   ·   Esc/Ctrl-C to stop"))
         return frags
+    # ONE order of zones in every state (the owner 2026-11-26: the tray must be tidy and thought through): who
+    # works (mode · model, both clickable), what happens now, what it cost, one hint. Groups stand apart by
+    # "   ·   ", the parts of one group by " · " -- a thing keeps its place whether a turn runs or not.
+    who = [("class:tb.dim", "mode: "), (f"class:tb.mode.{mode}", mode), ("class:tb.dim", " · model: ")]
+    who += _tier_shimmer_fragments(tier or _TIERS[0],
+                                   _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]],
+                                   now=tier_now)
     if busy:
         spin = _SPINNER[int(elapsed * 10) % len(_SPINNER)]   # animates via the ticker
-        frags = [("class:tb.spin", f"  {spin} "), ("class:tb.working", "working")]
-        if current:
-            frags += [("class:tb.dim", " · "), ("class:tb.action", current)]
-        # webbee-code-model-tier-toolbar-v1: keep the tier visible mid-turn too
-        # (a short "· SuperSmart" tag, NOT the full "model: " label used at
-        # idle -- busy is already the densest row, this is the cheapest
-        # legible form). webbee-code-tier-colors-v1: each tier gets its own
-        # colour + its human display name (Smart/SuperSmart/UltraSmart),
-        # never the raw wire value.
-        # webbee-code-model-selector-always-visible-v1 (Valentin, live
-        # 2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а
-        # не system default"): an unset tier now shows the REAL name of the
-        # tier that actually runs when none is chosen -- "webbeesmart" IS the
-        # documented default, fast everyday tier (imperal-ext-admin's own
-        # Model Tiers panel, `_TIERS[0]`), so showing its display name
-        # "Smart" here is a grounded fact about what's running, not a
-        # guess -- never a MADE-UP tier the server didn't confirm.
-        frags += [("class:tb.dim", " · ")]
-        frags += _tier_shimmer_fragments(tier or _TIERS[0],
-                                         _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]],
-                                         now=tier_now)
-        frags.append(("class:tb.dim",
-                      f" · {elapsed:.0f}s · {tools} · {_fmt_tokens(tokens)} tok"))
-        frags += q
-        frags.append(("class:tb.dim", "   ·   Esc/Ctrl-C to stop"))
+        took = f"{int(elapsed) // 60}:{int(elapsed) % 60:02d}" if elapsed >= 60 else f"{elapsed:.0f}s"
+        head = [("class:tb.spin", f"  {spin} "), *who, ("class:tb.dim", "   ·   ")]
+        doing = current or "working"
+        n = f"{tools} action{'' if tools == 1 else 's'}"
+        # A narrow terminal loses the least needed first: the hint, then the action's text is cut to its start
+        # (with a mark that it was), then the spend goes, then the count -- each thing whole. Nothing is sliced by
+        # the terminal's edge, and the version badge keeps its reserved columns.
+        tails = [f"   ·   {took} · {n} · {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits",
+                 f"   ·   {took} · {n}", f"   ·   {took}"]
+        hint = "   ·   Esc to stop"
+        used = sum(len(t) for _, t in head) + sum(len(t) for _, t in q)
+        options = [(tails[0], hint)] + [(t, "") for t in tails]
+        tail, tip = options[-1]
+        least = min(len(doing), 24)                     # what of the action's text is kept before figures go
+        for i, (t, h) in enumerate(options):
+            if not width or used + (len(doing) if i == 0 else least) + len(t) + len(h) <= width:
+                tail, tip = t, h
+                break
+        room = (width - used - len(tail)) if width else len(doing)
+        if width and len(doing) > room:
+            doing = (doing[:max(1, room - 1)] + "…") if room > 1 else doing[:max(0, room)]
+        frags = head + [("class:tb.action", doing), ("class:tb.dim", tail)] + q
+        if tip:
+            frags.append(("class:tb.dim", tip))
         return frags
-    frags = [("class:tb.dim", "  mode: "),
-             (f"class:tb.mode.{mode}", mode)]
-    # webbee-code-model-tier-toolbar-v1: the tier was only ever visible via
-    # `/model` (no arg) or right after a Ctrl+B cycle flash -- ask once, then
-    # forget, exactly the visibility gap the mode segment right next to it
-    # never had.
-    # webbee-code-model-selector-always-visible-v1 (Valentin, live
-    # 2026-07-31: "я в КАЖДОЙ вкладке явно хочу видеть какая модель, а не
-    # system default"): every tab must show a model indicator, chosen or
-    # not -- "" (unset) shows the REAL name of the default tier that's
-    # actually active ("Smart" / webbeesmart, imperal-ext-admin's own
-    # documented default), never a vague placeholder phrase. Ctrl+B /
-    # `/model` still change it from here exactly like before.
-    frags += [("class:tb.dim", " · model: ")]
-    frags += _tier_shimmer_fragments(tier or _TIERS[0],
-                                     _TIER_DISPLAY.get(tier, "") or _TIER_DISPLAY[_TIERS[0]],
-                                     now=tier_now)
-    frags += [("class:tb.dim", f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session"),
-             *q]
-    # 0.3.37: the PERSISTENT live-session indicator (active_sessions.
-    # session_indicator). Empty string = nothing running = say nothing, so an
-    # ordinary idle dock gains no permanent noise; when a Temporal workflow IS
-    # running the terminal now says so continuously instead of once in a boot
-    # note that scrolls away.
+    # the spend says less before it says nothing: a narrow terminal keeps the figures and drops the words
+    spends = [f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session",
+              f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits",
+              f"   ·   {_fmt_tokens(tokens)} tok"]
+    lead = 2 + sum(len(t) for _, t in who) + sum(len(t) for _, t in q)
+    spend = next((s_ for s_ in spends if not width or lead + len(s_) <= width), spends[-1])
+    frags = [("class:tb.dim", "  "), *who, ("class:tb.dim", spend), *q]
+    # 0.3.37: the PERSISTENT live-session indicator (active_sessions.session_indicator); "" = nothing running.
     if live:
         frags.append(("class:tb.live", f"   ·   {live}"))
-    # 0.3.36: the hints are DISCOVERABILITY, the spend figures are DATA -- so
-    # the hints are what gets dropped when the terminal is too narrow to hold
-    # everything, never the numbers (an 80-column window used to cut the line
-    # mid-word). `width=0` (unknown/headless) keeps the full line, which is
-    # also what every pre-0.3.36 caller and test sees.
-    used = sum(len(t) for _, t in frags)
-    # Calm 8-second rotation. Each variant starts differently so it remains
-    # visibly alive even where a narrow terminal clips the tail of the hint.
-    import time as _t_tips
-    _tip_cycle = int(_t_tips.monotonic() // 8) % 4
-    # Rotation may change the *extra* discovery cue, never the baseline
-    # editing/navigation contract. In particular, narrow terminals must
-    # always retain Alt+Enter's newline reminder before optional hints.
-    base = "   ·   Tip: Alt+↵ newline · Shift + TAB: switch mode"
-    if _tip_cycle == 0:
-        full = base + " · Ctrl+B: model tier"
-    elif _tip_cycle == 1:
-        full = base + " · Ctrl+T: new tab"
-    elif _tip_cycle == 2:
-        full = base + " · ←/→: mode"
-    else:
-        full = base + " · Esc: stop"
-    mid = base
-    short = "   ·   Tip: Alt+↵ newline"
-
-    if not width or used + len(full) <= width:
-        frags.append(("class:tb.dim", full))
-    elif used + len(mid) <= width:
-        frags.append(("class:tb.dim", mid))
-    elif used + len(short) <= width:
-        frags.append(("class:tb.dim", short))
+    # ONE hint at a time, a new one every 8 seconds, and only when the row has room for it whole: the hints are
+    # discoverability, the figures are data (0.3.36). Never a list of hints in a row.
+    tip = "   ·   Tip: " + toolbar_tip()
+    if not width or sum(len(t) for _, t in frags) + len(tip) <= width:
+        frags.append(("class:tb.dim", tip))
     return frags
 
 
@@ -451,7 +434,8 @@ def version_badge_text(version: str) -> str:
 
 def pin_version_right(frags: list, version: str, width: int, *,
                       notice: str = "", checked: "bool | None" = None,
-                      style_override: str = "", text_override: str = "") -> list:
+                      style_override: str = "", text_override: str = "",
+                      latest: str = "", installed: str = "") -> list:
     """PURE. Pin the version badge flush to the RIGHT EDGE of the toolbar row.
 
     The toolbar is the LAST child of run_session's root HSplit, so its right
@@ -499,7 +483,7 @@ def pin_version_right(frags: list, version: str, width: int, *,
         text, style = version_badge_text(version).strip(), "tb.version"
     else:
         from webbee.home_view import version_badge
-        raw, cls = version_badge(version, notice, checked=checked)
+        raw, cls = version_badge(version, notice, checked=checked, latest=latest, installed=installed)
         text, style = raw, ("tb.fresh" if cls == "class:home.fresh" else
                             "tb.update" if cls == "class:home.update" else "tb.version")
     # webbee-code-badge-cycle-v1: caller may override the TEXT ITSELF too
@@ -1632,12 +1616,17 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         `pin_version_right` falls back to its own text) for every other
         state -- offline/unchecked/update-available keep their normal,
         single, non-cycling text."""
-        us = update_state or {}
-        if us.get("checked") is not True or (us.get("notice") or "").strip():
-            return ""
+        # 2026-11-26: every state of the badge plays its short phrases in turn (home_view.badge_beats), not only
+        # the fresh one -- "v0.7.20 → 0.7.21 available" was one long line that a narrow terminal dropped whole.
         import time as _t
-        phase = int(_t.monotonic() // 5) % 2
-        return f"v{__version__}" if phase == 0 else "up to date"
+        beats = _badge_beats()
+        return beats[int(_t.monotonic() // 4) % len(beats)] if len(beats) > 1 else ""
+
+    def _badge_beats() -> tuple:
+        from webbee.home_view import badge_beats
+        us = update_state or {}
+        return badge_beats(__version__, us.get("notice", ""), us.get("checked"),
+                           latest=us.get("latest", ""), installed=us.get("installed", ""))
 
     def _current_badge_text() -> str:
         """The exact text `pin_version_right` will draw right now, so the
@@ -1652,16 +1641,9 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
         of the two variants ALWAYS, regardless of which phase is live --
         the shorter phase just leaves a little slack before the badge,
         never a truncation."""
-        us = update_state or {}
-        checked = us.get("checked")
-        if checked is None:
-            return version_badge_text(__version__)
-        if checked is True and not (us.get("notice") or "").strip():
-            widest = max(f"v{__version__}", "up to date", key=len)
-            return f" {widest} "
-        from webbee.home_view import version_badge
-        text, _cls = version_badge(__version__, us.get("notice", ""), checked=checked)
-        return f" {text} "
+        # the WIDEST of the phrases the badge plays, always: the hint beside it never grows or shrinks when the
+        # phrase changes
+        return f" {max(_badge_beats(), key=len)} "
 
     def _toolbar_fit_width() -> int:
         """Columns available to the toolbar's own text: the true terminal width
@@ -1790,7 +1772,8 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
                                   notice=us.get("notice", ""),
                                   checked=us.get("checked"),
                                   style_override=_badge_style_override(),
-                                  text_override=_badge_cycle_text())
+                                  text_override=_badge_cycle_text(),
+                                  latest=us.get("latest", ""), installed=us.get("installed", ""))
         fwd = _forwarding(None, pane)
         badge_appended = len(frags) > pre_len   # pin_version_right may drop it (no room)
 

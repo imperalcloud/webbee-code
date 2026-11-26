@@ -114,6 +114,18 @@ def step_body(tool: str, args, result, clean):
                   "click the action to close", parts, 3)
 
 
+def protocol_body(lines: dict):
+    """A step's protocol (learned / expect / need) opened whole: each label on its own line, its value beside it
+    and wrapped under its own start. The values come cleaned by the caller."""
+    body = Text()
+    for i, (key, value) in enumerate(lines.items()):
+        if i:
+            body.append("\n")
+        body.append(f"{key}: ", style="dim")
+        body.append(str(value))
+    return _block("▾ notes · ⧉ click here to copy · click above to close", [body], 9)
+
+
 def step_text(args, result, clean) -> str:
     """The same action as plain text, for the clipboard: the command (or the arguments), an empty line, the
     result -- nothing drawn, nothing indented."""

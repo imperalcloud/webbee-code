@@ -319,6 +319,7 @@ class RichSink:
         # every turn, exactly like self.steps itself does in session.py.
         self._step_index = 0
         self._step_records = {}
+        self._step_gap = False     # the gap just below is the first step's own: none is added above its thought
         self.console.print()   # breathing room between the user's message and the response
         self._nudge()
 
@@ -989,13 +990,24 @@ class RichSink:
                 except Exception:
                     tier = "webbeesmart"
             t_now = time.strftime("%H:%M:%S")
+            # a step stands apart from the one before it: one empty line above its thought (the owner 2026-11-26:
+            # the steps ran into each other). Not after the turn's own opening gap -- never two in a row.
+            if getattr(self, "_step_gap", False):
+                self.console.print()
+            self._step_gap = True
             if say:
                 self.console.print(_pad(Text.assemble(
                     (f"{t_now} ", "dim grey50"), ("💭 ", "dim"), (_clean(say), _tier_thinking_style(tier)))))
             if proto:
+                # the step's protocol is one small line cut to the width -- and a click opens it whole, each label
+                # on its own line (before, what did not fit was simply gone past the right edge)
+                from webbee.expand import Expandable, protocol_body
+                shown = {_clean(str(k)): _clean(str(v)) for k, v in (lines or {}).items() if str(v or "").strip()}
                 small = Text.assemble(("         " if say else f"{t_now} ", "dim grey50"), (proto, "dim grey50"))
                 small.no_wrap, small.overflow = True, "ellipsis"
-                self.console.print(_pad(small))
+                self.console.print(Expandable(
+                    _pad(small), lambda: _pad(protocol_body(shown)),
+                    lambda: "\n".join(f"{k}: {v}" for k, v in shown.items())))
             self._nudge()
             return
         if text:

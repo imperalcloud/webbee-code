@@ -298,3 +298,101 @@ def test_a_click_on_an_opened_diffs_head_copies_the_whole_diff(monkeypatch):
     pane.toggle_at(_at(pane, "more lines"))
     pane.toggle_at(_at(pane, "copy the whole diff"))
     assert got == [diff]
+
+
+# ── opening and closing never move the page (the owner, live 2026-11-26) ──
+def _long_page():
+    pane = OutputPane(width=92)
+    sink = RichSink(pane.console, live_enabled=False, on_output=pane.notify)
+    sink.begin_turn()
+    sink.end_turn("\n\n".join(f"Абзац ответа номер {i}." for i in range(40)))       # a long answer: one record
+    sink.begin_turn()
+    sink.tool_start("bash", {"command": CMD})
+    sink.tool_result("bash", False, "tests/test_a.py ....F",
+                     detail={"args": {"command": CMD}, "result": {"ok": False, "content": OUT}})
+    sink.end_turn("\n\n".join(f"Второй ответ, абзац {i}." for i in range(40)))
+    pane._view_h = 12
+    return pane
+
+
+def test_a_click_keeps_the_clicked_line_on_its_screen_row_while_a_long_answer_stands_half_scrolled_above():
+    pane = _long_page()
+    line = _at(pane, "Shell Exec")
+    pane._follow, pane._offset = False, line - 7          # the action 7 rows down; above it the tail of answer 1
+    top_before = _rows(pane)[pane._offset]
+    assert "Абзац ответа" in "\n".join(_rows(pane)[pane._offset:line]) or top_before == ""
+    pane.toggle_at(line)
+    assert _rows(pane)[pane._offset + 7].strip().startswith("1. ")      # the action is where it was on the screen
+    assert _rows(pane)[pane._offset] == top_before                        # and so is everything above it
+    opened_offset = pane._offset
+    pane.toggle_at(_at(pane, "Shell Exec"))                               # close: back, nothing moved
+    assert pane._offset == opened_offset and _rows(pane)[pane._offset + 7].strip().startswith("1. ")
+
+
+def test_a_click_while_the_page_follows_the_tail_does_not_jump_either():
+    pane = _long_page()
+    pane.notify()                                          # at the tail, following
+    assert pane._follow
+    line = _at(pane, "Второй ответ, абзац 39.")
+    screen_row = line - pane._offset
+    target = _at(pane, "Shell Exec")
+    pane._offset = target - 3                              # the reader scrolled up to the action; follow flag stale
+    pane.toggle_at(target)
+    assert _rows(pane)[pane._offset + 3].strip().startswith("1. ")
+    assert screen_row >= 0
+
+
+def test_a_record_that_changes_above_the_view_does_not_move_what_is_read():
+    pane = _long_page()
+    reading = _at(pane, "Второй ответ, абзац 20.")
+    pane._follow, pane._offset = False, reading
+    record = next(o for objs, _ in pane._records for o in objs if hasattr(o, "toggle"))
+    record.toggle()                                        # an action far above opens (its detail arrived)
+    pane.rerender()
+    assert "Второй ответ, абзац 20." in _rows(pane)[pane._offset]
+
+
+# ── a step's notes line opens whole; steps stand apart (the owner, live 2026-11-26) ──
+LONG_EXPECT = "exit 0 and the list of every file under src/webbee that still names the old toolbar hint, " * 3
+
+
+def _thought_pane():
+    pane = OutputPane(width=80)
+    sink = RichSink(pane.console, live_enabled=False, on_output=pane.notify)
+    sink.begin_turn()
+    sink.thinking("x", say="Проверяю подсказки.", kind="step",
+                  lines={"learned": "the hint is built in one place", "expect": LONG_EXPECT.strip()})
+    sink.tool_start("bash", {"command": "grep -rn Tip src"})
+    sink.tool_result("bash", True, "src/webbee/tui.py", detail={"args": {"command": "grep -rn Tip src"},
+                                                                 "result": {"content": "src/webbee/tui.py"}})
+    sink.thinking("y", say="Теперь правлю.", kind="step", lines={"expect": "exit 0"})
+    return pane
+
+
+def test_the_notes_line_is_cut_to_the_width_and_a_click_opens_it_whole(monkeypatch):
+    import webbee.clipboard as cb
+    pane = _thought_pane()
+    closed = _rows(pane)
+    assert all(len(ln) <= 80 for ln in closed)                       # nothing past the right edge
+    line = _at(pane, "learned: the hint is built in one place")
+    assert closed[line].endswith("…") and "still names the old toolbar hint" not in "\n".join(closed)
+    assert pane.toggle_at(line)
+    whole = " ".join(ln.strip() for ln in _rows(pane))                # a long value wraps: read it as one text
+    assert whole.count("still names the old toolbar hint") == 3 and all(len(ln) <= 80 for ln in _rows(pane))
+    opened = _rows(pane)
+    a = _at(pane, "▾ notes")
+    assert opened[a + 1].strip().startswith("learned: ") and any(r.strip().startswith("expect: ") for r in opened)
+    got = []
+    monkeypatch.setattr(cb, "copy_to_clipboard", lambda t: got.append(t) or "copied")
+    pane.toggle_at(a)
+    assert got == ["learned: the hint is built in one place\nexpect: " + LONG_EXPECT.strip()]
+    pane.toggle_at(line)
+    assert _rows(pane) == closed
+
+
+def test_a_step_stands_apart_from_the_one_before_it_by_one_empty_line():
+    pane = _thought_pane()
+    rows = _rows(pane)
+    first, second = _at(pane, "Проверяю подсказки."), _at(pane, "Теперь правлю.")
+    assert rows[:first].count("") == first and first <= 2            # only the turn's own gap above the first
+    assert rows[second - 1] == "" and rows[second - 2].strip() != ""  # one empty line above the next step

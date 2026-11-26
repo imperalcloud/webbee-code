@@ -100,6 +100,16 @@ def check_update_status(current: str, *, cache_path, now: float, fetch,
     return (_notice_for(current, latest), bool(latest))
 
 
+def update_facts(current: str, *, cache_path, now: float, fetch, ttl: float = 3600.0) -> dict:
+    """What the freshness check found, as FACTS: ``{"notice", "checked", "latest"}``. The toolbar's badge is built
+    from ``latest`` -- a number, never a version read back out of the notice's words (live 2026-11-26: the badge
+    took the last "vN" word of a sentence and showed "v0.7.18 → 0.7.18 available"). Asked again after an hour, not
+    a day: a release made this morning was "up to date" in the toolbar until tomorrow. Never raises."""
+    latest = _resolve_latest(current, cache_path=cache_path, now=now, fetch=fetch, ttl=ttl)
+    newer = bool(_ver(latest or "") and _ver(current) and _ver(latest) > _ver(current))
+    return {"notice": _notice_for(current, latest), "checked": bool(latest), "latest": str(latest) if newer else ""}
+
+
 def check_for_update(current: str, *, cache_path, now: float, fetch, ttl: float = 86400.0) -> "str | None":
     """Return a one-line upgrade notice if a newer webbee is on PyPI, else None.
     Caches the latest-seen version for `ttl` seconds. Never raises.

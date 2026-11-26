@@ -189,7 +189,8 @@ def _cycle(options, current: str, delta: int) -> str:
     return options[(i + delta) % len(options)]
 
 
-def version_badge(version: str, update_notice: str = "", checked: bool = True) -> "tuple[str, str]":
+def version_badge(version: str, update_notice: str = "", checked: bool = True, *,
+                  latest: str = "", installed: str = "") -> "tuple[str, str]":
     """(text, style_class) for Home's bottom-right version badge (0.3.36).
 
     THREE honest states, never a fake reassurance:
@@ -206,16 +207,44 @@ def version_badge(version: str, update_notice: str = "", checked: bool = True) -
     v = (version or "").strip()
     vtxt = f"v{v}" if v else "v?"
     notice = (update_notice or "").strip()
+    # The other version comes as a FACT (`installed`: on disk, this session still runs the old one; `latest`: a
+    # newer release exists), never out of the notice's words -- the badge once took the last "vN" word of the
+    # restart sentence, which names the RUNNING version last: "v0.7.18 → 0.7.18 available" (live 2026-11-26).
+    installed, latest = (installed or "").strip().lstrip("v"), (latest or "").strip().lstrip("v")
+    if installed and installed != v:
+        return (f"{vtxt} → {installed} · restart", "class:home.update")
+    if latest and latest != v:
+        return (f"{vtxt} → {latest} available", "class:home.update")
     if notice:
-        latest = ""
-        for tok in notice.replace("—", " ").split():
-            if tok.startswith("v") and tok[1:2].isdigit():
-                latest = tok[1:]
-        return ((f"{vtxt} → {latest} available" if latest else f"{vtxt} · update available"),
-                "class:home.update")
+        return (f"{vtxt} · update available", "class:home.update")     # a notice with no number: none is guessed
     if checked:
         return (f"{vtxt} · up to date", "class:home.fresh")
     return (vtxt, "class:home.dim")
+
+
+def badge_beats(version: str, update_notice: str = "", checked: "bool | None" = True, *,
+                latest: str = "", installed: str = "") -> "tuple[str, ...]":
+    """PURE. What the toolbar's version badge says, as SHORT phrases shown one after another -- never one long
+    line (the owner 2026-11-26: "play the phrases in turn, so it is clear, good-looking, effective"). The first is
+    always the running version; the rest say what is known about it, from the same facts ``version_badge`` reads:
+
+      * a newer one is on disk, the session still runs the old -> ("v0.7.20", "0.7.21 installed", "restart to use it")
+      * a newer release exists                                 -> ("v0.7.20", "0.7.21 is out", "click to upgrade")
+      * checked, nothing newer                                 -> ("v0.7.20", "up to date")
+      * not checked / could not check                          -> ("v0.7.20",)  -- no claim either way
+    """
+    v = (version or "").strip()
+    vtxt = f"v{v}" if v else "v?"
+    installed, latest = (installed or "").strip().lstrip("v"), (latest or "").strip().lstrip("v")
+    if installed and installed != v:
+        return (vtxt, f"{installed} installed", "restart to use it")
+    if latest and latest != v:
+        return (vtxt, f"{latest} is out", "click to upgrade")
+    if (update_notice or "").strip():
+        return (vtxt, "update available", "click to upgrade")
+    if checked is True:
+        return (vtxt, "up to date")
+    return (vtxt,)
 
 
 def two_column(width: int, threshold: int = 100) -> bool:

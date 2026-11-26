@@ -696,9 +696,11 @@ async def _installed_watch(update_state: dict, *, invalidate=None, every: float 
     while True:
         try:
             await sleep(every)
-            notice = restart_notice(__version__, await asyncio.to_thread(read))
+            on_disk = await asyncio.to_thread(read)
+            notice = restart_notice(__version__, on_disk)
             if notice and update_state.get("notice") != notice:
                 update_state["notice"] = notice
+                update_state["installed"] = str(on_disk or "")     # the fact the badge is built from
                 if invalidate is not None:
                     invalidate()
         except asyncio.CancelledError:
@@ -725,14 +727,15 @@ async def _check_update_bg(update_state: dict, *, invalidate=None,
     from pathlib import Path
 
     from webbee import __version__
-    from webbee.update import check_update_status, default_fetch
+    from webbee.update import default_fetch, update_facts
     try:
         cache = cache_path or Path(os.path.expanduser("~/.cache/webbee/update.json"))
-        notice, checked = await asyncio.to_thread(
-            check_update_status, __version__, cache_path=cache, now=time.time(),
+        facts = await asyncio.to_thread(
+            update_facts, __version__, cache_path=cache, now=time.time(),
             fetch=fetch or default_fetch)
-        update_state["notice"] = notice
-        update_state["checked"] = checked
+        update_state["notice"] = facts["notice"]
+        update_state["checked"] = facts["checked"]
+        update_state["latest"] = facts["latest"]
         if invalidate is not None:
             invalidate()
     except Exception:

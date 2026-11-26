@@ -98,7 +98,7 @@ def test_toolbar_idle_has_mode_tokens_cost_and_hint():
     assert "plan" in t
     assert "51k" in t
     assert "66 credits" in t
-    assert "Shift + TAB" in t          # spelled in words, no glyph
+    assert t.count("Tip: ") == 1       # one hint at a time
     assert "⇧⇥" not in t     # the ⇧⇥ glyph must NOT appear
     assert not NO_CYRILLIC.search(t)
 
@@ -123,8 +123,9 @@ def test_fmt_tokens_scales_k_m_b():
 def test_toolbar_busy_state_shows_working_dot_and_stop_hint():
     t = _txt(build_toolbar("default", 1200, 0.0143, busy=True,
                            current="notes·delete_note", elapsed=4, tools=3))
-    assert "working" in t and "notes·delete_note" in t
-    assert "Esc/Ctrl-C to stop" in t and "4s" in t
+    assert "notes·delete_note" in t and "mode: default · model: Smart" in t     # the same places as at idle
+    assert "Esc to stop" in t and "4s · 3 actions" in t                          # a count has its unit
+    assert "working" in _txt(build_toolbar("default", 1200, 0, busy=True, elapsed=4))     # nothing named yet
     assert not NO_CYRILLIC.search(t)
 
 
@@ -2128,7 +2129,7 @@ def test_toolbar_shows_queue_depth_busy_and_idle():
     busy = _txt(build_toolbar("default", 0, 0, busy=True, elapsed=1.0, queued=2))
     assert "⋯2 queued" in busy and "working" in busy
     idle = _txt(build_toolbar("default", 0, 0, queued=1))
-    assert "⋯1 queued" in idle and "Shift + TAB" in idle
+    assert "⋯1 queued" in idle and "Tip: " in idle
 
 
 def test_toolbar_hides_queue_segment_when_empty():

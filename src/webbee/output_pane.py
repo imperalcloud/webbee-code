@@ -217,13 +217,28 @@ class OutputPane:
             return
         self._replay(new_width)
 
-    def rerender(self) -> None:
-        """Draw the retained records again at the same width, the view kept where it is: a record changed what it
-        shows (it opened, closed, or the detail it asked for arrived)."""
-        follow, self._follow = self._follow, False          # anchor on the top record, not the tail
+    def rerender(self, at_line: "int | None" = None) -> None:
+        """Draw the retained records again at the same width WITHOUT moving the page: a record changed what it
+        shows (it opened, closed, or the detail it asked for arrived). One line is held where it is on the screen
+        -- the clicked one (``at_line``), else the top visible one: the same record, the same line inside it, the
+        same screen row. Before, the view was put on the START of the top visible record, so a click while a long
+        answer stood half scrolled at the top threw the reader to that answer's beginning (live 2026-11-26)."""
+        base = self._ring_base_lines
+        held = self._offset if at_line is None else at_line
+        held = max(base, min(held, max(base, len(self._all_lines()) - 1)))
+        screen_row = held - self._offset                    # where that line stands on the screen now
+        rec = self._record_at_line(held)
+        inside = (held - base) - sum(self._record_lines[:rec])
+        follow, self._follow = self._follow, False
         self._replay(self.console.width)
+        spans = self._record_lines
+        if 0 <= rec < len(spans):
+            inside = max(0, min(inside, spans[rec] - 1))    # the record may have grown or shrunk around the line
+            max_off = max(0, len(self._all_lines()) - max(1, self._view_h))
+            self._offset = max(0, min(base + sum(spans[:rec]) + inside - screen_row, max_off))
         at_tail = self._offset >= max(0, len(self._all_lines()) - max(1, self._view_h))
         self._follow = follow and at_tail
+        self._invalidate()
 
     def toggle_at(self, line: int):
         """A click on absolute content line `line`: the record under it opens or closes in place when it is one
@@ -250,7 +265,7 @@ class OutputPane:
             toggle = getattr(obj, "toggle", None)
             if callable(toggle):
                 toggle()
-                self.rerender()
+                self.rerender(line)
                 return obj
         return False
 

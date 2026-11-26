@@ -71,10 +71,12 @@ def test_buffer_holds_embedded_newlines_and_box_grows():
 # 2. version badge + freshness
 # --------------------------------------------------------------------------
 def test_version_badge_update_available():
-    txt, style = version_badge(
-        "0.3.35", "🐝 webbee v0.3.36 available — upgrade: pipx upgrade webbee")
+    notice = "🐝 webbee v0.3.36 available — upgrade: pipx upgrade webbee"
+    txt, style = version_badge("0.3.35", notice, latest="0.3.36")
     assert txt == "v0.3.35 → 0.3.36 available"
     assert style == "class:home.update"
+    # the other version is a FACT handed to the badge, never read out of the notice's words (2026-11-26)
+    assert version_badge("0.3.35", notice) == ("v0.3.35 · update available", "class:home.update")
 
 
 def test_version_badge_up_to_date_only_when_actually_checked():
@@ -397,19 +399,11 @@ def test_toolbar_drops_hints_before_numbers_when_narrow():
         return "".join(t for _, t in build_toolbar("autopilot", 128000, 3400, width=width))
 
     wide = txt(160)
-    assert "Shift + TAB" in wide and "Alt+↵ newline" in wide
+    assert wide.count("Tip: ") == 1                           # ONE hint at a time, never a list of them
 
-    # base data line (mode + model + spend) is 84 chars now that the model
-    # indicator is permanent -- so the widths that exercise "hints degrade"
-    # must sit above that floor.
-    at110 = txt(110)
-    assert "128k tok · 3.4k credits this session" in at110   # numbers survive
-    assert "Alt+↵ newline" in at110                           # the newline hint survives
-    assert "Shift + TAB" not in at110                         # the longer hint went
-
-    tiny = txt(90)
+    tiny = txt(84)
     assert "128k tok · 3.4k credits this session" in tiny    # numbers STILL survive
-    assert "newline" not in tiny
+    assert "Tip:" not in tiny                                 # the hint went whole, not cut
 
 
 def test_toolbar_without_width_is_byte_identical_to_pre_0336_callers():
@@ -418,15 +412,16 @@ def test_toolbar_without_width_is_byte_identical_to_pre_0336_callers():
     assert build_toolbar("plan", 10, 2, tier_now=0.0) == build_toolbar("plan", 10, 2, width=0, tier_now=0.0)
 
 
-def test_busy_and_consent_toolbars_ignore_width():
-    """Only the idle line is width-managed; the busy/consent states are short
-    already and must not change shape."""
+def test_the_consent_toolbar_ignores_width_and_the_busy_one_fits_it():
+    """The consent line is short already and must not change shape. The busy line is width-managed since
+    2026-11-26: it carries who works and the spend too, so a narrow terminal drops its parts whole, in order
+    (tests/test_tray_1126.py) -- it never runs past the width it was given."""
     assert build_toolbar("default", 1, 1, consent=True, width=40) == \
         build_toolbar("default", 1, 1, consent=True)
-    # the tier's shimmer animates with the clock: both rows at one instant (two calls a tick apart differed, one run
-    # of the suite in five)
-    assert build_toolbar("default", 1, 1, busy=True, current="x", width=40, tier_now=0.0) == \
-        build_toolbar("default", 1, 1, busy=True, current="x", tier_now=0.0)
+    wide = build_toolbar("default", 1, 1, busy=True, current="x", width=200, tier_now=0.0)
+    assert wide == build_toolbar("default", 1, 1, busy=True, current="x", tier_now=0.0)
+    narrow = "".join(t for _, t in build_toolbar("default", 1, 1, busy=True, current="x", width=60, tier_now=0.0))
+    assert len(narrow) <= 60 and "mode: default · model: Smart" in narrow
 
 
 # --------------------------------------------------------------------------
