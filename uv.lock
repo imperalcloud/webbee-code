@@ -3,9 +3,9 @@ revision = 5
 requires-python = ">=3.7"
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
+    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.11' and python_full_version < '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
     "python_full_version == '3.10.*'",
@@ -326,16 +326,16 @@ wheels = [
 
 [[package]]
 name = "imperal-mcp"
-version = "0.9.21"
+version = "0.9.22"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "imperal-sdk" },
     { name = "mcp" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bd/9d/381d9635e55acf18cb6af561115f3149d7afcbf6cf9c5a2e278d1971db0d/imperal_mcp-0.9.21.tar.gz", hash = "sha256:3a95c1eb0f48b1db881f471294e7471652a881ebe153faa93f03a73a5250d8fe", size = 223592, upload-time = "2026-11-20T19:58:41.344Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/be/e1/0b62b40f67839018b61b842ef93259a81b4117d10e4f355ddb1e61bcd9b2/imperal_mcp-0.9.22.tar.gz", hash = "sha256:bccdc67ea329540c186c88a5ee8b072ac2735d92aabe34ba4efad93da0c411b5", size = 226825, upload-time = "2026-11-26T23:17:41.198Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/0c/a815b572630ba9c28aac804725fb6edadcfa68c9bb931d1c8f6dded265be/imperal_mcp-0.9.21-py3-none-any.whl", hash = "sha256:f7b64bc107d655a3b4421e57f58b88127381bbba06b8a996c19e7dbf6aa279fc", size = 129213, upload-time = "2026-11-20T19:58:40.229Z" },
+    { url = "https://files.pythonhosted.org/packages/02/2d/e13a4659ad8b36e43e23365b2f6a57cca14d7ff48482f8be9d6785ec7704/imperal_mcp-0.9.22-py3-none-any.whl", hash = "sha256:a412c3467c75e712df18f3d793aeaa83419a1cd245fba6a98958846e58991658", size = 130516, upload-time = "2026-11-26T23:17:40.169Z" },
 ]
 
 [[package]]
@@ -478,9 +478,9 @@ version = "3.12"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
+    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.11' and python_full_version < '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
 ]
@@ -677,9 +677,9 @@ version = "2.16.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
+    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.11' and python_full_version < '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
 ]
@@ -759,9 +759,9 @@ version = "0.0.34"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
+    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.11' and python_full_version < '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
 ]
@@ -957,9 +957,9 @@ version = "2026.9.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
+    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.11' and python_full_version < '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
 ]
@@ -1116,9 +1116,9 @@ version = "3.7.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
+    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.11' and python_full_version < '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
 ]
@@ -1153,9 +1153,9 @@ version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
+    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
     "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version >= '3.11' and python_full_version < '3.14' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'win32')",
 ]
@@ -1505,7 +1505,7 @@ wheels = [
 
 [[package]]
 name = "webbee"
-version = "0.7.21"
+version = "0.7.22"
 source = { editable = "." }
 dependencies = [
     { name = "asyncssh", marker = "python_full_version >= '3.10'" },
@@ -1529,7 +1529,7 @@ requires-dist = [
     { name = "asyncssh", marker = "python_full_version >= '3.10'", specifier = ">=2.14" },
     { name = "httpx", marker = "python_full_version >= '3.10'", specifier = ">=0.27" },
     { name = "httpx-sse", marker = "python_full_version >= '3.10'", specifier = ">=0.4" },
-    { name = "imperal-mcp", marker = "python_full_version >= '3.10'", specifier = ">=0.9.21" },
+    { name = "imperal-mcp", marker = "python_full_version >= '3.10'", specifier = ">=0.9.22" },
     { name = "imperal-sdk", extras = ["universal-index"], marker = "python_full_version >= '3.10'", specifier = ">=6.7.1" },
     { name = "prompt-toolkit", marker = "python_full_version >= '3.10'", specifier = ">=3" },
     { name = "rich", marker = "python_full_version >= '3.10'", specifier = ">=13.7" },

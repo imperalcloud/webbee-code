@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.22
+
+* Signing out by itself is closed in the shell (imperal-mcp 0.9.22, raised here): one token refresh at a time on a
+  machine - the terminal, the MCP server, the watch and the hooks share one credentials file and no longer race
+  each other into a revoked session; a token the gateway refused is asked for once, then you are told to sign in.
+* The terminal says it took a command before it runs it. A request the kernel asks an acknowledgement for is
+  answered at once; a request of another turn is neither run nor acknowledged. This becomes visible with the kernel
+  release that asks: a command the terminal never took is then said in seconds instead of holding the session.
+
 ## 0.7.21
 
 * The row under the input keeps one order whether a turn runs or not: who works (mode and model, both clickable),
