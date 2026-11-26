@@ -279,27 +279,28 @@ def set_slot_mode(slot: SessionSlot, mode: str) -> None:
     slot.mode = mode
     if slot.agent is not None:
         slot.agent.mode = mode
-        _notify_mode(slot.agent, mode)
+        _notify_switch(slot.agent, "post_mode", mode)
     from webbee.mode_store import save_mode
     save_mode(slot.workspace, mode)
 
 
-_MODE_POSTS: set = set()      # in-flight mode notices (a task kept alive until it is done)
+_SWITCH_POSTS: set = set()    # in-flight switch notices (a task kept alive until it is done)
 
 
-def _notify_mode(agent, mode: str) -> None:
-    """The running session hears the switch at once (``AgentSession.post_mode``): fire and forget on the running
-    loop; outside a loop (tests, boot) nothing is sent -- the next turn's coding_context carries the mode."""
-    post = getattr(agent, "post_mode", None)
-    if post is None or not getattr(agent, "session_id", ""):
+def _notify_switch(agent, post_name: str, value: str) -> None:
+    """The running session hears a switch at once -- the mode (``AgentSession.post_mode``) and the model tier
+    (``post_tier``) by this one path: fire and forget on the running loop; outside a loop (tests, boot) nothing is
+    sent -- the next turn's coding_context carries the value."""
+    post = getattr(agent, post_name, None)
+    if post is None or not value or not getattr(agent, "session_id", ""):
         return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    task = loop.create_task(post(mode))
-    _MODE_POSTS.add(task)
-    task.add_done_callback(_MODE_POSTS.discard)
+    task = loop.create_task(post(value))
+    _SWITCH_POSTS.add(task)
+    task.add_done_callback(_SWITCH_POSTS.discard)
 
 
 def set_slot_tier(slot: SessionSlot, tier: str) -> None:
@@ -316,6 +317,7 @@ def set_slot_tier(slot: SessionSlot, tier: str) -> None:
     slot.model_tier = tier
     if slot.agent is not None:
         slot.agent.model_tier = tier
+        _notify_switch(slot.agent, "post_tier", tier)   # the session that is running hears it, as it hears a mode
     from webbee.tier_store import save_tier
     save_tier(slot.workspace, tier)
 

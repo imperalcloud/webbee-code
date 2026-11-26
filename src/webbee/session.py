@@ -379,20 +379,30 @@ class AgentSession:
         token = await self.token_provider()
         return {"Authorization": f"Bearer {token}"}
 
-    async def post_mode(self, mode: str) -> bool:
-        """Tell the running session its new coding mode (the gateway signals the kernel's ``set_mode``): autopilot
-        is asked nothing from now on, the others are asked again. False when there is no session yet or no live one
-        took it -- the next turn carries the mode anyway. Never raises."""
+    async def _post_switch(self, door: str, body: dict) -> bool:
+        """The one way a switch made in the terminal reaches the session that is already running: a POST to the
+        session's own door at the gateway, which signals the kernel. False when there is no session yet or no live
+        one took it -- the next turn's coding_context carries the same value anyway. Never raises."""
         if not self.session_id or self.cfg is None or self.token_provider is None:
             return False
         try:
             headers = await self._headers()
             async with make_client(self.cfg, timeout=15) as client:
-                resp = await client.post(f"/v1/agent/sessions/{self.session_id}/mode", json={"mode": mode},
-                                         headers=headers)
+                resp = await client.post(f"/v1/agent/sessions/{self.session_id}/{door}", json=body, headers=headers)
             return resp.status_code == 200 and bool((resp.json() or {}).get("ok"))
         except Exception:
             return False
+
+    async def post_mode(self, mode: str) -> bool:
+        """Tell the running session its new coding mode (the kernel's ``set_mode``): autopilot is asked nothing
+        from now on, the others are asked again."""
+        return await self._post_switch("mode", {"mode": mode})
+
+    async def post_tier(self, tier: str) -> bool:
+        """Tell the running session its new model tier (the kernel's ``set_model_tier``): its next step runs on
+        that model. Before this the tier travelled only with a turn's start, so a switch made while she worked
+        changed the label in the terminal and nothing else."""
+        return await self._post_switch("tier", {"tier": tier})
 
     async def run(self, task: str, sink, *, marathon: bool = False, goal: str = "",
                   surface: str = "", steer_iid: str = "") -> str:

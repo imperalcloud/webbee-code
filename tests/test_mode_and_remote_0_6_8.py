@@ -105,3 +105,82 @@ def test_no_session_yet_sends_nothing(monkeypatch):
         await asyncio.sleep(0)
     asyncio.run(go())
     assert slot.agent.mode == "plan"
+
+
+# ── the model tier goes by the same path as the mode (the owner, 2026-11-26) ──
+def test_a_tier_switch_reaches_the_running_session_whatever_made_it(monkeypatch):
+    # `/model supersmart` and Ctrl+B both end in set_slot_tier; before this neither told the running session
+    import webbee.repl as R
+    sent = []
+
+    class _Agent:
+        session_id = "imp_u_a-r1"
+        model_tier = "webbeesmart"
+
+        async def post_tier(self, tier):
+            sent.append(tier)
+            return True
+    slot = SimpleNamespace(model_tier="webbeesmart", agent=_Agent(), workspace="/w")
+    monkeypatch.setattr("webbee.tier_store.save_tier", lambda ws, t: None)
+
+    async def go():
+        R.set_slot_tier(slot, "supersmart")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    asyncio.run(go())
+    assert slot.agent.model_tier == "supersmart" and slot.model_tier == "supersmart" and sent == ["supersmart"]
+
+
+def test_a_tier_switch_with_no_session_or_no_value_sends_nothing(monkeypatch):
+    import webbee.repl as R
+
+    class _Agent:
+        session_id = ""
+        model_tier = ""
+
+        async def post_tier(self, tier):
+            raise AssertionError("posted without a session")
+    slot = SimpleNamespace(model_tier="", agent=_Agent(), workspace="/w")
+    monkeypatch.setattr("webbee.tier_store.save_tier", lambda ws, t: None)
+
+    async def go():
+        R.set_slot_tier(slot, "ultrasmart")
+        slot.agent.session_id = "imp_u_a-r1"
+        R.set_slot_tier(slot, "")                 # "forget my choice": nothing to tell, the next turn carries none
+        await asyncio.sleep(0)
+    asyncio.run(go())
+    assert slot.agent.model_tier == ""
+
+
+def test_the_mode_and_the_tier_post_through_one_door_function(monkeypatch):
+    import webbee.session as S
+    calls = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append((url, json))
+            return _Resp()
+    monkeypatch.setattr(S, "make_client", lambda cfg, timeout=15: _Client())
+
+    async def token():
+        return "t"
+    agent = S.AgentSession.__new__(S.AgentSession)
+    agent.session_id, agent.cfg, agent.token_provider = "s1", object(), token
+
+    async def go():
+        return await agent.post_mode("plan"), await agent.post_tier("ultrasmart")
+    assert asyncio.run(go()) == (True, True)
+    assert calls == [("/v1/agent/sessions/s1/mode", {"mode": "plan"}),
+                     ("/v1/agent/sessions/s1/tier", {"tier": "ultrasmart"})]
