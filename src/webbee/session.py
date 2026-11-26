@@ -648,6 +648,9 @@ class AgentSession:
                     rid = frame.get("req_id")
                     sid = str(rid or "")
                     tool = str(frame.get("tool", "") or "")
+                    if frame.get("ack") and rid not in seen:
+                        # the kernel asks whether this terminal TOOK the request: said before anything is run
+                        await self._post_ack(client, session_id, rid)
                     stored = None if rid in seen else await asyncio.to_thread(store.get, rid, tool)
                     if rid in seen:
                         seen.move_to_end(rid)
@@ -890,6 +893,23 @@ class AgentSession:
         return ""
 
     _result_delays = (0.5, 2.0, 5.0)   # class attr — tests override per instance
+    _ack_timeout = 5.0                 # the word is small; a slow post must not hold the tool back
+
+    async def _post_ack(self, client, session_id: str, req_id) -> bool:
+        """Tell the kernel this terminal TOOK a request, before the tool runs (2026-11-26: a request the
+        terminal never answered held its session 18 minutes -- between "sent" and "began" there was no fact).
+        It goes by the door a result takes, as ``{"state": "ack"}`` -- no outcome in it, so it is never read as
+        the result. One try and a short bound: the result itself follows by ``_post_result`` with its retries,
+        and a kernel that heard no word sends the request again (the seen-dict dedups). Never raises."""
+        try:
+            headers = await self._headers()
+            r = await asyncio.wait_for(
+                client.post(f"/v1/agent/sessions/{session_id}/result",
+                            json={"req_id": req_id, "result": {"state": "ack"}}, headers=headers),
+                timeout=self._ack_timeout)
+            return 200 <= int(getattr(r, "status_code", 0) or 0) < 300
+        except Exception:
+            return False
 
     async def _post_result(self, client, session_id: str, out: dict, *, sink=None, tool: str = "") -> bool:
         """POST one result under its req_id; True once a 2xx took it. Never
