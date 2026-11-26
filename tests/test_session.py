@@ -1907,3 +1907,14 @@ def test_a_thinking_frame_is_handed_over_by_its_parts_whole_or_as_progress():
     old = Parts()
     show_thinking(old, "", "an old frame", "webbeesmart", {"type": "thinking", "text": "an old frame"})
     assert old.got == [("an old frame", "webbeesmart", "", "", None)]
+
+
+def test_a_thinking_frame_of_another_surface_is_noted_by_its_parts_too():
+    from webbee.frames import _foreign_note
+
+    step = {"type": "thinking", "text": "learned: a.\nLoading the tool.", "kind": "step", "say": "Loading the tool.",
+            "lines": {"learned": "a."}}
+    assert _foreign_note(step) == "Loading the tool."
+    assert _foreign_note({"type": "thinking", "text": "a provider's own reasoning", "kind": "native", "say": ""}) == ""
+    assert _foreign_note({"type": "thinking", "text": "learned: a.", "kind": "step", "say": ""}) == "learned: a."
+    assert _foreign_note({"type": "thinking", "text": "an old frame"}) == "an old frame"

@@ -216,7 +216,14 @@ def _foreign_note(frame: dict) -> str:
         return f"running {tool}" if tool else "running a tool"
     if ftype == "confirm_request":
         return f"approval requested: {tool}" if tool else "approval requested"
-    if ftype in ("final", "marathon_complete", "progress", "thinking"):
+    if ftype == "thinking":
+        # a frame that names its parts: the words for the person, or nothing for a step that said none aloud and
+        # for a provider's own reasoning; a frame that names none (an older kernel) is shown whole, as before
+        parts = thinking_parts(frame)
+        if parts:
+            return "" if parts["kind"] == "native" else (parts["say"].strip() or _progress_text(frame).strip())
+        return _progress_text(frame).strip()
+    if ftype in ("final", "marathon_complete", "progress"):
         return _progress_text(frame).strip()
     if ftype == "panel_release_required":
         summary = str(frame.get("summary", "") or "").strip()
