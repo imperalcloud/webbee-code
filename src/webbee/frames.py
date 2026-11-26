@@ -54,6 +54,35 @@ def _progress_text(frame: dict) -> str:
     return str(frame.get("llm_text") or frame.get("text") or "")
 
 
+def thinking_parts(frame: dict, tag: str = "") -> dict:
+    """A thinking frame's named parts (the kernel's ``thought_frame``: ``kind``, ``say``, ``lines``) as a sink
+    takes them; ``{}`` for a frame that names none (an older kernel) -- that one is drawn whole, as before."""
+    kind = frame.get("kind") if isinstance(frame, dict) else None
+    if not (isinstance(kind, str) and kind):
+        return {}
+    say = str(frame.get("say") or "")
+    lines = frame.get("lines")
+    return {"kind": kind, "say": tag + say if say else "", "lines": lines if isinstance(lines, dict) else {}}
+
+
+def show_thinking(sink, tag: str, text: str, tier: str, frame: dict) -> None:
+    """Hand a thinking frame to the sink: by its parts when the frame names them and the sink can take them -- the
+    words for the person large, the step's protocol small, a provider's own reasoning not at all; whole, as
+    before, for an older frame or a sink that knows no parts; as plain progress for a sink with no thinking."""
+    shown = tag + text if text else ""
+    thinking = getattr(sink, "thinking", None)
+    if thinking is None:
+        sink.progress(shown)
+        return
+    try:
+        thinking(shown, tier=tier, **thinking_parts(frame, tag))
+    except TypeError:
+        try:
+            thinking(shown, tier=tier)
+        except TypeError:
+            thinking(shown)
+
+
 def _first_time(step_id: str, seen_ids: set) -> bool:
     """True the first time step_id is seen across EITHER vocabulary, then
     remembers it. An empty step_id never dedups (some legacy frames omit

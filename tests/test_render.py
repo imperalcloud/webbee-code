@@ -1089,3 +1089,37 @@ def test_an_agents_message_prints_one_kept_line_once():
     s.agent_message("Claude (imperal-mcp): stop", "agent.m1")
     s.agent_message("Claude (imperal-mcp): stop", "agent.m1")        # a re-sent frame prints once
     assert s.console.export_text().count("[agent] Claude (imperal-mcp): stop") == 1
+
+
+# -- a thinking frame that names its parts (kernel thought_frame: kind, say, lines) --------------------------------
+
+def test_thinking_by_parts_shows_the_words_for_the_person_and_the_protocol_small():
+    """The owner, 2026-11-26: the right thoughts, not everything in a row. The words for the person are the block;
+    the step's own lines are one small line under it; the whole raw text is not printed again."""
+    s = _sink()
+    raw = "learned: 16 of 250 tools are declared.\nexpect: exit 0\nLoading update_post to fix post 2248."
+    s.thinking(raw, tier="webbeesmart", kind="step", say="Loading update_post to fix post 2248.",
+               lines={"learned": "16 of 250 tools are declared.", "expect": "exit 0"})
+    out = s.console.export_text()
+    assert "Loading update_post to fix post 2248." in out
+    assert "learned: 16 of 250 tools are declared. · expect: exit 0" in out
+    assert out.count("Loading update_post") == 1                    # said once, not again inside the raw text
+
+
+def test_thinking_by_parts_draws_no_native_reasoning_and_nothing_for_an_empty_step():
+    s = _sink()
+    s.thinking("a long stream of a provider's own reasoning", kind="native")
+    s.thinking("", kind="step", say="", lines={})
+    assert s.console.export_text().strip() == ""
+
+
+def test_thinking_by_parts_shows_the_protocol_alone_when_the_step_said_nothing_to_the_person():
+    s = _sink()
+    s.thinking("learned: a.\nexpect: exit 0", kind="step", say="", lines={"learned": "a.", "expect": "exit 0"})
+    assert "learned: a. · expect: exit 0" in s.console.export_text()
+
+
+def test_thinking_without_parts_is_drawn_as_before():
+    s = _sink()
+    s.thinking("an old frame's whole text", tier="webbeesmart")
+    assert "an old frame's whole text" in s.console.export_text()

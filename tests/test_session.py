@@ -1869,3 +1869,41 @@ def test_an_agents_message_stays_in_the_scrollback(monkeypatch):
     ], sink)
     assert result == "done" and sink.queued == [("agent", "agent.m1"), ("telegram", "i1")]
     assert sink.said == [("Claude (imperal-mcp): stop editing consumer.py", "agent.m1")]
+
+
+# -- a thinking frame that names its parts (kernel thought_frame) ---------------------------------------------------
+
+def test_a_thinking_frame_is_handed_over_by_its_parts_whole_or_as_progress():
+    from webbee.frames import show_thinking, thinking_parts
+
+    frame = {"type": "thinking", "text": "learned: a.\nLoading the tool.", "kind": "step",
+             "say": "Loading the tool.", "lines": {"learned": "a."}}
+    assert thinking_parts(frame, "[tg] ") == {"kind": "step", "say": "[tg] Loading the tool.", "lines": {"learned": "a."}}
+    assert thinking_parts({"type": "thinking", "text": "old"}) == {}
+    assert thinking_parts({"kind": "native", "say": "", "lines": "x"}) == {"kind": "native", "say": "", "lines": {}}
+
+    class Parts:
+        def __init__(self): self.got = []
+        def thinking(self, text, tier="", say="", kind="", lines=None): self.got.append((text, tier, say, kind, lines))
+
+    class Tiered:
+        def __init__(self): self.got = []
+        def thinking(self, text, tier=""): self.got.append((text, tier))
+
+    class Plain:
+        def __init__(self): self.got = []
+        def thinking(self, text): self.got.append(text)
+
+    class NoThinking:
+        def __init__(self): self.got = []
+        def progress(self, text): self.got.append(text)
+
+    a, b, c, d = Parts(), Tiered(), Plain(), NoThinking()
+    for sink in (a, b, c, d):
+        show_thinking(sink, "", frame["text"], "ultrasmart", frame)
+    assert a.got == [(frame["text"], "ultrasmart", "Loading the tool.", "step", {"learned": "a."})]
+    assert b.got == [(frame["text"], "ultrasmart")]          # a sink that knows no parts: whole, as before
+    assert c.got == [frame["text"]] and d.got == [frame["text"]]
+    old = Parts()
+    show_thinking(old, "", "an old frame", "webbeesmart", {"type": "thinking", "text": "an old frame"})
+    assert old.got == [("an old frame", "webbeesmart", "", "", None)]

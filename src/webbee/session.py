@@ -22,6 +22,7 @@ from webbee.frames import (
     marathon_note,
     render_foreign_frame,
     render_todo_frame,
+    show_thinking,
     stop_report_lines,
 )
 
@@ -735,19 +736,9 @@ class AgentSession:
                     handle_step_finished(frame, sink, finished, step_labels, self.steps, local_ids)
 
                 elif ftype == "thinking":  # system-driven reasoning -> the 💭 block
-                    _text = _progress_text(frame)
-                    thinking = getattr(sink, "thinking", None)
-                    if thinking is not None:
-                        # The selected tier belongs to THIS running AgentSession.
-                        # Passing it here keeps the visible reasoning colour in
-                        # lock-step with the model that produced the frame instead
-                        # of letting the renderer fall back to Smart's colour.
-                        try:
-                            thinking(_tag + _text if _text else "", tier=self.model_tier)
-                        except TypeError:
-                            thinking(_tag + _text if _text else "")
-                    else:
-                        sink.progress(_tag + _text if _text else "")
+                    # The selected tier belongs to THIS running AgentSession: passing it keeps the visible
+                    # reasoning colour in lock-step with the model that produced the frame.
+                    show_thinking(sink, _tag, _progress_text(frame), self.model_tier, frame)
 
                 elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
                     _text = _progress_text(frame)

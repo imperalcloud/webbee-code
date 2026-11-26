@@ -903,9 +903,35 @@ class RichSink:
             self.console.print(_pad(Text(_clean(text), style="dim italic")))
             self._nudge()
 
-    def thinking(self, text: str, tier: str = "") -> None:
+    def thinking(self, text: str, tier: str = "", say: str = "", kind: str = "", lines=None) -> None:
         # System-driven reasoning as a distinct 💭 block — visually colored in the active
         # model's hue family so the user immediately perceives which model is reasoning.
+        # A frame that names its parts (kind): the words for the person (say) are the block; the step's protocol
+        # (lines: learned / expect / need) is one small dim line under it, cut to the width; a provider's own
+        # reasoning stream (native) is not drawn. The owner, 2026-11-26: "the right thoughts, not everything
+        # in a row". The kernel names the parts, this only draws them.
+        if kind:
+            if kind == "native":
+                return
+            proto = " · ".join(f"{k}: {_clean(str(v))}" for k, v in (lines or {}).items() if str(v or "").strip())
+            if not (say or proto):
+                return
+            if not tier:
+                try:
+                    from webbee.tier_store import load_tier
+                    tier = load_tier() or "webbeesmart"
+                except Exception:
+                    tier = "webbeesmart"
+            t_now = time.strftime("%H:%M:%S")
+            if say:
+                self.console.print(_pad(Text.assemble(
+                    (f"{t_now} ", "dim grey50"), ("💭 ", "dim"), (_clean(say), _tier_thinking_style(tier)))))
+            if proto:
+                small = Text.assemble(("         " if say else f"{t_now} ", "dim grey50"), (proto, "dim grey50"))
+                small.no_wrap, small.overflow = True, "ellipsis"
+                self.console.print(_pad(small))
+            self._nudge()
+            return
         if text:
             if not tier:
                 try:
