@@ -23,6 +23,7 @@ from webbee.frames import (
     render_foreign_frame,
     render_todo_frame,
     show_thinking,
+    show_thinking_live,
     stop_report_lines,
 )
 
@@ -757,6 +758,9 @@ class AgentSession:
                     # The selected tier belongs to THIS running AgentSession: passing it keeps the visible
                     # reasoning colour in lock-step with the model that produced the frame.
                     show_thinking(sink, _tag, _progress_text(frame), self.model_tier, frame)
+
+                elif ftype == "thinking_delta":  # the thought as it is being written -> the live line
+                    show_thinking_live(sink, _tag, frame)
 
                 elif ftype == "progress":  # P2 — dual-reads llm_text (v2) / text (legacy)
                     _text = _progress_text(frame)

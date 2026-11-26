@@ -65,6 +65,22 @@ def thinking_parts(frame: dict, tag: str = "") -> dict:
     return {"kind": kind, "say": tag + say if say else "", "lines": lines if isinstance(lines, dict) else {}}
 
 
+def show_thinking_live(sink, tag: str, frame: dict) -> None:
+    """A thought while it is still being written (frame ``thinking_delta``): ``say`` holds the words for the person
+    written SO FAR, whole each time -- a frame lost or repeated on a reconnect changes nothing. It is shown on the
+    live line only; the finished thought comes as the ``thinking`` frame and is the one kept in the transcript. A
+    provider's own reasoning is not shown, as it is not when finished; a sink with no live line shows nothing."""
+    live = getattr(sink, "thinking_live", None)
+    if live is None or not isinstance(frame, dict) or frame.get("kind") == "native":
+        return
+    say = str(frame.get("say") or "")
+    if say:
+        try:
+            live(tag + say)
+        except Exception:
+            pass
+
+
 def show_thinking(sink, tag: str, text: str, tier: str, frame: dict) -> None:
     """Hand a thinking frame to the sink: by its parts when the frame names them and the sink can take them -- the
     words for the person large, the step's protocol small, a provider's own reasoning not at all; whole, as

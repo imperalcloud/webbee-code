@@ -635,6 +635,18 @@ class RichSink:
         self._current = f"{tool} {str(arg)[:trunc(w, 0.3, 40)]}".strip()
         self._nudge()  # the completed line is printed in tool_result
 
+    def thinking_live(self, say: str) -> None:
+        """The words she is writing now, before the thought is finished: the newest of them on the live line. The
+        finished thought is printed by ``thinking``; nothing is printed here."""
+        now = self._clock()
+        if now - getattr(self, "_live_at", 0.0) < 0.1:
+            return
+        self._live_at = now
+        text = " ".join(_clean(say).split())
+        room = trunc(self.console.width, 0.7, 70)
+        self._current = "💭 " + (text if len(text) <= room else "…" + text[-(room - 1):])
+        self._nudge()
+
     def tool_output(self, line: str) -> None:
         """The newest line a running local command printed: shown on the live line beside the command, so a long
         run is seen moving. Nothing is printed into the transcript -- the result line still says how it ended."""
@@ -918,6 +930,8 @@ class RichSink:
             self._nudge()
 
     def thinking(self, text: str, tier: str = "", say: str = "", kind: str = "", lines=None) -> None:
+        if self._current.startswith("💭 "):
+            self._current = ""            # the thought is finished: its live line gives way to the printed block
         # System-driven reasoning as a distinct 💭 block — visually colored in the active
         # model's hue family so the user immediately perceives which model is reasoning.
         # A frame that names its parts (kind): the words for the person (say) are the block; the step's protocol

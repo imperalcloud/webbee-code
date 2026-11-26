@@ -1151,3 +1151,29 @@ def test_a_running_commands_newest_line_is_on_the_live_line_and_not_in_the_trans
     now[0] += 0.2
     sink.tool_output("tests/test_b.py ..")
     assert "test_b.py" in sink.status()["current"] and buf.getvalue() == printed
+
+
+def test_a_thought_being_written_is_on_the_live_line_and_the_finished_one_takes_its_place():
+    import io
+    from types import SimpleNamespace
+    from rich.console import Console
+    from webbee.frames import show_thinking_live
+    from webbee.render import RichSink
+    buf = io.StringIO()
+    now = [10.0]
+    sink = RichSink(Console(file=buf, width=100, force_terminal=False), live_enabled=False, clock=lambda: now[0])
+    printed = buf.getvalue()
+    show_thinking_live(sink, "", {"type": "thinking_delta", "kind": "step", "say": "Читаю файл"})
+    assert sink.status()["current"] == "💭 Читаю файл" and buf.getvalue() == printed
+    now[0] += 1
+    long = "слово " * 60
+    show_thinking_live(sink, "", {"type": "thinking_delta", "kind": "step", "say": long})
+    cur = sink.status()["current"]
+    assert cur.startswith("💭 …") and cur.endswith("слово") and len(cur) < 100      # the newest words, not the oldest
+    now[0] += 1
+    show_thinking_live(sink, "", {"type": "thinking_delta", "kind": "native", "say": "hidden"})
+    show_thinking_live(sink, "", {"type": "thinking_delta", "kind": "step", "say": ""})
+    assert sink.status()["current"] == cur                       # a provider's reasoning and an empty piece: nothing
+    sink.thinking("whole", say="Читаю файл целиком.", kind="step", lines={})
+    assert sink.status()["current"] == "" and "Читаю файл целиком." in buf.getvalue()
+    show_thinking_live(SimpleNamespace(), "", {"kind": "step", "say": "x"})      # a sink with no live line
