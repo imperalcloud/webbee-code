@@ -1904,6 +1904,9 @@ def test_a_thinking_frame_is_handed_over_by_its_parts_whole_or_as_progress():
     assert a.got == [(frame["text"], "ultrasmart", "Loading the tool.", "step", {"learned": "a."})]
     assert b.got == [(frame["text"], "ultrasmart")]          # a sink that knows no parts: whole, as before
     assert c.got == [frame["text"]] and d.got == [frame["text"]]
+    quiet = NoThinking()            # review-k21-code-v1.md: a plain sink must not print a provider's own reasoning
+    show_thinking(quiet, "", "a provider's own reasoning", "webbeesmart", {"type": "thinking", "kind": "native", "say": ""})
+    assert quiet.got == []
     old = Parts()
     show_thinking(old, "", "an old frame", "webbeesmart", {"type": "thinking", "text": "an old frame"})
     assert old.got == [("an old frame", "webbeesmart", "", "", None)]

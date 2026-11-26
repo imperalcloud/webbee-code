@@ -72,6 +72,8 @@ def show_thinking(sink, tag: str, text: str, tier: str, frame: dict) -> None:
     shown = tag + text if text else ""
     thinking = getattr(sink, "thinking", None)
     if thinking is None:
+        if isinstance(frame, dict) and frame.get("kind") == "native":
+            return                       # a provider's own reasoning is drawn nowhere, a plain sink included
         sink.progress(shown)
         return
     try:
@@ -217,8 +219,9 @@ def _foreign_note(frame: dict) -> str:
     if ftype == "confirm_request":
         return f"approval requested: {tool}" if tool else "approval requested"
     if ftype == "thinking":
-        # a frame that names its parts: the words for the person, or nothing for a step that said none aloud and
-        # for a provider's own reasoning; a frame that names none (an older kernel) is shown whole, as before
+        # a frame that names its parts: the words for the person; the whole text for a step that wrote none
+        # (so the step does not vanish from the note); nothing for a provider's own reasoning. A frame that names
+        # no parts (an older kernel) is shown whole, as before
         parts = thinking_parts(frame)
         if parts:
             return "" if parts["kind"] == "native" else (parts["say"].strip() or _progress_text(frame).strip())
