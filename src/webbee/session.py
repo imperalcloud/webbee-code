@@ -64,7 +64,14 @@ _KERNEL_QUIET_END_S = 30 * 60.0
 # code took any 4xx as delivered, so the kernel waited out its tool-wait
 # expiry (up to ~65 min). A result is cut to this before it is posted, with an
 # honest note of what was cut.
-_RESULT_MAX_BYTES = 4 * 1024 * 1024
+# The bound is the door's own (measured 2026-11-27: the gateway takes a body of 1 MiB -- nginx
+# `client_max_body_size 1m` -- and a view_image result of 1 153 322 bytes came back 413 while this bound stood at
+# 4 MB, so the cut never ran). A result is also one workflow signal, kept in the run's history: it stays small.
+_RESULT_MAX_BYTES = 960 * 1024
+
+
+def _size_words(n: int) -> str:
+    return f"{n // (1024 * 1024)} MB" if n >= 1024 * 1024 else f"{n // 1024} KB"
 
 # Executed-result record on disk (2026-10-30 review H6): attach() makes the
 # kernel re-send the pending request, and the in-memory `seen` map is new for
@@ -107,7 +114,7 @@ def _cap_result(out: dict, limit: int = _RESULT_MAX_BYTES) -> dict:
         if key == "image_data":
             res["native_vision"] = False
             notes.append(f"[image not sent: {size} bytes of image data is over the "
-                         f"{limit // (1024 * 1024)} MB a result can carry -- shrink or crop it and view it again]")
+                         f"{_size_words(limit)} a result can carry -- shrink or crop it and view it again]")
         else:
             notes.append(f"[{key} not sent: {size} bytes]")
     content = str(res.get("content", ""))
@@ -117,7 +124,7 @@ def _cap_result(out: dict, limit: int = _RESULT_MAX_BYTES) -> dict:
         return capped
     content_bytes = len(content.encode("utf-8"))
     cut_note = (f"\n… [result cut: {content_bytes} bytes of output, only the start is sent -- "
-                f"a result can carry at most {limit // (1024 * 1024)} MB]")
+                f"a result can carry at most {_size_words(limit)}]")
     rest = {**res, "content": ""}
     budget = limit - _json_bytes({"req_id": out.get("req_id"), "result": rest}) - _json_bytes(note + cut_note) - 1024
     if budget < limit // 2:     # other big fields (a huge diff) -- send only ok + the cut text

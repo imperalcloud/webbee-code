@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.24
+
+* A result fits the door that takes it. The gateway takes a body of 1 MB while a result was cut at 4 MB, so a
+  bigger one (an image of 860 KB as base64) came back 413 and never reached the model. The bound is now the door's
+  (960 KB), and `view_image` sends an image over 600 KB smaller - whole, as JPEG, with its shown size named.
+  Pillow is a dependency now.
+
 ## 0.7.23
 
 * The terminal writes down where it stands when it stops answering. A watch outside its event loop notes two facts -

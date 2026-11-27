@@ -1,6 +1,6 @@
 [project]
 name = "webbee"
-version = "0.7.23"
+version = "0.7.24"
 description = "Webbee 🐝 — the Imperal Cloud coding agent in your terminal"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -20,6 +20,8 @@ dependencies = [
     'httpx-sse>=0.4; python_version >= "3.10"',
     'rich>=13.7; python_version >= "3.10"',
     'prompt_toolkit>=3; python_version >= "3.10"',
+    # an image is shown to the model within what one result can carry (tools.shrink_image) and drawn in the terminal
+    'pillow>=10; python_version >= "3.10"',
     # --- code intelligence (CPC): the symbol/graph index is NOT optional ---
     # Without these the indexer silently yields 0 symbols (boot.py degrades to
     # intel=None), so repo_profile / graph_slice / search_code / impact_of_change

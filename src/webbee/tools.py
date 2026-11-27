@@ -1397,11 +1397,18 @@ class LocalToolExecutor:
         try:
             with open(p, "rb") as f:
                 raw_bytes = f.read()
-            b64_img = base64.b64encode(raw_bytes).decode("ascii")
         except Exception as e:
             return {"ok": False, "content": f"failed to read image: {e}"}
+        # an image over what one result can carry is sent smaller, and said so (2026-11-27: a cover of 864 KB came
+        # back 413 -- the model then shrank it by hand with a script)
+        shrunk = ""
+        if len(raw_bytes) > IMAGE_MAX_BYTES:
+            small = shrink_image(raw_bytes, IMAGE_MAX_BYTES)
+            if small is not None:
+                raw_bytes, mime, shrunk = small[0], "image/jpeg", f" · shown as {small[1]}x{small[2]} JPEG"
+        b64_img = base64.b64encode(raw_bytes).decode("ascii")
 
-        head = f"⟦ {rel} · {human_size(size)} · {mime or 'image'} ⟧"
+        head = f"⟦ {rel} · {human_size(size)} · {mime or 'image'}{shrunk} ⟧"
 
         fallback_text = ""
         if self.client_factory is not None:
@@ -1422,6 +1429,38 @@ class LocalToolExecutor:
             "content": f"{head}\n[Native Vision Image Payload: {rel} ({human_size(size)}, {mime})]" + (f"\n\nOCR / Text Context:\n{fallback_text}" if fallback_text else "")
         }
         return out
+
+
+# What one image may weigh in a result: base64 grows it by a third, and the result door takes 960 KB in all
+# (session._RESULT_MAX_BYTES) -- the rest is left for the text beside it.
+IMAGE_MAX_BYTES = 600 * 1024
+
+
+def shrink_image(raw: bytes, limit: int = IMAGE_MAX_BYTES):
+    """``(jpeg_bytes, width, height)`` of the image made to fit ``limit``, or None when it cannot be done here
+    (no Pillow, not an image it reads). The whole picture is kept: first the quality goes down, then the size."""
+    try:
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(raw))
+        im.load()
+        if im.mode not in ("RGB", "L"):
+            flat = Image.new("RGB", im.size, (255, 255, 255))
+            rgba = im.convert("RGBA")
+            flat.paste(rgba, mask=rgba.split()[3])
+            im = flat
+        for _ in range(8):
+            for quality in (85, 70):
+                buf = io.BytesIO()
+                im.save(buf, format="JPEG", quality=quality, optimize=True)
+                if buf.tell() <= limit:
+                    return buf.getvalue(), im.size[0], im.size[1]
+            if min(im.size) < 64:
+                return None
+            im = im.resize((max(1, im.size[0] * 3 // 4), max(1, im.size[1] * 3 // 4)))
+        return None
+    except Exception:
+        return None
 
 
 # ── code graph everywhere (plan 3 Task 5): the user's own SSH feeds the vault's graph ───────────────
