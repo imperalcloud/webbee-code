@@ -341,3 +341,127 @@ def test_an_agents_message_that_starts_an_idle_terminals_turn_is_never_shown_as_
     assert (kind, iid, whole, who) == ("agent", "agent.m9", body, "another session") and len(first) == 200
     _show_remote_line(s, "telegram", "deploy it", "t1")
     assert s.calls[1] == ("foreign", "telegram", "user", "deploy it")          # the person's own words stay theirs
+
+
+def test_the_status_line_offers_the_background_only_when_it_can_really_be_done():
+    """The owner, 2026-11-27: "a simple, clear instruction when it can in fact be done -- neat"."""
+    from webbee.tui import BACKGROUND_HINT, build_toolbar
+
+    def text(**kw):
+        return "".join(t for _, t in build_toolbar("default", 1000, 10, busy=True, current="bash make test",
+                                                   elapsed=12.0, tools=2, **kw))
+    plain, offered = text(), text(can_background=True)
+    assert "Esc to stop" in plain and "Ctrl+Z" not in plain
+    assert offered.endswith(BACKGROUND_HINT) and "Esc to stop" not in offered      # one hint at a time
+    style = [s for s, t in build_toolbar("default", 1000, 10, busy=True, current="bash make test", elapsed=12.0,
+                                         tools=2, can_background=True) if t == BACKGROUND_HINT]
+    assert style == ["class:tb.working"]                                           # in the accent: it is seen
+    narrow = text(can_background=True, width=110)
+    assert BACKGROUND_HINT in narrow and "credits" not in narrow                   # the figures go first, not the hint
+    idle = "".join(t for _, t in build_toolbar("default", 1000, 10, can_background=True))
+    assert "Ctrl+Z" not in idle                                                    # nothing runs: nothing is offered
+
+
+# ---- the background strip above the input ---------------------------------------------------------------------------
+
+def _rows(now):
+    return [{"n": 1, "id": "j1", "title": "old build", "state": "done", "exit_code": None, "started": now - 5000,
+             "ended_at": now - 4000},
+            {"n": 2, "id": "j2", "title": "npm run build", "state": "failed", "exit_code": 2, "started": now - 300,
+             "ended_at": now - 60},
+            {"n": 3, "id": "j3", "title": "make test", "command": "make test", "state": "running", "exit_code": None,
+             "started": now - 134, "ended_at": 0.0}]
+
+
+def test_the_strip_takes_no_room_without_jobs_and_one_line_a_job_with_them():
+    from webbee.jobs_panel import jobs_fragments, jobs_height, shown
+    now = 1_000_000.0
+    assert jobs_height([], now=now) == 0 and jobs_fragments([], now=now) == []
+    rows = _rows(now)
+    assert [r["n"] for r in shown(rows, now)] == [2, 3]                  # a job that ended long ago has left
+    assert jobs_height(rows, now=now) == 3 and jobs_height(rows, collapsed=True, now=now) == 1
+    assert jobs_height(rows[:1], now=now) == 0                           # only an old one: the strip is gone
+    many = [dict(rows[2], n=i, id=f"j{i}") for i in range(1, 8)]
+    assert jobs_height(many, now=now) == 1 + 3 + 1                       # the head, three rows, "+4 more"
+    text = "".join(f[1] for f in jobs_fragments(many, now=now))
+    assert "… +4 more · /jobs lists them all" in text and "j7" in text and "j1 " not in text
+
+
+def test_the_strip_says_each_job_plainly_and_a_click_acts_on_that_job():
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.data_structures import Point
+    from webbee.jobs_panel import jobs_fragments
+    now = 1_000_000.0
+    opened, ended, toggled = [], [], []
+    frags = jobs_fragments(_rows(now), width=60, toggle=lambda: toggled.append(1), open_job=opened.append,
+                           end_job=ended.append, now=now)
+    text = "".join(f[1] for f in frags)
+    assert text.startswith(" ⚙ background (1 running) ▾ · click a job for its output · ✕ ends it")
+    assert "\n   j2 · failed (exit 2) · npm run build" in text and "\n   j3 · running 2:14 · make test" in text
+    assert all(len(line) <= 60 for line in text.split("\n")[1:])          # one line a job, inside the width
+    up = MouseEvent(Point(0, 0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    down = MouseEvent(Point(0, 0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    by_text = {f[1].strip(): f for f in frags if len(f) == 3}
+    row3 = next(f for t, f in by_text.items() if t.startswith("j3"))
+    assert row3[2](down) is NotImplemented and opened == []               # a press is not a click
+    row3[2](up)
+    next(f for t, f in by_text.items() if t.startswith("j2"))[2](up)
+    assert opened == [3, 2]
+    ends = [f for f in frags if f[1] == " ✕"]
+    assert len(ends) == 1 and ends[0][0] == "class:jp.end"                # only a running job can be ended
+    ends[0][2](up)
+    assert ended == [3]
+    frags[0][2](up)
+    assert toggled == [1]
+    folded = jobs_fragments(_rows(now), collapsed=True, toggle=lambda: None, now=now)
+    assert [f[1] for f in folded] == [" ⚙ background (1 running) ▸"]
+    plain = jobs_fragments(_rows(now)[:2], now=now)                        # nothing runs: the head says so
+    assert plain[0][1] == " ⚙ background (1 ended)" and all(len(f) == 2 for f in plain)
+
+
+def test_a_drag_released_on_the_strip_is_not_a_click():
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from prompt_toolkit.data_structures import Point
+    from webbee.jobs_panel import jobs_fragments
+    now, opened = 1_000_000.0, []
+    frags = jobs_fragments(_rows(now), open_job=opened.append, forward=lambda ev: True, now=now)
+    up = MouseEvent(Point(0, 0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    for f in frags:
+        if len(f) == 3:
+            f[2](up)
+    assert opened == []
+
+
+def test_the_watch_hands_the_strip_every_job_with_its_state(home):
+    held = _held("sleep 30", home)
+    jobs.link(held, SID, 2, "nap")
+    jobs.release(held, 2)
+    done = _held("true", home)
+    jobs.link(done, SID, 1, "quick")
+    jobs.release(done, 1)
+    done.proc.wait(10)
+    jobs.mark_reported(done.folder, "done")
+    seen, clock = [], [0.0]
+
+    async def post(sid, n, out):
+        return {"ok": True, "state": "running", "ended": False, "already": False, "line": ""}
+
+    async def sid():
+        return SID
+
+    async def run():
+        left = [2]
+
+        async def sleep(_):
+            left[0] -= 1
+            if left[0] < 0:
+                raise asyncio.CancelledError
+            clock[0] += 5.0
+        with pytest.raises(asyncio.CancelledError):
+            await jobwatch.watch(session_id=sid, post=post, on_rows=seen.append, home=home, _sleep=sleep,
+                                 _monotonic=lambda: clock[0])
+    asyncio.run(run())
+    rows = seen[-1]
+    assert [(r["n"], r["id"], r["title"], r["state"]) for r in rows] == [(1, "j1", "quick", "done"), (2, "j2", "nap", "running")]
+    assert rows[0]["ended_at"] > 0 and rows[1]["ended_at"] == 0.0 and rows[1]["started"] > 0
+    jobs.cancel(SID, 2, home)

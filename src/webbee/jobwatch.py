@@ -31,7 +31,7 @@ def due(prev, state: str, now: float, heartbeat: float = HEARTBEAT_S) -> bool:
     return prev is None or prev[0] != state or now - prev[1] >= heartbeat
 
 
-async def watch(*, session_id, post, on_line=None, on_count=None, tick: float = TICK_S,
+async def watch(*, session_id, post, on_line=None, on_count=None, on_rows=None, tick: float = TICK_S,
                 heartbeat: float = HEARTBEAT_S,
                 home: str = "", _monotonic=None, _sleep=None) -> None:
     """Run until cancelled. Seams, all given by the terminal's wiring:
@@ -39,7 +39,9 @@ async def watch(*, session_id, post, on_line=None, on_count=None, tick: float = 
       * post(sid, n, stdout) -- async; sends one report and returns the kernel's answer
         (``{ok, state, ended, already, line}``) or None when it did not get through (told again at the next tick);
       * on_line(text) -- sync; shows the person a job's line when the kernel took its end;
-      * on_count(n) -- sync; how many of the session's jobs run on this machine now (the toolbar's number).
+      * on_count(n) -- sync; how many of the session's jobs run on this machine now (the toolbar's number);
+      * on_rows(rows) -- sync; every job of the session on this machine as the background strip shows it
+        (``{n, id, title, command, state, exit_code, started, ended_at}``), read at this look.
     Fail-soft: any error skips the tick; the jobs are on disk and the next tick reads them again."""
     if not jobs.supported():
         return
@@ -58,14 +60,19 @@ async def watch(*, session_id, post, on_line=None, on_count=None, tick: float = 
             sid = str(await session_id() or "")
             if not sid:
                 continue
-            running = 0
+            running, rows = 0, []
             for job in await asyncio.to_thread(jobs.mine, sid, home):
+                row = {k: job[k] for k in ("n", "id", "title", "command", "started")}
                 if job["reported"]:
+                    rows.append({**row, "state": job["reported"], "exit_code": None, "ended_at": job["reported_at"]})
                     continue
                 key = (sid, job["n"])
                 out = await asyncio.to_thread(jobs.poll, sid, job["n"], home)
-                state = sj.read_poll(out)["state"]
+                got = sj.read_poll(out)
+                state = got["state"]
                 running += state == sj.RUNNING
+                rows.append({**row, "state": state or sj.RUNNING, "exit_code": got["exit_code"],
+                             "ended_at": time.time() if state in sj.ENDED else 0.0})
                 if not state or retry.get(key, 0.0) > now() or not due(told.get(key), state, now(), heartbeat):
                     continue
                 answer = await post(sid, job["n"], out)
@@ -86,6 +93,8 @@ async def watch(*, session_id, post, on_line=None, on_count=None, tick: float = 
                     jobs.mark_reported(job["path"], "unknown")
             if on_count is not None:
                 on_count(running)
+            if on_rows is not None:
+                on_rows(rows)
         except asyncio.CancelledError:
             raise
         except Exception:

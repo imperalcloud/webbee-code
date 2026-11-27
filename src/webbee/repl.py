@@ -1684,10 +1684,33 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         for line in said or ["Nothing is running in front: there is no command to send to the background."]:
             _say(slot, "⚙ " + line)
 
+    def _waited_s(slot: SessionSlot) -> float:
+        """How long the oldest command this tab's turn waits for has run; 0 when it waits for none."""
+        executor = getattr(slot.agent, "_executor", None)
+        held = executor.held_running() if executor is not None and hasattr(executor, "held_running") else []
+        return max(0.0, time.time() - held[0].started) if held else 0.0
+
     job_keys = {
+        "waited_s": _waited_s,
         "background": lambda slot: asyncio.ensure_future(_to_background(slot)),
         "jobs": lambda slot: asyncio.ensure_future(_handle("/jobs", slot)),
+        "open": lambda slot, n: asyncio.ensure_future(_handle(f"/job {int(n)}", slot)),
+        "end": lambda slot, n: asyncio.ensure_future(_handle(f"/job {int(n)} cancel", slot)),
     }
+
+    def _show_jobs(slot: SessionSlot, rows: list) -> None:
+        """The watch's newest look at the slot's jobs goes to the background strip; the screen is redrawn when
+        what the strip shows changed (a job began, ended, or left it)."""
+        seen = [(r.get("n"), r.get("state")) for r in slot.jobs_rows]
+        slot.jobs_rows = list(rows)
+        if seen != [(r.get("n"), r.get("state")) for r in rows]:
+            try:
+                from prompt_toolkit.application import get_app_or_none
+                app = get_app_or_none()
+                if app is not None:
+                    app.invalidate()
+            except Exception:
+                pass
 
     def _spawn_slot_jobwatch(slot: SessionSlot) -> None:
         """One watch per session slot over its jobs on this machine (webbee.jobwatch): it tells the kernel what
@@ -1700,7 +1723,8 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             session_id=lambda: _slot_session_id(slot),
             post=lambda sid, n, out: slot.agent.report_job(sid, n, out),
             on_line=lambda text: _say(slot, "⚙ " + text),
-            on_count=lambda n: setattr(slot, "jobs_running", int(n)))))
+            on_count=lambda n: setattr(slot, "jobs_running", int(n)),
+            on_rows=lambda rows: _show_jobs(slot, rows))))
 
     async def _run_turn(slot: SessionSlot, line: str, surface: str = "", steer_iid: str = "") -> None:
         """ONE agent turn -- the typed-line path (FIX1: slot-explicit

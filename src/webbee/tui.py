@@ -25,6 +25,7 @@ from prompt_toolkit.layout.dimension import Dimension
 
 from webbee import __version__, sizing
 from webbee.output_pane import OutputPane  # noqa: F401 — re-exported (webbee.tui.OutputPane)
+from webbee.jobs_panel import JP_MAX_ITEMS, jobs_fragments, jobs_height
 from webbee.queue_panel import (drop_item, one_line, pull_item, queue_fragments,
                                  queue_height)
 from webbee.render import _fmt_tokens
@@ -146,6 +147,11 @@ _STYLE_DICT = {
     "tab.new": "#e8a317 bold",            # new tab chip
     "tab.new.hover": "bg:#e8a317 #000000 bold",    # new tab hover
     "tab.sep": "#3a3a3a",                # the │ between tabs
+    "jp.header": "#e8a317",              # ⚙ background -- the strip's head, in the accent
+    "jp.item": "#8a8a8a",                # an ended job, the hint
+    "jp.live": "#00afd7",                # a running job
+    "jp.bad": "#d75f5f",                 # one that failed or was lost
+    "jp.end": "#af0000 bold",            # the ✕ that ends a running job
     "tb.dim": "#8a8a8a",                 # idle chrome
     "tb.spin": "#e8a317 bold",           # animated spinner
     "tb.working": "#e8a317",             # 'working'
@@ -347,11 +353,16 @@ def toolbar_tip(now: "float | None" = None, every: float = 8.0) -> str:
     return TOOLBAR_TIPS[int((_t.monotonic() if now is None else now) // every) % len(TOOLBAR_TIPS)]
 
 
+BACKGROUND_HINT = "   ·   Ctrl+Z ⇢ run it in the background"
+BACKGROUND_HINT_AFTER_S = 8.0      # a command waited for this long is worth sending away; a quick one is not
+
+
 def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False, queued: int = 0,
                   reconnecting: int = 0, width: int = 0, live: str = "",
-                  tier: str = "", tier_now: "float | None" = None, jobs: int = 0) -> list:
+                  tier: str = "", tier_now: "float | None" = None, jobs: int = 0,
+                  can_background: bool = False) -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
     text (per-segment styled). Four states: consent (awaiting a reply),
     reconnecting (the stream transport is down mid-turn — honest, not a fake
@@ -392,9 +403,15 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
         # the terminal's edge, and the version badge keeps its reserved columns.
         tails = [f"   ·   {took} · {n} · {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits",
                  f"   ·   {took} · {n}", f"   ·   {took}"]
-        hint = "   ·   Esc to stop"
+        # A command she has been waiting for long enough to be worth it can go to the background -- said only
+        # while that is really so (a waited command runs, this system has jobs), in the hint's own place and in
+        # the accent, so it is seen the moment it applies (the owner, 2026-11-27: "a simple, clear instruction
+        # right when it can be done -- neat").
+        hint = BACKGROUND_HINT if can_background else "   ·   Esc to stop"
         used = sum(len(t) for _, t in head) + sum(len(t) for _, t in q)
-        options = [(tails[0], hint)] + [(t, "") for t in tails]
+        # the background hint outlives the figures on a narrow terminal: it is the one thing the person can act on
+        options = ([(tails[0], hint)] + ([(t, hint) for t in tails[1:]] if can_background else [])
+                   + [(t, "") for t in tails])
         tail, tip = options[-1]
         least = min(len(doing), 24)                     # what of the action's text is kept before figures go
         for i, (t, h) in enumerate(options):
@@ -406,7 +423,7 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
             doing = (doing[:max(1, room - 1)] + "…") if room > 1 else doing[:max(0, room)]
         frags = head + [("class:tb.action", doing), ("class:tb.dim", tail)] + q
         if tip:
-            frags.append(("class:tb.dim", tip))
+            frags.append(("class:tb.working" if can_background else "class:tb.dim", tip))
         return frags
     # the spend says less before it says nothing: a narrow terminal keeps the figures and drops the words
     spends = [f"   ·   {_fmt_tokens(tokens)} tok · {_fmt_tokens(credits)} credits this session",
@@ -1333,6 +1350,14 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
     # background": the command the tab's turn is waiting for runs on as a job. Ctrl+O lists the tab's jobs.
     _has_jobs = Condition(lambda: bool(job_keys) and _a().kind != "home")
 
+    def _can_background(slot) -> bool:
+        """A command this tab is waiting for has run long enough to be worth sending to the background."""
+        waited = (job_keys or {}).get("waited_s")
+        try:
+            return bool(waited) and float(waited(slot)) >= BACKGROUND_HINT_AFTER_S
+        except Exception:
+            return False
+
     @kb.add("c-z", filter=_has_jobs)
     def _to_background_key(event):
         job_keys["background"](_a())
@@ -1768,7 +1793,8 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
                                       width=_toolbar_fit_width(),
                                       live=str((live or {}).get("text") or ""),
                                       tier=getattr(slot, "model_tier", "") or "",
-                                      jobs=int(getattr(slot, "jobs_running", 0) or 0))
+                                      jobs=int(getattr(slot, "jobs_running", 0) or 0),
+                                      can_background=_can_background(slot))
             else:
                 # Home has no sink of its OWN, but it is the dock's summary
                 # page: show the SESSION TOTAL across every open tab (0.3.36)
@@ -2143,6 +2169,34 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
                        always_hide_cursor=True, wrap_lines=False),
         filter=Condition(lambda: bool(_sink_attr("current_todos", []))))
 
+    def _toggle_jobs():
+        slot = _a()
+        slot.jp_ui["collapsed"] = not slot.jp_ui["collapsed"]
+        get_app().invalidate()
+
+    def _jobs_rows():
+        return getattr(_a(), "jobs_rows", None) or []
+
+    def _jobs_fragments():
+        # Live like the queue strip: re-made every redraw from the active slot's own rows (webbee.jobwatch fills
+        # them); a click on a row prints that job's output, its ✕ ends it -- both through the same commands the
+        # person can type.
+        slot = _a()
+        act = job_keys or {}
+        return jobs_fragments(
+            _jobs_rows(), width=_panel_size(JP_MAX_ITEMS)[0], collapsed=slot.jp_ui["collapsed"],
+            toggle=_toggle_jobs, forward=_pane().forward_mouse,
+            open_job=(lambda n: act["open"](slot, n)) if act.get("open") else None,
+            end_job=(lambda n: act["end"](slot, n)) if act.get("end") else None)
+
+    # The background strip -- nearest the input (a job is what the person may act on next), under the queue; zero
+    # rows while the session has no job to show, so the dock without jobs is unchanged.
+    jobs_panel = ConditionalContainer(
+        content=Window(FormattedTextControl(_jobs_fragments, focusable=False),
+                       height=lambda: jobs_height(_jobs_rows(), getattr(_a(), "jp_ui", {}).get("collapsed", False)),
+                       always_hide_cursor=True, wrap_lines=False),
+        filter=Condition(lambda: _a().kind != "home" and jobs_height(_jobs_rows()) > 0))
+
     def _line_prefix(line_no, wrap_count):
         # 0.3.36: with multi-line prompts, line 2+ gets a dim continuation
         # gutter so it reads as ONE message still being composed, never as
@@ -2442,7 +2496,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
 
     modal_container = DynamicContainer(_get_active_modal)
 
-    root = HSplit([tab_bar, tab_bar_spacer, pane_container, todo_panel, queue_panel,
+    root = HSplit([tab_bar, tab_bar_spacer, pane_container, todo_panel, queue_panel, jobs_panel,
                    modal_container, Frame(input_win), toolbar])
     style = Style.from_dict(_STYLE_DICT)
     app = Application(layout=Layout(root, focused_element=input_win), key_bindings=kb,

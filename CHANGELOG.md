@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.33
+
+* The background strip. A narrow panel above the input shows the session's jobs on this machine: each running
+  one with how long it has run, and one that ended in the last ten minutes. A click on a job prints its output
+  so far, the ✕ of a running one ends it, a click on the head folds the strip to one line. It takes no room at
+  all while the session has no job.
+* The status line offers the background when it can really be done: a command Webbee has waited for longer than
+  eight seconds shows "Ctrl+Z ⇢ run it in the background" in the hint's place.
+
 ## 0.7.32
 
 * A step says what it is about. A call that names no file, pattern or command - a read of a stored output, a

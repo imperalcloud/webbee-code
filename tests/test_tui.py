@@ -3531,9 +3531,16 @@ def test_dock_mounts_sticky_todo_panel_above_queue_panel():
                 await asyncio.sleep(0.05)
                 conds = [c for c in get_app().layout.container.children
                          if isinstance(c, ConditionalContainer)]
-                assert len(conds) == 2
-                todo_cc, queue_cc = conds                # todo mounts ABOVE queue
-                assert not todo_cc.filter() and not queue_cc.filter()   # empty dock
+                # 2026-11-27: the background strip is the third, nearest the input -- zero rows without a job
+                assert len(conds) == 3
+                todo_cc, queue_cc, jobs_cc = conds       # todo mounts ABOVE queue, the jobs strip under both
+                assert not todo_cc.filter() and not queue_cc.filter() and not jobs_cc.filter()   # empty dock
+                import time as _time
+                slots.active().jobs_rows = [{"n": 1, "id": "j1", "title": "make test", "state": "running",
+                                             "started": _time.time() - 5, "ended_at": 0.0}]
+                assert jobs_cc.filter() and jobs_cc.content.height() == 2     # the head and the job's row
+                slots.active().jobs_rows = []
+                assert not jobs_cc.filter()
                 todos.append({"content": "fix the bug", "status": "in_progress"})
                 assert todo_cc.filter() and not queue_cc.filter()       # todo only
                 assert todo_cc.content.height() == 2     # header + the ▶ row

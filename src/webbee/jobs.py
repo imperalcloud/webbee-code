@@ -172,10 +172,15 @@ def mine(session_id: str, home: str = "") -> list:
             started = os.stat(os.path.join(path, "pid")).st_mtime
         except OSError:
             started = 0.0
+        try:
+            told_at = os.stat(os.path.join(path, REPORTED)).st_mtime
+        except OSError:
+            told_at = 0.0
         out.append({"n": got[1], "id": sj.job_id(got[1]), "path": path,
                     "title": _read(os.path.join(path, "title"), 400).strip(),
                     "command": _read(os.path.join(path, "cmd"), 2000).strip(),
-                    "reported": _read(os.path.join(path, REPORTED), 40).strip(), "started": started})
+                    "reported": _read(os.path.join(path, REPORTED), 40).strip(), "started": started,
+                    "reported_at": told_at})
     return sorted(out, key=lambda j: j["n"])
 
 
