@@ -15,6 +15,7 @@ _HELP = """Commands:
   /mode [default|plan|autopilot]   consent mode (no arg — show current)
   /model [webbeesmart|supersmart|ultrasmart]   coding brain tier (no arg — show current)
   /cost  (=/usage)   tokens + credits this session
+  /facts [on|off]    show the kernel's line of facts under each answer (off by default; no arg — show current)
   /status            cwd · git · surface · tokens · version
   /new [path]        open a new tab — a session in path (default: cwd)
   /tab N             switch to tab N (see /tabs for the numbers)
@@ -158,6 +159,12 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
                            message=(f"Queued ({len(ctx.queued)}) — runs in order, "
                                     f"one per finished turn:\n{lines}\n"
                                     f"  /queue drop <n> · /queue edit <n> · /queue clear"))
+    if cmd == "/facts":
+        want = args[0].lower() if args else ""
+        if want not in ("", "on", "off"):
+            return SlashResult(handled=True, action="facts", arg="?",
+                               message="Usage: /facts on | off  (no argument shows the current choice)")
+        return SlashResult(handled=True, action="facts", arg=want)
     if cmd == "/jobs":
         return SlashResult(handled=True, action="jobs")
     if cmd == "/job":

@@ -1,6 +1,6 @@
 [project]
 name = "webbee"
-version = "0.7.34"
+version = "0.7.35"
 description = "Webbee 🐝 — the Imperal Cloud coding agent in your terminal"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -14,7 +14,7 @@ dependencies = [
     # 3.7 fetches it with uv's own installer.
     'uv>=0.4; python_version >= "3.8" and python_version < "3.10"',
     'imperal-mcp>=0.9.24; python_version >= "3.10"',   # raised to the newest at each release
-    'imperal-sdk[universal-index]>=6.13.0; python_version >= "3.10"',
+    'imperal-sdk[universal-index]>=6.14.0; python_version >= "3.10"',
     'asyncssh>=2.14; python_version >= "3.10"',
     'httpx>=0.27; python_version >= "3.10"',
     'httpx-sse>=0.4; python_version >= "3.10"',

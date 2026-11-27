@@ -509,3 +509,21 @@ def test_the_session_hands_the_executor_a_way_to_keep_a_timed_out_command(home, 
     assert second.get("timed_out") is True                         # the kernel could not be reached: stopped
     assert agent.keep_on_timeout(None)(object()) is False          # no loop: nothing is promised
     jobs.cancel(SID, 5, home)
+
+
+def test_the_kernels_facts_under_an_answer_are_the_persons_choice_off_until_switched_on(tmp_path, monkeypatch):
+    """The owner, 2026-11-27: "kernel facts in the terminal -- a setting, off by default, that can be switched on"."""
+    from webbee import prefs
+    monkeypatch.setattr(prefs, "_CACHE_DIR", str(tmp_path / "cache"))
+    assert prefs.kernel_notes() is False                                # never set: off
+    assert prefs.set_kernel_notes(True) and prefs.kernel_notes() is True
+    assert prefs.set_kernel_notes(False) and prefs.kernel_notes() is False and not (tmp_path / "cache" / "kernel-notes").exists()
+    assert prefs.set_kernel_notes(False)                                # off twice is still off
+    monkeypatch.setattr(prefs, "_CACHE_DIR", "/proc/nowhere/at/all")
+    assert prefs.kernel_notes() is False and prefs.set_kernel_notes(True) is False     # an unwritable home: said
+    ctx = CommandContext(mode="default", workspace="/w", version="0", surface="terminal", logged_in=True,
+                         session_tokens=0, session_credits=0, git_branch="")
+    assert (dispatch("/facts", ctx).action, dispatch("/facts", ctx).arg) == ("facts", "")
+    assert dispatch("/facts ON", ctx).arg == "on" and dispatch("/facts off", ctx).arg == "off"
+    assert dispatch("/facts maybe", ctx).arg == "?" and "Usage" in dispatch("/facts maybe", ctx).message
+    assert "/facts [on|off]" in dispatch("/help", ctx).message

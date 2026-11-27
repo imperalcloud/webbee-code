@@ -1335,6 +1335,19 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 else:
                     _say(slot, "Detail unavailable (expired or not recorded).")
                 return "continue"
+            if res.action == "facts":
+                from webbee import prefs
+                if res.arg == "?":
+                    _say(slot, res.message)
+                elif res.arg in ("on", "off"):
+                    kept = await asyncio.to_thread(prefs.set_kernel_notes, res.arg == "on")
+                    _say(slot, ("Kernel facts under each answer: " + res.arg + " — from the next turn."
+                                + ("" if kept else " (could not be saved: it holds for this run only if set again)")))
+                else:
+                    on = await asyncio.to_thread(prefs.kernel_notes)
+                    _say(slot, "Kernel facts under each answer: " + ("on" if on else "off")
+                         + " — /facts on shows the kernel's own line of what it saw; the check runs either way.")
+                return "continue"
             if res.action == "jobs":
                 _say(slot, await _jobs_text(slot))
                 return "continue"

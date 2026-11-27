@@ -340,7 +340,7 @@ wheels = [
 
 [[package]]
 name = "imperal-sdk"
-version = "6.13.0"
+version = "6.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -348,9 +348,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2d/38/baaa85c07da0b69e9e9b63d11972a8fe83deb87cfd8b9c83c6e1fa5b439f/imperal_sdk-6.13.0.tar.gz", hash = "sha256:5eb44ee241b834565a4c7aec69527c05f4672efcdd043abc5aa0aeb9377eebc4", size = 1039451, upload-time = "2026-11-27T16:56:13.215Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/6a/def6b16df635b9e98ed2d4f86c3c8428bfc777a0f93b3e86a32613b23553/imperal_sdk-6.14.0.tar.gz", hash = "sha256:08b22dcfe5adcde577ee7a9adb60b07779ce58185d85225ec2abd5159834582b", size = 1039917, upload-time = "2026-11-27T21:39:17.24Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b5/56/7d2d407e1ca70685e219eaefe13038f56555797fb16203bb31c9e6f13f6e/imperal_sdk-6.13.0-py3-none-any.whl", hash = "sha256:bbff672a221120664986cab6580a4e302ae08c7ce789179390900ef7c7b4f11d", size = 523225, upload-time = "2026-11-27T16:56:11.587Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/63/a6234ea46e88a80b600dd749566cc4d61f9a3012810b76c5c1bf7d459ba9/imperal_sdk-6.14.0-py3-none-any.whl", hash = "sha256:e0e2786e44d05827120c4b921e0be36e9b00203ae5fac582bf27324e9f37299e", size = 523446, upload-time = "2026-11-27T21:39:15.562Z" },
 ]
 
 [package.optional-dependencies]
@@ -1700,7 +1700,7 @@ wheels = [
 
 [[package]]
 name = "webbee"
-version = "0.7.34"
+version = "0.7.35"
 source = { editable = "." }
 dependencies = [
     { name = "asyncssh", marker = "python_full_version >= '3.10'" },
@@ -1727,7 +1727,7 @@ requires-dist = [
     { name = "httpx", marker = "python_full_version >= '3.10'", specifier = ">=0.27" },
     { name = "httpx-sse", marker = "python_full_version >= '3.10'", specifier = ">=0.4" },
     { name = "imperal-mcp", marker = "python_full_version >= '3.10'", specifier = ">=0.9.24" },
-    { name = "imperal-sdk", extras = ["universal-index"], marker = "python_full_version >= '3.10'", specifier = ">=6.13.0" },
+    { name = "imperal-sdk", extras = ["universal-index"], marker = "python_full_version >= '3.10'", specifier = ">=6.14.0" },
     { name = "pillow", marker = "python_full_version >= '3.10'", specifier = ">=10" },
     { name = "prompt-toolkit", marker = "python_full_version >= '3.10'", specifier = ">=3" },
     { name = "rich", marker = "python_full_version >= '3.10'", specifier = ">=13.7" },

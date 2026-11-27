@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.35
+
+* `/facts on|off`. The kernel's notes under an answer (what it checked and what it saw) are off by default and
+  come back with `/facts on`; the choice is kept between runs. The line saying the kernel did not check an answer
+  is always shown.
+* Background jobs are at Webbee's hand from the first step, next to `bash`, and the session runs up to four of
+  them at once (an admin setting): a long test run, a build or a wait goes to a job while she goes on.
+
 ## 0.7.34
 
 * A command that outlasts its wait is no longer killed. When the time Webbee gave a command runs out, the command

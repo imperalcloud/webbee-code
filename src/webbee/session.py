@@ -512,6 +512,9 @@ class AgentSession:
         coding_context = await asyncio.to_thread(build_coding_context, self.workspace_root, self._intel)
         if self.model_tier:
             coding_context = {**coding_context, "model_tier": self.model_tier}
+        from webbee import prefs
+        if prefs.kernel_notes():     # the person's `/facts on`: the kernel prints its line of facts under an answer
+            coding_context = {**coding_context, "kernel_notes": True}
         # the mode this turn runs under: in autopilot the kernel asks no consent at all (no card, no park); a switch
         # mid-turn reaches the running session through post_mode
         coding_context = {**coding_context, "mode": str(self.mode or "default")}
