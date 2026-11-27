@@ -691,8 +691,10 @@ class LocalToolExecutor:
             if graph is not None and fi.symbols:
                 # the files whose references RESOLVE to this file (the vault's rules) -- never a file that only
                 # shares a name with one of its definitions (report 06.11 #2: "used by check-paths-agree.py, +50")
-                from webbee.intel.query import linker
-                deps = sorted({src for src, _u, _k, _l, dst, _q, _o in linker(self.indexer).links()
+                # the table is the graph's, built off this path: a read takes what is ready and never waits for
+                # the whole repository (query.links_ready)
+                from webbee.intel.query import links_ready
+                deps = sorted({src for src, _u, _k, _l, dst, _q, _o in links_ready(self.indexer) or ()
                                if dst == rel and src != rel})
                 if deps:
                     extra = f" +{len(deps) - 3} more" if len(deps) > 3 else ""

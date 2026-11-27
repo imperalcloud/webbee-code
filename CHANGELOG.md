@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.26
+
+* A read never waits for the whole repository. The header of a read file ("used by ...") asked for the table of
+  every resolved use of every file, built on the reading thread and built again after each change of the index: in
+  a big workspace (a home folder) `read_file` stood for minutes, and the terminal - which runs one request at a
+  time - answered nothing else. The table is now built on its own thread, one build at a time; a read takes what
+  is ready. `graph_slice` and `impact_of_change` wait for it up to 40 s and then say that it is still being built.
+
 ## 0.7.25
 
 * An image file is decoded through one guarded door: raster formats only (PNG, JPEG, GIF, WEBP, BMP) - never EPS,

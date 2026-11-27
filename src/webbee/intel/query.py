@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re
+import threading
 
 from imperal_sdk.code_index import path_matches
 
@@ -31,7 +32,9 @@ def graph_slice(svc, symbols, depth: int = 1) -> dict:
         return {"ok": False, "content": "index not ready"}
     if isinstance(symbols, str):
         symbols = [symbols]
-    lk = linker(svc)
+    lk = linked(svc)
+    if lk is None:
+        return {"ok": False, "content": LINKS_NOT_BUILT}
     links = lk.links()
     items = []
     for name in (symbols or []):
@@ -228,6 +231,61 @@ def linker(svc):
     return lk
 
 
+# A READ never waits for the whole repository (live 2026-11-27, the stall file of a terminal whose workspace was a
+# home folder: `read_file` stood 300 s in Linker.links() -- the header of one file asked for every resolved use of
+# every file, built on the reading thread, and built again after each change of the index. Five sessions in a day
+# went deaf on it). The table belongs to the graph: it is built off the reader's path, one build at a time, and a
+# reader takes what is ready -- or waits this long for a small repository's table and goes on without it.
+LINKS_WAIT_S = 2.0
+# a tool that ASKS for the links (graph_slice, impact_of_change) waits longer, and then says what it waits for --
+# the terminal runs one request at a time, so no tool holds it for as long as a big folder's table takes
+LINKS_TOOL_WAIT_S = 40.0
+LINKS_NOT_BUILT = ("the links of this folder are still being resolved (a big folder takes minutes the first time "
+                   "and after its files change) -- nothing was looked up. Ask again in a while, or read the code "
+                   "directly (search_code, grep_code, read_symbol do not need the links).")
+_links_lock = threading.Lock()
+
+
+def links_ready(svc, wait: float = LINKS_WAIT_S):
+    """The link table of the index's CURRENT graph, or None while it is not built (its build is then running on its
+    own thread). Never longer than ``wait`` on the caller's path."""
+    g = getattr(svc, "graph", None)
+    if g is None:
+        return None
+    with _links_lock:
+        if getattr(svc, "_links_graph", None) is g:
+            return svc._links_table
+        done = getattr(svc, "_links_build", None)
+        if done is None or getattr(svc, "_links_build_graph", None) is not g:
+            done = threading.Event()
+            svc._links_build, svc._links_build_graph = done, g
+
+            def build(g=g, done=done) -> None:
+                try:
+                    lk = linker(svc)
+                    table = lk.links()
+                    with _links_lock:
+                        if getattr(svc, "graph", None) is g:
+                            svc._links_table, svc._links_graph, svc._links_linker = table, g, lk
+                except Exception:
+                    pass
+                finally:
+                    done.set()
+            threading.Thread(target=build, name="webbee-links", daemon=True).start()
+    done.wait(max(0.0, wait))
+    with _links_lock:
+        return svc._links_table if getattr(svc, "_links_graph", None) is g else None
+
+
+def linked(svc, wait: float = LINKS_TOOL_WAIT_S):
+    """The resolver whose link table is built for the current graph, or None while it is not (see links_ready)."""
+    g = getattr(svc, "graph", None)
+    if links_ready(svc, wait) is None:
+        return None
+    with _links_lock:
+        return svc._links_linker if getattr(svc, "_links_graph", None) is g else None
+
+
 def impact_of_change(svc, symbols) -> dict:
     """Files that use ``symbols`` (resolved links: line, user, depth through the enclosing definition), code before
     tests; ``by_name`` -- files that only share a name (a method on a local, a language without scope facts), marked
@@ -239,7 +297,10 @@ def impact_of_change(svc, symbols) -> dict:
     from imperal_sdk.code_index import has_scope_facts
     from imperal_sdk.code_links import BY_NAME_SHOWN, impact, is_test_path
     syms = [str(s) for s in (symbols or []) if str(s).strip()]
-    out = impact(linker(svc), syms, depth=2)
+    lk = linked(svc)
+    if lk is None:
+        return {"ok": False, "content": LINKS_NOT_BUILT}
+    out = impact(lk, syms, depth=2)
     # languages without scope facts: their uses are known by name only -- listed with the other by-name files
     names = {s.split("::")[-1].split(":")[-1].rsplit(".", 1)[-1] for s in syms}
     known = {b["path"] for b in out["by_name"]} | {i["id"] for i in out["data"]["items"]}
