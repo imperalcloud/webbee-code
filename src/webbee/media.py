@@ -17,6 +17,28 @@ import threading
 from typing import Optional, Tuple
 
 
+# The one door an image file is decoded through (security review 2026-11-27): a file of the workspace is not
+# trusted. Only raster formats are read -- never EPS/PS/PDF, which Pillow hands to Ghostscript, an interpreter --
+# and never a picture whose pixels would not fit in memory (a small file can declare a huge canvas).
+IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP", "BMP")
+IMAGE_MAX_PIXELS = 40 * 1000 * 1000
+
+
+def open_image(source):
+    """A Pillow image of ``source`` (a path or a binary file object), its header read and its pixels not yet.
+    Raises ValueError for a format outside ``IMAGE_FORMATS`` or a canvas over ``IMAGE_MAX_PIXELS``."""
+    from PIL import Image
+    try:
+        im = Image.open(source, formats=list(IMAGE_FORMATS))
+    except Exception as e:
+        raise ValueError("not an image this terminal reads (%s): %s" % (", ".join(IMAGE_FORMATS), type(e).__name__))
+    w, h = im.size
+    if w * h > IMAGE_MAX_PIXELS:
+        im.close()
+        raise ValueError("an image of %dx%d is over %d million pixels" % (w, h, IMAGE_MAX_PIXELS // 1000000))
+    return im
+
+
 def play_audio_file(file_path: str, *, block: bool = False) -> Optional[subprocess.Popen]:
     """Play an audio file (.wav, .mp3, .m4a, .ogg) across macOS, Linux, and Windows.
 
@@ -104,7 +126,7 @@ def render_image_in_terminal(image_path: str, max_cols: int = 60, max_rows: int 
     # 3. ANSI TrueColor Half-Block Fallback (Works in ANY 24-bit terminal on macOS, Linux, Windows)
     try:
         from PIL import Image
-        img = Image.open(image_path).convert("RGB")
+        img = open_image(image_path).convert("RGB")
         # Scale to max_cols x (max_rows * 2) because each character cell has 2 vertical subpixels (▀)
         w, h = img.size
         aspect = w / max(1, h)

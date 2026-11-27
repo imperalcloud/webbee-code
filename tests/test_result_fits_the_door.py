@@ -58,3 +58,22 @@ def test_a_small_image_goes_as_it_is(tmp_path):
 
 def test_what_cannot_be_shrunk_is_left_to_the_cut(monkeypatch):
     assert T.shrink_image(b"not an image at all" * 100) is None
+
+
+def test_an_image_is_decoded_through_one_door_raster_only_and_bounded(monkeypatch):
+    """Security review 2026-11-27: a workspace file is not trusted -- no EPS/PS (Pillow runs Ghostscript on them),
+    no canvas that does not fit in memory."""
+    pytest.importorskip("PIL.Image")
+    import pathlib
+    from webbee import media
+    eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 10 10\n%%EndComments\nshowpage\n%%EOF\n"
+    with pytest.raises(ValueError):
+        media.open_image(io.BytesIO(eps))
+    assert T.shrink_image(eps * 20000) is None
+    assert not {"EPS", "PDF", "TIFF"} & set(media.IMAGE_FORMATS)
+    monkeypatch.setattr(media, "IMAGE_MAX_PIXELS", 1000)
+    with pytest.raises(ValueError):
+        media.open_image(io.BytesIO(_noise_png(64)))
+    src = pathlib.Path(media.__file__).parent
+    opens = [f.name for f in src.glob("*.py") if "Image.open(" in f.read_text(encoding="utf-8")]
+    assert opens == ["media.py"]                       # nobody decodes an image beside the door

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.25
+
+* An image file is decoded through one guarded door: raster formats only (PNG, JPEG, GIF, WEBP, BMP) - never EPS,
+  PS or PDF, which the image library hands to an interpreter - and never a canvas over 40 million pixels. Both
+  places that read an image (showing it to the model, drawing it in the terminal) go through it.
+
 ## 0.7.24
 
 * A result fits the door that takes it. The gateway takes a body of 1 MB while a result was cut at 4 MB, so a

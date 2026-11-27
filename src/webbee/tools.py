@@ -1442,7 +1442,8 @@ def shrink_image(raw: bytes, limit: int = IMAGE_MAX_BYTES):
     try:
         import io
         from PIL import Image
-        im = Image.open(io.BytesIO(raw))
+        from webbee.media import open_image
+        im = open_image(io.BytesIO(raw))       # raster formats only, a bounded canvas
         im.load()
         if im.mode not in ("RGB", "L"):
             flat = Image.new("RGB", im.size, (255, 255, 255))
