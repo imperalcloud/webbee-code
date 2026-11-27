@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.27
+
+* The links of a big folder are resolved in seconds (imperal-sdk 6.10.1, raised here): the table was built in time
+  that grew with files x references - measured on a synthetic folder of 12000 files, 52.81 s before and 0.14 s now.
+  With 0.7.26 a read no longer waited for it; now `graph_slice` and `impact_of_change` answer in a big workspace too.
+
 ## 0.7.26
 
 * A read never waits for the whole repository. The header of a read file ("used by ...") asked for the table of
