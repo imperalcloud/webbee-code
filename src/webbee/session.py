@@ -402,6 +402,66 @@ class AgentSession:
         except Exception:
             return False
 
+    async def _job_door(self, sid: str, door: str, body: dict):
+        """One call of a job door of the gateway for session ``sid``: the kernel's answer as a dict, or None when
+        it did not get through (no session, the network, a refusal). Never raises."""
+        if not sid or self.cfg is None or self.token_provider is None:
+            return None
+        try:
+            headers = await self._headers()
+            async with make_client(self.cfg, timeout=20) as client:
+                resp = await client.post(f"/v1/agent/sessions/{sid}/jobs/{door}", json=body, headers=headers)
+            got = resp.json() if resp.status_code == 200 else None
+            return got if isinstance(got, dict) else None
+        except Exception:
+            return None
+
+    async def report_job(self, sid: str, n: int, stdout: str):
+        """Tell the kernel what a job's poll line printed on this machine (``webbee.jobwatch``): the kernel reads
+        it with its own reader. The raw output, nothing of the terminal's own."""
+        return await self._job_door(sid, f"{int(n)}/report", {"stdout": str(stdout or "")})
+
+    async def background_running(self) -> list:
+        """The person sends what this terminal is waiting for to the background (the owner, 2026-11-27). Each
+        waited command becomes a job of the session: the kernel gives it its number and its record
+        (``SessionJobAdoptWorkflow``), its run folder takes the job's name, and the wait ends -- the process is
+        not touched. Returns one line per command, saying what happened; [] when nothing is being waited for.
+        A command the kernel did not take stays in the foreground, said with the reason."""
+        from imperal_sdk import session_jobs as sj
+
+        from webbee import jobs
+        executor, sid = self._executor, self.session_id
+        held = executor.held_running() if executor is not None and hasattr(executor, "held_running") else []
+        said = []
+        for h in held:
+            title = " ".join(h.command.split())[:sj.TITLE_CHARS]
+            got = await self._job_door(sid, "adopt", {"command": h.command[:2000], "title": title,
+                                                      "started_ts": h.started})
+            try:
+                n = int((got or {}).get("n") or 0)
+            except (TypeError, ValueError):
+                n = 0
+            # the folder is the one the SDK names for this session and number -- what the answer says of it is
+            # compared, never used
+            if not (got or {}).get("ok") or n < 1 or (got or {}).get("dir") != sj.job_dir(sid, n):
+                said.append("not sent to the background: "
+                            + (str((got or {}).get("error") or "the kernel gave it no job number")
+                               if got else "the kernel could not be reached") + f" -- `{title}` stays in front")
+                continue
+            if h.proc.poll() is not None:
+                said.append(f"`{title}` ended before it was moved: its result is the call's own")
+                continue
+            try:
+                jobs.link(h, sid, n, title)
+            except OSError as exc:
+                said.append(f"not sent to the background: {type(exc).__name__} naming job {sj.job_id(n)} on this "
+                            f"machine -- `{title}` stays in front")
+                continue
+            jobs.release(h, n)
+            said.append(f"{sj.job_id(n)} in the background: `{title}` -- /jobs lists, /job {n} shows its output, "
+                        f"/job {n} cancel ends it")
+        return said
+
     async def post_mode(self, mode: str) -> bool:
         """Tell the running session its new coding mode (the kernel's ``set_mode``): autopilot is asked nothing
         from now on, the others are asked again."""

@@ -351,7 +351,7 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
                   current: str = "", elapsed: float = 0.0, tools: int = 0,
                   consent: bool = False, queued: int = 0,
                   reconnecting: int = 0, width: int = 0, live: str = "",
-                  tier: str = "", tier_now: "float | None" = None) -> list:
+                  tier: str = "", tier_now: "float | None" = None, jobs: int = 0) -> list:
     """The status line under the pinned input box, as prompt_toolkit formatted
     text (per-segment styled). Four states: consent (awaiting a reply),
     reconnecting (the stream transport is down mid-turn — honest, not a fake
@@ -364,6 +364,8 @@ def build_toolbar(mode: str, tokens: int, credits: int, *, busy: bool = False,
     (tb.working, NOT dim) in the busy AND idle states, so the depth is
     noticeable at a glance. Style classes are defined in run_session's Style."""
     q = [("class:tb.working", f" · ⋯{queued} queued")] if queued else []
+    if jobs:      # the session's commands running in the background on this machine (Ctrl+O lists them)
+        q.append(("class:tb.working", f" · ⚙ {jobs} in background"))
     if consent:
         return [("class:tb.consent", "  approve? type y / n / a reply · Enter to send")]
     if busy and reconnecting:
@@ -945,7 +947,7 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
                       stop_turn=None, queued_run=None, inject=None,
                       home_input=None, cancel_slot=None, ui_hooks=None,
                       on_switch=None, on_new=None, on_paste=None,
-                      live=None, update_state=None) -> bool:
+                      live=None, update_state=None, job_keys=None) -> bool:
     """The full-screen dock: EVERYTHING visible resolves `slots.active()` AT
     CALL TIME (W4a Task 3 — the single most structural change of the
     multisession-tabs wave: no more one session's objects captured once at
@@ -1326,6 +1328,20 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
     @kb.add("c-c")
     def _interrupt(event):
         _interrupt_action(_a().turn, _busy_live, stop_turn, event)
+
+    # Background jobs (2026-11-27, the owner: "even hot keys"). Ctrl+Z is the shell's own gesture for "this to the
+    # background": the command the tab's turn is waiting for runs on as a job. Ctrl+O lists the tab's jobs.
+    _has_jobs = Condition(lambda: bool(job_keys) and _a().kind != "home")
+
+    @kb.add("c-z", filter=_has_jobs)
+    def _to_background_key(event):
+        job_keys["background"](_a())
+        event.app.invalidate()
+
+    @kb.add("c-o", filter=_has_jobs)
+    def _jobs_key(event):
+        job_keys["jobs"](_a())
+        event.app.invalidate()
 
     @kb.add("c-t")
     def _new_tab_key(event):
@@ -1751,7 +1767,8 @@ async def run_session(*, slots, on_line, on_cycle, on_tier_cycle=None,
                                       reconnecting=st.get("reconnecting", 0),
                                       width=_toolbar_fit_width(),
                                       live=str((live or {}).get("text") or ""),
-                                      tier=getattr(slot, "model_tier", "") or "")
+                                      tier=getattr(slot, "model_tier", "") or "",
+                                      jobs=int(getattr(slot, "jobs_running", 0) or 0))
             else:
                 # Home has no sink of its OWN, but it is the dock's summary
                 # page: show the SESSION TOTAL across every open tab (0.3.36)

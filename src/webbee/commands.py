@@ -24,6 +24,9 @@ _HELP = """Commands:
   /attach <path>     attach a local file (or several, space-separated/glob) to the next message
   /queue [clear]     messages queued while Webbee works (clear drops them all)
   /steps [N]         last turn's steps; N expands one (also: Up/Down + Enter)
+  /jobs              background jobs of this session on this machine
+  /job N [cancel]    the output of job N so far (cancel ends it)
+  /bg                send the command Webbee is waiting for to the background (it runs on)
   /checkpoints       the reversibility time machine — list workspace checkpoints
   /rollback <ref>    restore the workspace to a checkpoint (id, cp-N or N)
   /sessions          list active sessions (this + other devices)
@@ -36,6 +39,7 @@ Keys:
   Alt+↵ (or Shift+↵, or Ctrl+J)   new line in the prompt — Enter still sends
   Shift+TAB          switch mode        Ctrl+T   new tab
   Ctrl+B             cycle model tier
+  Ctrl+Z             send the running command to the background       Ctrl+O   list jobs
   Alt+№              switch to tab №    Ctrl+W   close tab"""
 
 
@@ -154,6 +158,14 @@ def dispatch(line: str, ctx: CommandContext) -> SlashResult:
                            message=(f"Queued ({len(ctx.queued)}) — runs in order, "
                                     f"one per finished turn:\n{lines}\n"
                                     f"  /queue drop <n> · /queue edit <n> · /queue clear"))
+    if cmd == "/jobs":
+        return SlashResult(handled=True, action="jobs")
+    if cmd == "/job":
+        if not args:
+            return SlashResult(handled=True, action="jobs")
+        return SlashResult(handled=True, action="job", arg=" ".join(a.lower() for a in args[:2]))
+    if cmd == "/bg":
+        return SlashResult(handled=True, action="background")
     if cmd == "/steps":
         if args:
             return SlashResult(handled=True, action="step_detail", arg=args[0])

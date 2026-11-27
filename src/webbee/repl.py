@@ -192,7 +192,7 @@ def _slot_ctx(slot: SessionSlot, *, logged_in: bool, slots=None) -> CommandConte
 _HOME_GATED_ACTIONS = frozenset({
     "steps", "step_detail", "checkpoints", "rollback", "notify", "mode",
     "model_tier", "queue", "queue_clear", "queue_drop", "queue_edit",
-    "rename", "attach",
+    "rename", "attach", "jobs", "job", "background",
 })
 
 _HOME_GATE_NOTE = "open a session tab first — Ctrl+T or type a task"
@@ -1323,6 +1323,15 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                 else:
                     _say(slot, "Detail unavailable (expired or not recorded).")
                 return "continue"
+            if res.action == "jobs":
+                _say(slot, await _jobs_text(slot))
+                return "continue"
+            if res.action == "job":
+                _say(slot, await _job_text(slot, res.arg))
+                return "continue"
+            if res.action == "background":
+                await _to_background(slot)
+                return "continue"
             if res.action == "checkpoints":
                 shadow = _resources_for(slot.workspace).get("shadow")
                 if shadow is None:
@@ -1606,6 +1615,81 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             return
         _sink.end_turn(text)
 
+    async def _slot_session_id(slot: SessionSlot) -> str:
+        """The session id of a slot: the one its turns got from the gateway, else the one they will get (derived
+        the way the idle poll derives it) -- a job of the session is found before its first turn here too."""
+        sid = getattr(slot.agent, "session_id", "") or ""
+        if sid:
+            return sid
+        from webbee.steer import derive_session_id
+        try:
+            return await derive_session_id(cfg, token_provider, slot.workspace, marathon=not once,
+                                           slot_id=slot.slot_id)
+        except Exception:
+            return ""
+
+    async def _jobs_text(slot: SessionSlot) -> str:
+        """`/jobs`: the session's jobs on this machine, each read now."""
+        from webbee import jobs
+        if not jobs.supported():
+            return "Background jobs are not available on this system."
+        sid = await _slot_session_id(slot)
+        mine = await asyncio.to_thread(jobs.mine, sid) if sid else []
+        if not mine:
+            return ("No background jobs in this session. Ctrl+Z (or /bg) sends the command Webbee is waiting for "
+                    "to the background; she can start one herself too.")
+        rows = []
+        for job in mine:
+            got = await asyncio.to_thread(jobs.state_of, sid, job["n"])
+            rows.append("  " + jobs.line_of(job, got))
+        return "Background jobs:\n" + "\n".join(rows) + "\n  /job N shows a job's output · /job N cancel ends it"
+
+    async def _job_text(slot: SessionSlot, arg: str) -> str:
+        """`/job N [cancel]`: one job's state and the end of its output, read now -- or its end."""
+        from webbee import jobs
+        if not jobs.supported():
+            return "Background jobs are not available on this system."
+        parts = arg.split()
+        sid = await _slot_session_id(slot)
+        job = await asyncio.to_thread(jobs.find, sid, parts[0]) if sid and parts else None
+        if job is None:
+            return f"No job {parts[0] if parts else ''} in this session (see /jobs)."
+        if len(parts) > 1 and parts[1] == "cancel":
+            sent, said = await asyncio.to_thread(jobs.cancel, sid, job["n"])
+            return (f"{job['id']}: told to end -- Webbee is told when it has ended." if sent
+                    else f"{job['id']} was not ended: it is not running (see /job {job['n']}).")
+        if len(parts) > 1:
+            return f"Usage: /job {job['n']}  or  /job {job['n']} cancel"
+        got = await asyncio.to_thread(jobs.state_of, sid, job["n"])
+        tail = (await asyncio.to_thread(jobs.log_tail, job["path"])).rstrip()
+        return (jobs.line_of(job, got) + "\n" + (tail if tail else "(no output yet)")
+                + f"\nlog: {job['path']}/log")
+
+    async def _to_background(slot: SessionSlot) -> None:
+        """Ctrl+Z / `/bg`: what this tab's turn is waiting for goes to the background."""
+        fn = getattr(slot.agent, "background_running", None)
+        said = (await fn()) if fn is not None else []
+        for line in said or ["Nothing is running in front: there is no command to send to the background."]:
+            _say(slot, "⚙ " + line)
+
+    job_keys = {
+        "background": lambda slot: asyncio.ensure_future(_to_background(slot)),
+        "jobs": lambda slot: asyncio.ensure_future(_handle("/jobs", slot)),
+    }
+
+    def _spawn_slot_jobwatch(slot: SessionSlot) -> None:
+        """One watch per session slot over its jobs on this machine (webbee.jobwatch): it tells the kernel what
+        each job's poll line prints, and shows the job's line when the kernel took its end. In `slot.bg_tasks`,
+        so the slot's own teardown cancels it."""
+        from webbee import jobwatch
+        if not hasattr(slot.agent, "report_job"):
+            return
+        slot.bg_tasks.append(asyncio.ensure_future(jobwatch.watch(
+            session_id=lambda: _slot_session_id(slot),
+            post=lambda sid, n, out: slot.agent.report_job(sid, n, out),
+            on_line=lambda text: _say(slot, "⚙ " + text),
+            on_count=lambda n: setattr(slot, "jobs_running", int(n)))))
+
     async def _run_turn(slot: SessionSlot, line: str, surface: str = "", steer_iid: str = "") -> None:
         """ONE agent turn -- the typed-line path (FIX1: slot-explicit
         end-to-end, was: resolved `slots.active()` internally, map §1's
@@ -1765,6 +1849,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
             attach_turn=lambda attach_info: _attach_turn_on(slot, attach_info),
             client=shared_client, slot_id=slot.slot_id, initial_delay=offset))
         slot.bg_tasks.append(task)
+        _spawn_slot_jobwatch(slot)
 
     async def _open_new_tab(path: str = "") -> SessionSlot:
         """The shared "open a new tab" flow (Task 5's `/new` action; W4c
@@ -2047,6 +2132,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
                         on_paste=_on_paste,
                         live=_live_state,
                         update_state=_update_state,
+                        job_keys=job_keys,
                     )
                 finally:
                     # 0.3.37: remember the tab layout BEFORE teardown, while the

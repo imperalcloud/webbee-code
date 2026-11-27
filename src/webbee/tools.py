@@ -146,6 +146,34 @@ def _stop_group(proc, posix: bool) -> None:
         pass
 
 
+def _whole_log(held) -> bytes:
+    """Everything a stopped command wrote, read once it is gone (what it printed while it was being stopped too)."""
+    try:
+        held.proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        with open(os.path.join(held.folder, "log"), "rb") as f:
+            return f.read()
+    except OSError:
+        return b""
+
+
+def _backgrounded(held, out: str) -> dict:
+    """The result of a command the person sent to the background while the agent's call was waiting for it. It did
+    NOT finish: the result says so first and is never ``ok`` -- an unfinished command is no proof of anything."""
+    from imperal_sdk import session_jobs as sj
+    jid = sj.job_id(held.job)
+    head = (f"[SENT TO THE BACKGROUND BY THE PERSON -- NOT FINISHED: this command runs on as job {jid} of this "
+            f"session on the person's own machine; its outcome is not known yet. job_status(id=\"{jid}\") reads "
+            f"the end of its output, job_cancel(id=\"{jid}\") ends it, and this session is told when it ends. "
+            "Do not run it again.]")
+    full = len(out)
+    out = _truncated(out, _BASH_OUT_CAP)
+    return {"ok": False, "content": head + ("\nits output until now:\n" + out if out.strip() else ""),
+            "backgrounded": True, "job": jid, "output_chars": full, "truncated": full > _BASH_OUT_CAP}
+
+
 def _last_line(chunk: bytes) -> str:
     """PURE. The newest non-empty line of a piece of a command's output (a progress bar redraws with a carriage
     return: its newest state is the line)."""
@@ -370,8 +398,17 @@ class LocalToolExecutor:
         # the commands running now (bash): a stop (Esc) ends them and every process they started (cancel_running)
         self._running: set = set()
         self._running_lock = threading.Lock()
+        # the commands this terminal WAITS for, by their process (webbee.jobs.Held): the person can send one to the
+        # background -- the wait ends, the command runs on as a job
+        self._held: dict = {}
         # the surface's ear for a running command's output (the newest line, as it is printed); None: no one listens
         self.on_output = None
+
+    def held_running(self) -> list:
+        """The commands this terminal is waiting for right now (``webbee.jobs.Held``), oldest first."""
+        with self._running_lock:
+            return sorted((h for p, h in self._held.items() if p.poll() is None and not h.released.is_set()),
+                          key=lambda h: h.started)
 
     def cancel_running(self) -> int:
         """Stop every command this executor is running now and every process it started (2026-10-30 review: Esc
@@ -1008,19 +1045,48 @@ class LocalToolExecutor:
         import shutil
         shell_bin = shutil.which("bash") if posix else None
         git_bash = None if posix else windows_git_bash()
-        proc = subprocess.Popen(
-            [git_bash, "-c", a["command"]] if git_bash else a["command"], shell=not git_bash, cwd=self.root,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
-            **({"executable": shell_bin} if shell_bin else {}),
-            **({"start_new_session": True} if posix else
-               {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}))
+        held = None
+        if posix:
+            # One form for every command (2026-11-27, the owner: "to throw it into the background myself"): it runs
+            # as a job does -- its output to a file of its own folder, never down a pipe to this process -- and this
+            # call only WAITS for it. Sent to the background, nothing of the process changes: the wait ends.
+            from webbee import jobs
+            try:
+                held = jobs.start_held(a["command"], cwd=self.root, env=env, shell=shell_bin or "")
+                proc = held.proc
+            except OSError:
+                # the jobs' folder cannot be made or written (a read-only home, a full disk): the command still
+                # runs, by a pipe as before -- only "to the background" is not there for it
+                held = None
+        if held is None:
+            proc = subprocess.Popen(
+                [git_bash, "-c", a["command"]] if git_bash else a["command"], shell=not git_bash, cwd=self.root,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                **({"executable": shell_bin} if shell_bin else {}),
+                **({"start_new_session": True} if posix else
+                   {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}))
         with self._running_lock:
             self._running.add(proc)
+            if held is not None:
+                self._held[proc] = held
         try:
-            raw, timed_out = _gather(proc, timeout, self.on_output, lambda: _stop_group(proc, posix))
+            if held is not None:
+                tell = self.on_output
+                raw, how = jobs.follow(held, timeout, (lambda piece: tell(_last_line(piece))) if tell else None)
+                timed_out = how == "timeout"
+                if timed_out:
+                    _stop_group(proc, posix)
+                    raw = _whole_log(held) or raw
+                if how == "released":
+                    return _backgrounded(held, _decoded(raw or b""))
+            else:
+                raw, timed_out = _gather(proc, timeout, self.on_output, lambda: _stop_group(proc, posix))
         finally:
             with self._running_lock:
                 self._running.discard(proc)
+                self._held.pop(proc, None)
+            if held is not None:
+                jobs.drop(held)                     # nothing is left of a command that was waited for to its end
         out = _decoded(raw or b"")
         if timed_out:
             out += (f"\n[timed out after {timeout} s -- the command and every process it started were stopped; "

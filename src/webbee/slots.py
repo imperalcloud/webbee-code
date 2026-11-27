@@ -124,6 +124,7 @@ class SessionSlot:
     history: object | None = None      # prompt_toolkit InMemoryHistory (made in tui task)
     steer_backlog: deque = field(default_factory=deque)   # reserved (W4b)
     bg_tasks: list = field(default_factory=list)          # per-slot cancellables
+    jobs_running: int = 0                                 # the session's background jobs running on this machine now
     _last_fill: float = 0.0            # Home only (Task 6): monotonic ts of the last fill_home run
     _filling: bool = False             # Home only (Task 6): a fill_home is in flight -- re-entrancy guard
     started_at: float = 0.0            # home-tab-durations-v1: monotonic ts this slot was opened --

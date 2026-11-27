@@ -123,25 +123,30 @@ def test_missing_path_is_graceful_not_keyerror(tmp_path):
 
 
 def test_bash_timeout_capped_at_3600(tmp_path, monkeypatch):
+    """The bound of the wait: at most an hour, two minutes when none is given -- whichever way the command is
+    waited for (its log on POSIX since 2026-11-27, its pipe on Windows)."""
+    import os
     import webbee.tools as T
+    from webbee import jobs
     captured = {}
 
-    class _P:  # minimal Popen stand-in
-        returncode, pid = 0, 0
-
-        def __init__(self, cmd, **kw):
-            pass
+    def _follow(held, timeout, on_piece=None, tick=0.1):
+        captured["timeout"] = timeout
+        held.proc.wait(10)
+        return b"ok", "done"
 
     def _gather(proc, timeout, on_output, stop):
         captured["timeout"] = timeout
+        proc.wait(10)
         return b"ok", False
 
-    monkeypatch.setattr(T.subprocess, "Popen", _P)
+    monkeypatch.setattr(jobs, "home_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(jobs, "follow", _follow)
     monkeypatch.setattr(T, "_gather", _gather)
     ex = T.LocalToolExecutor(str(tmp_path))
-    ex.run("bash", {"command": "true", "timeout": 99999})
+    ex.run("bash", {"command": "true" if os.name != "nt" else "ver", "timeout": 99999})
     assert captured["timeout"] == 3600
-    ex.run("bash", {"command": "true"})
+    ex.run("bash", {"command": "true" if os.name != "nt" else "ver"})
     assert captured["timeout"] == 120
 
 

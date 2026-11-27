@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.29
+
+* Background work on your machine, in full. A command Webbee is waiting for goes to the background with Ctrl+Z
+  (or `/bg`): it is not restarted or touched - the wait ends, the command runs on as a job of the session and
+  outlives the terminal. `/jobs` (Ctrl+O) lists the session's jobs, `/job N` shows a job's output so far,
+  `/job N cancel` ends it. The status line counts what runs in the background.
+* Webbee is told when a job ends, by the kernel itself - also for a job that ended while the terminal was closed:
+  the next start reports it.
+* Every shell command now writes its output to a file of its own folder instead of a pipe to the terminal, so a
+  command that leaves a child running returns when it is done, not when the child closes its output.
+* The version badge says "installed" or "is out" only of a version newer than the running one.
+* Needs imperal-sdk 6.13.0.
+
 ## 0.7.28
 
 * You see what she reads. A shell command that only reads is listed as "Read (shell)", a check as "Check" - by

@@ -189,6 +189,15 @@ def _cycle(options, current: str, delta: int) -> str:
     return options[(i + delta) % len(options)]
 
 
+def _newer(other: str, running: str) -> bool:
+    """PURE. ``other`` is a NEWER release than the running one. "Installed, restart" and "is out" are said of a newer
+    version only: one that merely differs (an older file on disk, a version that does not parse) is no upgrade, and
+    the badge then claims nothing (the owner, 2026-11-27: it said "installed" when nothing had been installed)."""
+    from webbee.update import _ver
+    a, b = _ver(other), _ver(running)
+    return bool(other) and bool(a) and bool(b) and a > b
+
+
 def version_badge(version: str, update_notice: str = "", checked: bool = True, *,
                   latest: str = "", installed: str = "") -> "tuple[str, str]":
     """(text, style_class) for Home's bottom-right version badge (0.3.36).
@@ -211,9 +220,9 @@ def version_badge(version: str, update_notice: str = "", checked: bool = True, *
     # newer release exists), never out of the notice's words -- the badge once took the last "vN" word of the
     # restart sentence, which names the RUNNING version last: "v0.7.18 → 0.7.18 available" (live 2026-11-26).
     installed, latest = (installed or "").strip().lstrip("v"), (latest or "").strip().lstrip("v")
-    if installed and installed != v:
+    if _newer(installed, v):
         return (f"{vtxt} → {installed} · restart", "class:home.update")
-    if latest and latest != v:
+    if _newer(latest, v):
         return (f"{vtxt} → {latest} available", "class:home.update")
     if notice:
         return (f"{vtxt} · update available", "class:home.update")     # a notice with no number: none is guessed
@@ -236,9 +245,9 @@ def badge_beats(version: str, update_notice: str = "", checked: "bool | None" = 
     v = (version or "").strip()
     vtxt = f"v{v}" if v else "v?"
     installed, latest = (installed or "").strip().lstrip("v"), (latest or "").strip().lstrip("v")
-    if installed and installed != v:
+    if _newer(installed, v):
         return (vtxt, f"{installed} installed", "restart to use it")
-    if latest and latest != v:
+    if _newer(latest, v):
         return (vtxt, f"{latest} is out", "click to upgrade")
     if (update_notice or "").strip():
         return (vtxt, "update available", "click to upgrade")

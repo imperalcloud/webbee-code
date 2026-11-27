@@ -326,21 +326,21 @@ wheels = [
 
 [[package]]
 name = "imperal-mcp"
-version = "0.9.23"
+version = "0.9.24"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "imperal-sdk" },
     { name = "mcp" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/de/26349bc076e44c62ec295c2f4ec8ea46a3d01271271d9e6c3e03fede955d/imperal_mcp-0.9.23.tar.gz", hash = "sha256:7f617cf7dfd2fa1becbdb4fdd2ad78798820bc8e73c611819ac227bb0cf27996", size = 228993, upload-time = "2026-11-27T12:41:30.57Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/76/fd3f5232a078ce6a82920b6a8bb796f1b41e8f98364cbd2cb06e843d0d43/imperal_mcp-0.9.24.tar.gz", hash = "sha256:77e89935a40c807dd1167837adbfb466353c982c73ce063fb7875c6691576f31", size = 229245, upload-time = "2026-11-27T15:20:05.224Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/f1/388d23cecf085fb711cbadbf6053df238f9e3e7fda6bba3a77564a106fe9/imperal_mcp-0.9.23-py3-none-any.whl", hash = "sha256:324e0c2b2471102d0bdb0941ee82d4b67665696a570ea219624ac5c8da0fae17", size = 131562, upload-time = "2026-11-27T12:41:29.631Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/71/a0e9e7cccac1ffb8498b52a545cc58595eb1d93aec63ab903ee67d69f131/imperal_mcp-0.9.24-py3-none-any.whl", hash = "sha256:e488dbb6afc56e21dacba72dd5ec7deb65f1c154610e53ee887be0d66ab0595d", size = 131658, upload-time = "2026-11-27T15:20:04.206Z" },
 ]
 
 [[package]]
 name = "imperal-sdk"
-version = "6.10.1"
+version = "6.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -348,9 +348,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2d/70/ea1e975d6ee7cfdf1332454919894381ab86aa0b7a895227b40023f2d0b3/imperal_sdk-6.10.1.tar.gz", hash = "sha256:0bf12d383771573651c48000cadf85aad8e70e333604267878293a02a2f69c15", size = 1033010, upload-time = "2026-11-27T03:02:23.145Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2d/38/baaa85c07da0b69e9e9b63d11972a8fe83deb87cfd8b9c83c6e1fa5b439f/imperal_sdk-6.13.0.tar.gz", hash = "sha256:5eb44ee241b834565a4c7aec69527c05f4672efcdd043abc5aa0aeb9377eebc4", size = 1039451, upload-time = "2026-11-27T16:56:13.215Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1c/ba/1aaa2501ae8f6efd793ee84bc44652dedd5c74e39786c38f8baf54e770d0/imperal_sdk-6.10.1-py3-none-any.whl", hash = "sha256:9737e0a39a1dc0b4ef1a53418c08a2a2c5f42f3a134d958a90f45803b63ce4e5", size = 519145, upload-time = "2026-11-27T03:02:20.935Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/56/7d2d407e1ca70685e219eaefe13038f56555797fb16203bb31c9e6f13f6e/imperal_sdk-6.13.0-py3-none-any.whl", hash = "sha256:bbff672a221120664986cab6580a4e302ae08c7ce789179390900ef7c7b4f11d", size = 523225, upload-time = "2026-11-27T16:56:11.587Z" },
 ]
 
 [package.optional-dependencies]
@@ -1700,7 +1700,7 @@ wheels = [
 
 [[package]]
 name = "webbee"
-version = "0.7.28"
+version = "0.7.29"
 source = { editable = "." }
 dependencies = [
     { name = "asyncssh", marker = "python_full_version >= '3.10'" },
@@ -1726,8 +1726,8 @@ requires-dist = [
     { name = "asyncssh", marker = "python_full_version >= '3.10'", specifier = ">=2.14" },
     { name = "httpx", marker = "python_full_version >= '3.10'", specifier = ">=0.27" },
     { name = "httpx-sse", marker = "python_full_version >= '3.10'", specifier = ">=0.4" },
-    { name = "imperal-mcp", marker = "python_full_version >= '3.10'", specifier = ">=0.9.23" },
-    { name = "imperal-sdk", extras = ["universal-index"], marker = "python_full_version >= '3.10'", specifier = ">=6.10.1" },
+    { name = "imperal-mcp", marker = "python_full_version >= '3.10'", specifier = ">=0.9.24" },
+    { name = "imperal-sdk", extras = ["universal-index"], marker = "python_full_version >= '3.10'", specifier = ">=6.13.0" },
     { name = "pillow", marker = "python_full_version >= '3.10'", specifier = ">=10" },
     { name = "prompt-toolkit", marker = "python_full_version >= '3.10'", specifier = ">=3" },
     { name = "rich", marker = "python_full_version >= '3.10'", specifier = ">=13.7" },
