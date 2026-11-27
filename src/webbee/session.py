@@ -574,6 +574,13 @@ class AgentSession:
                 if line:
                     _loop.call_soon_threadsafe(_live, line)
             executor.on_output = _heard
+        # where the terminal stands when it stops answering is written down by the terminal itself (stallwatch)
+        from webbee import stallwatch as _sw
+
+        def _stalled(path: str, why: str, _loop=loop, _note=getattr(sink, "note", None)) -> None:
+            if _note is not None:
+                _loop.call_soon_threadsafe(_note, f"⚠ the terminal stalled: {why} — the stacks are in {path}")
+        _sw.ensure(loop, on_stall=_stalled)
         _last_own = loop.time()             # M7: the turn's own last activity
         _quiet_noted = False
         _held_final = ""                    # the newest answer of a marathon turn, shown if a stop follows it
@@ -693,6 +700,7 @@ class AgentSession:
                                 pass
                         if tool in _WRITE_TIER:
                             await asyncio.to_thread(store.mark_started, rid, tool)
+                        _sw.mark(f"tool {tool}")
                         try:
                             out = await asyncio.to_thread(handle_tool_request, frame, executor)
                         except asyncio.CancelledError:
@@ -700,6 +708,8 @@ class AgentSession:
                             # kill the command it runs, then let the cancel through.
                             _cancel_running(executor)
                             raise
+                        finally:
+                            _sw.mark("")
                         out = _cap_result(out)
                         # H6: written BEFORE the post -- a crash after this line
                         # re-sends the result instead of running the tool again.
@@ -728,7 +738,11 @@ class AgentSession:
                             except Exception:
                                 pass
                         _remember(seen, rid, out)
-                    await self._post_result(client, session_id, out, sink=sink, tool=tool)
+                    _sw.mark(f"post the result of {tool}")
+                    try:
+                        await self._post_result(client, session_id, out, sink=sink, tool=tool)
+                    finally:
+                        _sw.mark("")
                     _last_own, _quiet_noted = loop.time(), False
 
                 elif ftype == "confirm_request":

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.23
+
+* The terminal writes down where it stands when it stops answering. A watch outside its event loop notes two facts -
+  the loop has not turned for 15 s, or one stage of a turn (running a tool, posting its result) has lasted 300 s -
+  and then writes every thread's stack once to `~/.cache/webbee/stalls/stall-<time>-<pid>.txt` and says so in the
+  terminal. `kill -USR1 <pid>` writes the same file on demand. Nothing is sent anywhere.
+
 ## 0.7.22
 
 * Signing out by itself is closed in the shell (imperal-mcp 0.9.22, raised here): one token refresh at a time on a
