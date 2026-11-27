@@ -578,6 +578,32 @@ class RichSink:
             self.console.print(_pad(block))
         self._nudge()
 
+    def agent_sent(self, to: str, whole: str, ok: bool = True, note: str = "", iid: str = "") -> None:
+        """THIS session's agent wrote to another session (a kernel ``agent_message_sent`` frame; the owner,
+        2026-11-27: "I do not see in the terminal when Webbee herself sends a message and what is in it"): to
+        whom, the message as it was written, and what became of it -- the same block an incoming message gets,
+        with an arrow, and one more line when it was NOT sent, saying why. Display-only; a frame delivered twice
+        prints once."""
+        iid = str(iid or "")
+        seen = self.__dict__.setdefault("_agent_seen", set())
+        if iid and iid in seen:
+            return
+        if iid:
+            seen.add(iid)
+        body = _clean(str(whole or "")).strip()
+        head = f"{AGENT_MARK}→ {_clean(str(to or '')).strip() or 'another session'} · {len(body)} chars"
+        block = Text.assemble((f"{time.strftime('%H:%M:%S')} ", "dim grey50"),
+                              (head + ("" if ok else " · NOT SENT"), f"bold {_BEE}" if ok else "bold red"))
+        for row in body.splitlines():
+            block.append(chr(10))
+            block.append("   │ ", style="dim grey50")
+            block.append(row)
+        if not ok and str(note or "").strip():
+            block.append(chr(10))
+            block.append("   └ " + _clean(str(note)).strip(), style="red")
+        self.console.print(_pad(block))
+        self._nudge()
+
     def remote_dequeued(self, origin: str, iid: str) -> None:
         """The kernel drained (or dedup-dropped) one queued item
         (`task_dequeued` frame): remove its panel row by `iid`. The

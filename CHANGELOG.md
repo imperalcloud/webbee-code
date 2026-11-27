@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.30
+
+* You see what Webbee herself sends. A message she writes to another session is shown in her own terminal: to
+  whom, the message as it was written, and - when the kernel did not let it through - that it was NOT sent and
+  why (with the kernel release that tells the terminal of it).
+
 ## 0.7.29
 
 * Background work on your machine, in full. A command Webbee is waiting for goes to the background with Ctrl+Z

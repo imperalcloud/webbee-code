@@ -902,6 +902,16 @@ class AgentSession:
                         except Exception:
                             pass
 
+                elif ftype == "agent_message_sent":  # this session's agent wrote to another session
+                    _sent = getattr(sink, "agent_sent", None)
+                    if _sent is not None:
+                        try:
+                            _sent(str(frame.get("to") or ""), str(frame.get("whole") or ""),
+                                  ok=bool(frame.get("ok")), note=str(frame.get("note") or ""),
+                                  iid=str(frame.get("iid") or ""))
+                        except Exception:
+                            pass
+
                 elif ftype == "marathon_complete":  # U4 — the whole GOAL is done: terminal
                     # how the run ended, as the kernel says it (answer | question | brake; "" from a kernel that
                     # does not say): a question waits for the person's reply -- the dock shows it as such

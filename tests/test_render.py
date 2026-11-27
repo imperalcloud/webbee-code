@@ -1214,3 +1214,23 @@ def test_a_thought_being_written_is_on_the_live_line_and_the_finished_one_takes_
     sink.thinking("whole", say="Читаю файл целиком.", kind="step", lines={})
     assert sink.status()["current"] == "" and "Читаю файл целиком." in buf.getvalue()
     show_thinking_live(SimpleNamespace(), "", {"kind": "step", "say": "x"})      # a sink with no live line
+
+
+def test_the_terminal_shows_what_its_own_agent_sent_whole_and_says_when_it_was_not_sent():
+    """Owner 2026-11-27: "I do not see in the terminal when Webbee herself sends a message and what is in it"."""
+    s = _sink()
+    whole = "Первая строка\nвторая строка с цифрой 2322"
+    s.agent_sent("mcp-imp_u_x-129a", whole, ok=True, note="delivered", iid="agent.sent.m1")
+    s.agent_sent("mcp-imp_u_x-129a", whole, ok=True, note="delivered", iid="agent.sent.m1")   # a re-sent frame
+    out = s.console.export_text()
+    assert out.count(f"[agent] → mcp-imp_u_x-129a · {len(whole)} chars") == 1
+    assert "│ Первая строка" in out and "│ вторая строка с цифрой 2322" in out and "NOT SENT" not in out
+    assert "delivered" not in out                                    # a sent message needs no second line
+    s.agent_sent("mcp-imp_u_x-129a", "all tests passed", ok=False,
+                 note="message_session: not sent -- the kernel saw no test run", iid="agent.sent.m2")
+    out = s.console.export_text()
+    assert "· NOT SENT" in out and "└ message_session: not sent -- the kernel saw no test run" in out
+    assert "│ all tests passed" in out
+    s.agent_sent("", "x\x1b[31m", ok=True)
+    assert "[agent] → another session · 1 chars" in s.console.export_text() or \
+        "[agent] → another session ·" in s.console.export_text()
