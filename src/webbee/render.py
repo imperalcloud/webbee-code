@@ -88,6 +88,28 @@ _KERNEL_TOOL = MappingProxyType({"vault_log_read": ("📖", "Read Output"), "rea
                 "live_sessions": ("🧠", "Sessions"), "message_session": ("✉️", "Message")})
 
 
+def call_subject(tool: str, args) -> str:
+    """PURE. What a call is ABOUT, for its line: the path, pattern or command it names; for a page of a stored
+    output -- which output and which part of it (the owner, 2026-11-27: a long output read back in pages showed
+    as the same line again and again, and looked like a loop); for any other call that names none of those, its
+    own short arguments. Never empty when the call said anything."""
+    a = args if isinstance(args, dict) else {}
+    named = a.get("path") or a.get("pattern") or a.get("command")
+    if named:
+        return str(named)
+    if (tool or "").strip().split("·")[-1] == "vault_log_read" and a.get("ref"):
+        name = str(a.get("ref")).rsplit("/", 1)[-1]
+        try:
+            start = int(a.get("offset") or 0)
+        except (TypeError, ValueError):
+            start = 0
+        part = f" from char {start}" if start else " from its start"
+        return name + part + (f" · lines with {str(a.get('grep'))!r}" if a.get("grep") else "")
+    shown = [f"{k}={v}" for k, v in a.items()
+             if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip()]
+    return " ".join(shown[:4])
+
+
 def _tool_meta(tool: str, args=None) -> tuple[str, str]:
     t = (tool or "").strip()
     if t in ("bash", "shell", "run_command") and isinstance(args, dict):
@@ -693,7 +715,7 @@ class RichSink:
     # ---- TurnSink -------------------------------------------------------
     def tool_start(self, tool: str, args: dict) -> None:
         self._tools += 1
-        arg = args.get("path") or args.get("pattern") or args.get("command") or ""
+        arg = call_subject(tool, args)
         self._pending = (tool, str(arg))
         w = self.console.width
         self._current = f"{tool} {str(arg)[:trunc(w, 0.3, 40)]}".strip()

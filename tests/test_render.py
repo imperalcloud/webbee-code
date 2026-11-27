@@ -1234,3 +1234,25 @@ def test_the_terminal_shows_what_its_own_agent_sent_whole_and_says_when_it_was_n
     s.agent_sent("", "x\x1b[31m", ok=True)
     assert "[agent] → another session · 1 chars" in s.console.export_text() or \
         "[agent] → another session ·" in s.console.export_text()
+
+
+def test_a_call_says_what_it_is_about_and_a_page_of_an_output_says_which_part():
+    """Owner 2026-11-27: an output read back in pages showed as the same line again and again."""
+    from webbee.frames import _summary_from_facts
+    from webbee.render import call_subject
+    assert call_subject("bash", {"command": "make test"}) == "make test"
+    assert call_subject("read_file", {"path": "a.py", "offset": 3}) == "a.py"
+    ref = "vault://logs/marathon-x/call_42.log"
+    assert call_subject("vault_log_read", {"ref": ref}) == "call_42.log from its start"
+    assert call_subject("vault_log_read", {"ref": ref, "offset": 12000, "limit": 6000}) == "call_42.log from char 12000"
+    assert call_subject("vault_log_read", {"ref": ref, "grep": "FAILED"}) == "call_42.log from its start · lines with 'FAILED'"
+    assert call_subject("recall", {"ref": "U3", "n": 2, "deep": True, "x": {"a": 1}}) == "ref=U3 n=2"
+    assert call_subject("message_session", {"conversation": "mcp-x", "text": "hi"}) == "conversation=mcp-x text=hi"
+    assert call_subject("live_sessions", {}) == "" and call_subject("x", None) == ""
+    assert _summary_from_facts({"count": 6000, "entity_kind": "char", "offset": 12000, "total": 91234}) == \
+        "chars 12000-18000 of 91234"
+    assert _summary_from_facts({"count": 40, "entity_kind": "char", "offset": 0}) == "chars 0-40"
+    assert _summary_from_facts({"count": 3, "entity_kind": "file"}) == "3 files"         # every other step as before
+    s = _sink()
+    s.tool_start("vault_log_read", {"ref": ref, "offset": 6000})
+    assert s._pending == ("vault_log_read", "call_42.log from char 6000")

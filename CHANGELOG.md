@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.32
+
+* A step says what it is about. A call that names no file, pattern or command - a read of a stored output, a
+  recall, a message, a job - shows its own short arguments instead of an empty line.
+* A long command output read back in pages no longer looks like a loop: each page says which output it is and
+  where it starts, and its result says which part came back ("chars 6000-12000 of 91234"). With the kernel
+  release that shows these reads as steps.
+
 ## 0.7.31
 
 * A message from another session that starts a turn on an idle terminal is shown as every agent message is:

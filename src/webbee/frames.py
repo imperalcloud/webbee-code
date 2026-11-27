@@ -41,6 +41,14 @@ def _summary_from_facts(facts: dict) -> str:
     count = facts.get("count")
     if count is None:
         return ""
+    if facts.get("offset") is not None and str(facts.get("entity_kind") or "") == "char":
+        # a page of a stored output: WHICH part of it -- the same page read twice shows the same numbers twice
+        try:
+            start, got = int(facts.get("offset") or 0), int(count)
+            whole = facts.get("total")
+            return f"chars {start}-{start + got}" + (f" of {int(whole)}" if whole is not None else "")
+        except (TypeError, ValueError):
+            pass
     kind = str(facts.get("entity_kind") or "").strip()
     if not kind:
         return str(count)
