@@ -241,6 +241,18 @@ def _format_sessions_plain(rows) -> str:
     return "\n".join(out)
 
 
+def _show_remote_line(sink, surface: str, text: str, iid: str = "") -> None:
+    """The line that starts a turn this terminal picked up while idle. A person's instruction from another surface
+    is shown as theirs (``you [telegram]: ...``). An AGENT'S message -- or a fact of the kernel -- is not the
+    person's: it gets the block every agent message gets, whole, under a head that says how long it is (the
+    owner, 2026-11-27: it was printed as ``you [agent]: ...`` on one line, as if the person had written it)."""
+    say = getattr(sink, "agent_message", None)
+    if surface == "agent" and say is not None:
+        say(" ".join(str(text).split())[:200], iid, whole=str(text), who="another session")
+        return
+    sink.foreign_turn(surface, "user", text)
+
+
 def _say(slot: SessionSlot, msg: str) -> None:
     """Reply into `slot`'s own surface regardless of whether it has a live
     sink -- a REAL session slot's `sink.note(msg)`, unchanged; a sink-less
@@ -1712,7 +1724,7 @@ async def run_repl(cfg, mode: str = "default", *, once: bool = False, sink=None,
         slot should this remote instruction land in" question to answer
         (was: `_steer_target(slots)`'s active-or-first-session guess, needed
         only because one process-wide poller had to pick SOME slot)."""
-        slot.sink.foreign_turn(surface, "user", text)
+        _show_remote_line(slot.sink, surface, text, steer_iid)
         await _run_turn_on(slot, text, surface=surface, steer_iid=steer_iid)
 
     async def _attach_turn_on(slot: SessionSlot, attach_info: dict) -> None:

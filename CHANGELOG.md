@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.31
+
+* A message from another session that starts a turn on an idle terminal is shown as every agent message is:
+  whole, under a head line with its length. It was printed on one line as `you [agent]: ...`, as if you had
+  written it.
+
 ## 0.7.30
 
 * You see what Webbee herself sends. A message she writes to another session is shown in her own terminal: to

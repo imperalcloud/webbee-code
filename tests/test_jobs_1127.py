@@ -318,3 +318,26 @@ def test_a_home_that_cannot_hold_jobs_still_runs_the_command(home, tmp_path, mon
     ex = LocalToolExecutor(str(tmp_path))
     got = ex.run("bash", {"command": "echo still; [[ 1 == 1 ]] && exit 4"})
     assert (got["ok"], got["exit_code"], got["content"]) == (False, 4, "still\n\n[exit 4]") and ex.held_running() == []
+
+
+def test_an_agents_message_that_starts_an_idle_terminals_turn_is_never_shown_as_the_persons_line():
+    """The owner, 2026-11-27: is an incoming message of another agent seen whole, with its length? In a running
+    turn it was; one that STARTED a turn on an idle terminal was printed as ``you [agent]: ...``."""
+    from webbee.repl import _show_remote_line
+
+    class _Sink:
+        def __init__(self):
+            self.calls = []
+
+        def agent_message(self, text, iid="", whole="", who=""):
+            self.calls.append(("agent", text, iid, whole, who))
+
+        def foreign_turn(self, surface, role, text):
+            self.calls.append(("foreign", surface, role, text))
+    s = _Sink()
+    body = "[MESSAGE FROM ANOTHER AGENT -- Webbee, conversation=marathon-x]\nline one\nline two " + "z" * 400
+    _show_remote_line(s, "agent", body, "agent.m9")
+    kind, first, iid, whole, who = s.calls[0]
+    assert (kind, iid, whole, who) == ("agent", "agent.m9", body, "another session") and len(first) == 200
+    _show_remote_line(s, "telegram", "deploy it", "t1")
+    assert s.calls[1] == ("foreign", "telegram", "user", "deploy it")          # the person's own words stay theirs
