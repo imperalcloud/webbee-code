@@ -186,6 +186,7 @@ class _Agent:
         from webbee.session import AgentSession
         self._executor, self.session_id, self.calls, self._answers = executor, SID, [], list(answers)
         self.background_running = AgentSession.background_running.__get__(self)
+        self._adopt = AgentSession._adopt.__get__(self)
 
     async def _job_door(self, sid, door, body):
         self.calls.append((sid, door, body))
@@ -465,3 +466,46 @@ def test_the_watch_hands_the_strip_every_job_with_its_state(home):
     assert [(r["n"], r["id"], r["title"], r["state"]) for r in rows] == [(1, "j1", "quick", "done"), (2, "j2", "nap", "running")]
     assert rows[0]["ended_at"] > 0 and rows[1]["ended_at"] == 0.0 and rows[1]["started"] > 0
     jobs.cancel(SID, 2, home)
+
+
+def test_a_command_that_outlasts_its_wait_runs_on_as_a_job_when_the_kernel_takes_it(home, tmp_path):
+    """The owner, 2026-11-27: she must use child processes for waiting and tests. A timeout used to kill the run."""
+    from webbee.tools import LocalToolExecutor
+    ex = LocalToolExecutor(str(tmp_path))
+    taken = []
+
+    def keep(held):
+        jobs.link(held, SID, 7, "long")
+        jobs.release(held, 7)
+        taken.append(held)
+        return True
+    ex.keep_on_timeout = keep
+    out = ex.run("bash", {"command": "echo begun; sleep 30", "timeout": 1})
+    assert out["ok"] is False and out["backgrounded"] is True and out["job"] == "j7" and "timed_out" not in out
+    assert out["content"].startswith("[STILL RUNNING AFTER 1 s -- NOT STOPPED, NOT FINISHED") and "begun" in out["content"]
+    assert "go on with what does not need its result" in out["content"]
+    assert taken[0].proc.poll() is None and jobs.state_of(SID, 7, home)["state"] == sj.RUNNING   # the work lives
+    jobs.cancel(SID, 7, home)
+    ex.keep_on_timeout = lambda held: False                        # the kernel did not take it: stopped, as before
+    slow = ex.run("bash", {"command": "echo x; sleep 30", "timeout": 1})
+    assert slow["timed_out"] and "backgrounded" not in slow
+
+
+def test_the_session_hands_the_executor_a_way_to_keep_a_timed_out_command(home, tmp_path):
+    from webbee.session import AgentSession
+    from webbee.tools import LocalToolExecutor
+    ex = LocalToolExecutor(str(tmp_path))
+    agent = _Agent(ex, [{"ok": True, "n": 5, "dir": sj.job_dir(SID, 5)}, None])
+    agent.keep_on_timeout = AgentSession.keep_on_timeout.__get__(agent)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        ex.keep_on_timeout = agent.keep_on_timeout(loop)
+        first = await asyncio.to_thread(ex.run, "bash", {"command": "sleep 30", "timeout": 1})
+        second = await asyncio.to_thread(ex.run, "bash", {"command": "sleep 30", "timeout": 1})
+        return first, second
+    first, second = asyncio.run(scenario())
+    assert first.get("job") == "j5" and first["backgrounded"] and jobs.state_of(SID, 5, home)["state"] == sj.RUNNING
+    assert second.get("timed_out") is True                         # the kernel could not be reached: stopped
+    assert agent.keep_on_timeout(None)(object()) is False          # no loop: nothing is promised
+    jobs.cancel(SID, 5, home)

@@ -159,15 +159,19 @@ def _whole_log(held) -> bytes:
         return b""
 
 
-def _backgrounded(held, out: str) -> dict:
-    """The result of a command the person sent to the background while the agent's call was waiting for it. It did
-    NOT finish: the result says so first and is never ``ok`` -- an unfinished command is no proof of anything."""
+def _backgrounded(held, out: str, waited: int = 0) -> dict:
+    """The result of a command that went to the background while the agent's call was waiting for it -- sent there
+    by the person, or (``waited``: the call's own bound, in seconds) because it outlasted the wait. It did NOT
+    finish: the result says so first and is never ``ok`` -- an unfinished command is no proof of anything."""
     from imperal_sdk import session_jobs as sj
     jid = sj.job_id(held.job)
-    head = (f"[SENT TO THE BACKGROUND BY THE PERSON -- NOT FINISHED: this command runs on as job {jid} of this "
+    why = (f"STILL RUNNING AFTER {int(waited)} s -- NOT STOPPED, NOT FINISHED" if waited
+           else "SENT TO THE BACKGROUND BY THE PERSON -- NOT FINISHED")
+    head = (f"[{why}: this command runs on as job {jid} of this "
             f"session on the person's own machine; its outcome is not known yet. job_status(id=\"{jid}\") reads "
             f"the end of its output, job_cancel(id=\"{jid}\") ends it, and this session is told when it ends. "
-            "Do not run it again.]")
+            "Do not run it again"
+            + ("; go on with what does not need its result." if waited else ".") + "]")
     full = len(out)
     out = _truncated(out, _BASH_OUT_CAP)
     return {"ok": False, "content": head + ("\nits output until now:\n" + out if out.strip() else ""),
@@ -401,6 +405,9 @@ class LocalToolExecutor:
         # the commands this terminal WAITS for, by their process (webbee.jobs.Held): the person can send one to the
         # background -- the wait ends, the command runs on as a job
         self._held: dict = {}
+        # (held) -> bool, set by the session: a command that outlasts its wait becomes a job instead of being
+        # stopped; None (no session behind this executor): it is stopped, as before
+        self.keep_on_timeout = None
         # the surface's ear for a running command's output (the newest line, as it is printed); None: no one listens
         self.on_output = None
 
@@ -1074,6 +1081,10 @@ class LocalToolExecutor:
                 tell = self.on_output
                 raw, how = jobs.follow(held, timeout, (lambda piece: tell(_last_line(piece))) if tell else None)
                 timed_out = how == "timeout"
+                if timed_out and self.keep_on_timeout is not None and self.keep_on_timeout(held):
+                    # the wait is over, the work is not: it runs on as a job (2026-11-27 -- a timeout used to
+                    # kill a test run minutes before its end, and the next call started it from nothing)
+                    return _backgrounded(held, _decoded(raw or b""), waited=timeout)
                 if timed_out:
                     _stop_group(proc, posix)
                     raw = _whole_log(held) or raw

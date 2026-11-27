@@ -427,40 +427,56 @@ class AgentSession:
         (``SessionJobAdoptWorkflow``), its run folder takes the job's name, and the wait ends -- the process is
         not touched. Returns one line per command, saying what happened; [] when nothing is being waited for.
         A command the kernel did not take stays in the foreground, said with the reason."""
+        executor = self._executor
+        held = executor.held_running() if executor is not None and hasattr(executor, "held_running") else []
+        return [(await self._adopt(h))[1] for h in held]
+
+    async def _adopt(self, h) -> tuple:
+        """One waited command becomes a job of the session: ``(moved?, the line that says what happened)``. The
+        kernel gives the number and writes the record; the run folder takes the job's name; the wait ends. A
+        command the kernel did not take stays where it is."""
         from imperal_sdk import session_jobs as sj
 
         from webbee import jobs
-        executor, sid = self._executor, self.session_id
-        held = executor.held_running() if executor is not None and hasattr(executor, "held_running") else []
-        said = []
-        for h in held:
-            title = " ".join(h.command.split())[:sj.TITLE_CHARS]
-            got = await self._job_door(sid, "adopt", {"command": h.command[:2000], "title": title,
-                                                      "started_ts": h.started})
+        sid = self.session_id
+        title = " ".join(h.command.split())[:sj.TITLE_CHARS]
+        got = await self._job_door(sid, "adopt", {"command": h.command[:2000], "title": title,
+                                                  "started_ts": h.started})
+        try:
+            n = int((got or {}).get("n") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        # the folder is the one the SDK names for this session and number -- what the answer says of it is
+        # compared, never used
+        if not (got or {}).get("ok") or n < 1 or (got or {}).get("dir") != sj.job_dir(sid, n):
+            return False, ("not sent to the background: "
+                           + (str((got or {}).get("error") or "the kernel gave it no job number")
+                              if got else "the kernel could not be reached") + f" -- `{title}` stays in front")
+        if h.proc.poll() is not None:
+            return False, f"`{title}` ended before it was moved: its result is the call's own"
+        try:
+            jobs.link(h, sid, n, title)
+        except OSError as exc:
+            return False, (f"not sent to the background: {type(exc).__name__} naming job {sj.job_id(n)} on this "
+                           f"machine -- `{title}` stays in front")
+        jobs.release(h, n)
+        return True, (f"{sj.job_id(n)} in the background: `{title}` -- /jobs lists, /job {n} shows its output, "
+                      f"/job {n} cancel ends it")
+
+    def keep_on_timeout(self, loop):
+        """What the executor does with a command that outlasts its wait: ``(held) -> bool``, run from the
+        executor's own thread. The command is not stopped -- it becomes a job (``_adopt``, on the session's
+        loop); False when the kernel did not take it in time, and the executor then stops it as before."""
+        import asyncio as _asyncio
+
+        def keep(held) -> bool:
+            if loop is None or loop.is_closed() or not self.session_id:
+                return False
             try:
-                n = int((got or {}).get("n") or 0)
-            except (TypeError, ValueError):
-                n = 0
-            # the folder is the one the SDK names for this session and number -- what the answer says of it is
-            # compared, never used
-            if not (got or {}).get("ok") or n < 1 or (got or {}).get("dir") != sj.job_dir(sid, n):
-                said.append("not sent to the background: "
-                            + (str((got or {}).get("error") or "the kernel gave it no job number")
-                               if got else "the kernel could not be reached") + f" -- `{title}` stays in front")
-                continue
-            if h.proc.poll() is not None:
-                said.append(f"`{title}` ended before it was moved: its result is the call's own")
-                continue
-            try:
-                jobs.link(h, sid, n, title)
-            except OSError as exc:
-                said.append(f"not sent to the background: {type(exc).__name__} naming job {sj.job_id(n)} on this "
-                            f"machine -- `{title}` stays in front")
-                continue
-            jobs.release(h, n)
-            said.append(f"{sj.job_id(n)} in the background: `{title}` -- /jobs lists, /job {n} shows its output, "
-                        f"/job {n} cancel ends it")
-        return said
+                return bool(_asyncio.run_coroutine_threadsafe(self._adopt(held), loop).result(timeout=30)[0])
+            except Exception:
+                return False
+        return keep
 
     async def post_mode(self, mode: str) -> bool:
         """Tell the running session its new coding mode (the kernel's ``set_mode``): autopilot is asked nothing
@@ -631,6 +647,10 @@ class AgentSession:
         _own_frames = False  # -> True the instant ANY non-foreign frame lands
         from webbee.tools import _WRITE_TIER, PLAN_SAFE_TOOLS
         self._executor = executor           # stop() kills what it still runs
+        try:                                # a command that outlasts its wait runs on as a job, never killed
+            executor.keep_on_timeout = self.keep_on_timeout(asyncio.get_running_loop())
+        except Exception:
+            pass
         store = _ResultStore(session_id, task_id)
         loop = asyncio.get_running_loop()
         # a running local command is seen live: the executor names each newest line of its output from its worker

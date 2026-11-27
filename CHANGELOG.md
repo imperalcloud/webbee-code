@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.34
+
+* A command that outlasts its wait is no longer killed. When the time Webbee gave a command runs out, the command
+  runs on as a background job of the session and she is told its number, so she goes on with other work and
+  hears of its end. A test run cut a minute before its end used to start again from nothing. If the kernel cannot
+  take the job, the command is stopped as before.
+
 ## 0.7.33
 
 * The background strip. A narrow panel above the input shows the session's jobs on this machine: each running
