@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.28
+
+* You see what she reads. A shell command that only reads is listed as "Read (shell)", a check as "Check" - by
+  what the call itself says it does, not by the word "shell"; the kernel's own reads are named too ("Read Output",
+  "Read Code", "Recall", "Read State").
+* A message from another session is shown whole during a run: a head line with who wrote and how long it is, then
+  the message as it was written (with the kernel release that carries it whole; an older kernel shows the first
+  words as before).
+* The envelope of such a message keeps a clear gap before the text in every terminal.
+* Messages between sessions arrive whole in other shells too (imperal-mcp 0.9.23, raised here).
+
 ## 0.7.27
 
 * The links of a big folder are resolved in seconds (imperal-sdk 6.10.1, raised here): the table was built in time

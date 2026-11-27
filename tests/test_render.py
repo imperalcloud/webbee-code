@@ -1091,6 +1091,43 @@ def test_an_agents_message_prints_one_kept_line_once():
     assert s.console.export_text().count("[agent] Claude (imperal-mcp): stop") == 1
 
 
+def test_an_agents_message_is_shown_whole_under_a_head_that_names_who_and_how_long():
+    """Owner 2026-11-27: "in the client during a marathon I want to see the full messages from other sessions";
+    the kernel's row carried 200 characters of it."""
+    s = _sink()
+    whole = "Первая строка с фактом 25754.\n" + "подробности; " * 40 + "\nПОСЛЕДНЕЕ СЛОВО"
+    s.agent_message("Claude (imperal-mcp): Первая строка", "agent.m2", whole=whole, who="Claude (imperal-mcp)")
+    s.agent_message("Claude (imperal-mcp): Первая строка", "agent.m2", whole=whole, who="Claude (imperal-mcp)")
+    out = s.console.export_text()
+    assert out.count("ПОСЛЕДНЕЕ СЛОВО") == 1 and "Первая строка с фактом 25754." in out      # whole, once
+    assert f"[agent] Claude (imperal-mcp) · {len(whole)} chars" in out
+    assert out.count("подробности;") == 40                                                  # nothing dropped
+
+
+def test_the_mark_of_an_agents_message_keeps_a_clear_gap_after_the_envelope():
+    from webbee import render
+    assert render.AGENT_MARK.startswith("\u2709\ufe0f  ") and render.AGENT_MARK.endswith("[agent] ")
+    s = _sink()
+    s.agent_message("Webbee: hi", "agent.m3")
+    assert "\u2709\ufe0f  [agent] Webbee: hi" in s.console.export_text()
+
+
+def test_a_shell_read_and_a_kernel_read_are_named_for_what_they_read():
+    """Owner 2026-11-27: "I see only that she says she reads, whether she does I do not know"."""
+    from webbee.render import _tool_meta
+    assert _tool_meta("bash", {"command": "sed -n 1,40p a.py", "effect": {"kind": "read"}}) == ("📖", "Read (shell)")
+    assert _tool_meta("bash", {"command": "pytest", "effect": {"kind": "check"}}) == ("🧪", "Check")
+    assert _tool_meta("bash", {"command": "rm x", "effect": {"kind": "change"}}) == ("⚡", "Shell Exec")
+    assert _tool_meta("bash", {"command": "ls"}) == ("⚡", "Shell Exec") and _tool_meta("bash") == ("⚡", "Shell Exec")
+    assert _tool_meta("vault_log_read") == ("📖", "Read Output") and _tool_meta("read_symbol") == ("📖", "Read Code")
+    assert all(len(name) <= 12 for _i, name in list(render_names()))
+
+
+def render_names():
+    from webbee import render
+    return list(render._SHELL_KIND.values()) + list(render._KERNEL_TOOL.values())
+
+
 # -- a thinking frame that names its parts (kernel thought_frame: kind, say, lines) --------------------------------
 
 def test_thinking_by_parts_shows_the_words_for_the_person_and_the_protocol_small():

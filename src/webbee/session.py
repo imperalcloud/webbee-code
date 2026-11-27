@@ -834,7 +834,11 @@ class AgentSession:
                     _say = getattr(sink, "agent_message", None)
                     if ftype == "task_queued" and _origin == "agent" and _say is not None:
                         try:
-                            _say(str(frame.get("text", "") or ""), str(frame.get("steer_iid", "") or ""))
+                            if frame.get("whole"):     # a kernel that sends the message as it was written
+                                _say(str(frame.get("text", "") or ""), str(frame.get("steer_iid", "") or ""),
+                                     whole=str(frame.get("whole") or ""), who=str(frame.get("who") or ""))
+                            else:
+                                _say(str(frame.get("text", "") or ""), str(frame.get("steer_iid", "") or ""))
                         except Exception:
                             pass
 

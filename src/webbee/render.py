@@ -76,8 +76,26 @@ def _clean(s) -> str:
 _ICON = {"read_file": "📖", "grep_code": "🔎", "glob": "🗂️ ", "write_file": "✏️",
          "edit_file": "🔧", "shell": "⚡", "bash": "⚡", "web_search": "🌐 ", "read_url": "📄",
          "view_image": "🖼️"}
-def _tool_meta(tool: str) -> tuple[str, str]:
+from types import MappingProxyType   # noqa: E402 -- read-only tables: no module state a tab could change
+
+# what a shell command DID, as its call says it (the tool contract's ``effect.kind``): a read is shown as a read --
+# the person sees what she reads, not only that a shell ran (owner 2026-11-27: "I see only that she says she reads")
+_SHELL_KIND = MappingProxyType({"read": ("📖", "Read (shell)"), "check": ("🧪", "Check"), "change": ("⚡", "Shell Exec")})
+# the kernel's own reads, named for what they read
+_KERNEL_TOOL = MappingProxyType({"vault_log_read": ("📖", "Read Output"), "read_symbol": ("📖", "Read Code"),
+                "outline": ("📖", "Read Code"), "recall": ("🧠", "Recall"), "recall_context": ("🧠", "Recall"),
+                "state_lens": ("🧠", "Read State"), "search_history": ("🔎", "Find History"),
+                "live_sessions": ("🧠", "Sessions"), "message_session": ("✉️", "Message")})
+
+
+def _tool_meta(tool: str, args=None) -> tuple[str, str]:
     t = (tool or "").strip()
+    if t in ("bash", "shell", "run_command") and isinstance(args, dict):
+        kind = str((args.get("effect") or {}).get("kind") or "") if isinstance(args.get("effect"), dict) else ""
+        if kind in _SHELL_KIND:
+            return _SHELL_KIND[kind]
+    if t in _KERNEL_TOOL:
+        return _KERNEL_TOOL[t]
     if t.startswith("conn-ssh"):
         return "🌐", "SSH Exec"
     if t in ("read_file", "read_document"):
@@ -104,6 +122,9 @@ def _tool_meta(tool: str) -> tuple[str, str]:
 
 
 _BEE = "yellow"       # bee-yellow brand accent — logo / 🐝 / notes / busy dot ONLY
+# the mark of a message from another session. The envelope takes two cells in most terminals while the layout counts
+# one, so the glyph ran into the word after it: the emoji form and two spaces keep a clear gap in every terminal.
+AGENT_MARK = "✉️  [agent] "
 _ACCENT = "cyan"      # interactive chrome ONLY — live caret / mode / panel url
 
 def _tier_thinking_style(tier: str) -> str:
@@ -524,13 +545,15 @@ class RichSink:
                                     "iid": iid})
         self._nudge()
 
-    def agent_message(self, text: str, iid: str = "") -> None:
+    def agent_message(self, text: str, iid: str = "", whole: str = "", who: str = "") -> None:
         """Another agent's message landed in the RUNNING session (a kernel
-        `task_queued` frame with origin `agent`): ONE line in the scrollback
-        that stays -- the panel row leaves the moment the turn takes the
+        `task_queued` frame with origin `agent`): it stays in the scrollback
+        -- the panel row leaves the moment the turn takes the
         message (2026-10-30: the owner never saw Claude's follow-ups; a
         Telegram steer showed, an agent's did not). Display-only; a frame
-        delivered twice (publish retry / SSE resume) prints once."""
+        delivered twice (publish retry / SSE resume) prints once.
+        ``whole`` (2026-11-27): the message as it was written -- shown in full under a head line that names who
+        wrote and how long it is; a kernel that sends only the first words (``text``) is shown as before."""
         iid = str(iid or "")
         seen = self.__dict__.setdefault("_agent_seen", set())
         if iid and iid in seen:
@@ -538,10 +561,21 @@ class RichSink:
         if iid:
             seen.add(iid)
         t_now = time.strftime("%H:%M:%S")
-        self.console.print(_pad(Text.assemble(
-            (f"{t_now} ", "dim grey50"),
-            ("✉ [agent] " + _clean(str(text or "")), f"bold {_BEE}"),
-        )))
+        body = _clean(str(whole or "")).strip()
+        if not body:
+            self.console.print(_pad(Text.assemble(
+                (f"{t_now} ", "dim grey50"),
+                (AGENT_MARK + _clean(str(text or "")), f"bold {_BEE}"),
+            )))
+        else:
+            name = _clean(str(who or "")).strip() or "agent"
+            block = Text.assemble((f"{t_now} ", "dim grey50"),
+                                  (f"{AGENT_MARK}{name} · {len(body)} chars", f"bold {_BEE}"))
+            for row in body.splitlines():
+                block.append(chr(10))
+                block.append("   │ ", style="dim grey50")
+                block.append(row)
+            self.console.print(_pad(block))
         self._nudge()
 
     def remote_dequeued(self, origin: str, iid: str) -> None:
@@ -668,7 +702,7 @@ class RichSink:
     def tool_result(self, tool: str, ok: bool, summary: str, detail=None) -> None:
         # detail: {"args", "result"} of an action the client ran itself -- a click on the line opens it whole
         _tool, arg = self._pending if self._pending[0] else (tool, "")
-        icon, category = _tool_meta(_tool)
+        icon, category = _tool_meta(_tool, detail.get("args") if isinstance(detail, dict) else None)
         mark = "✓" if ok else "✗"
         mark_color = "bold green" if ok else "bold red"
         w = self.console.width
